@@ -1,0 +1,6 @@
+{% if notice %}
+<div class="notice notice-{{ notice.kind }}" role="status">
+  <span class="notice-dot" aria-hidden="true"></span>
+  <p>{{ notice.text }}</p>
+</div>
+{% endif %}

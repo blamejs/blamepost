@@ -1,0 +1,99 @@
+title = "blamepost gitleaks config"
+
+# Inherit gitleaks' default ruleset (cloud provider keys, GitHub tokens,
+# npm tokens, private-key PEM framing, generic high-entropy strings) and
+# add the allowlists this repository needs below. New rules CAN be added
+# here when the server gains a credential shape the scan should catch;
+# for now the defaults are the policy.
+[extend]
+useDefault = true
+
+# gitleaks 8.21+ requires the [[allowlists]] (plural) form; the singular
+# [allowlist] is deprecated and rejected when [[allowlists]] is also
+# present. Each [[allowlists]] block is independent, so a finding is
+# suppressed if ANY block matches.
+
+[[allowlists]]
+description = "Vendored framework documentation examples, test tree, generated SBOMs"
+paths = [
+  # What the vendored framework actually trips is its own reference
+  # documentation. Every match sits inside a comment block: sample JWTs in
+  # the auth guard's @example blocks, a "-----BEGIN PRIVATE KEY----- ..."
+  # placeholder naming a parameter in the PGP signing surface, and a
+  # `{ privateKey, x25519PrivateKey }` destructuring pattern describing a
+  # KEM argument. None is key material. Provenance for these bytes is the
+  # vendor manifest's SHA-256 pins and SECURITY.md; the tree is read-only
+  # here, so a finding in it is not actionable in this repository either.
+  '''lib/vendor/.*''',
+  # The test tree is deliberately NOT listed here. It used to be, on the
+  # reasoning that it mints its key material at run time and so checks no
+  # literal secret in, with the entries kept as a precaution. That
+  # argument defeats itself: if nothing is checked in, the exemption buys
+  # nothing, and if something ever is, the exemption is exactly what stops
+  # anyone finding it. It covered around 130 files and grew with every
+  # test added, which makes it a switched-off gate in the place most
+  # likely to collect a pasted credential. What actually tripped the
+  # scanner there was one Ed25519 public key, and that is handled below
+  # by its bytes rather than by its location.
+  # Generated SBOMs carry vendored component versions, not credentials.
+  # Built at release time and bundled into the tarball rather than
+  # committed, so only a filesystem scan can reach them.
+  '''sbom\.cdx\.json''',
+  '''sbom\.vendored\.cdx\.json''',
+]
+
+[[allowlists]]
+description = "DNS record and credential-shaped placeholders in operator docs"
+# Documentation shows real record syntax against RFC 2606 reserved
+# domains. DKIM public keys, MTA-STS policy ids and TLS-RPT endpoints are
+# base64 or opaque-token shaped and score above the generic-api-key
+# entropy threshold, but a DKIM *public* key is published in DNS by
+# design. It is the opposite of a secret.
+regexes = [
+  # DKIM TXT record body: "v=DKIM1; k=<alg>; p=<base64 public key>".
+  # The p= tag is the published public key.
+  '''v=DKIM1;[^"]*p=[A-Za-z0-9+/=]+''',
+  # MTA-STS policy id rotates on every policy change and is a public
+  # cache key, not a credential.
+  '''v=STSv1;\s*id=[A-Za-z0-9]+''',
+  # Bearer-token templates in API documentation.
+  '''Authorization: Bearer <[A-Za-z0-9_-]+>''',
+  # Obviously-fake example passphrases in operator docs and sample config.
+  '''hunter2-?pass-?[A-Za-z0-9-]+''',
+  '''blamepost-(?:test-|example-)?passphrase[A-Za-z0-9-]*''',
+  # JWT compact-serialization shape: base64url header, dot, payload,
+  # dot, signature. Session and API-token fixtures legitimately embed
+  # JWT-shaped strings. Real signing keys never appear in compact
+  # serialization; they are PEM, DER or PKCS#8.
+  '''eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*''',
+  # Source files split JWT fixtures across string literals for line
+  # length, so gitleaks sees individual base64url segments.
+  '''eyJ[A-Za-z0-9_-]{20,}''',
+  # A bare Ed25519 public key in DER, which is what a DKIM selector
+  # publishes and what the selector fixtures carry outside a TXT record.
+  # `MCowBQYDK2VwAyEA` is the RFC 8410 SubjectPublicKeyInfo prefix: a
+  # SEQUENCE, the 1.3.101.112 algorithm identifier, then a 32-byte BIT
+  # STRING. This is anchored on the structure rather than on a location,
+  # and that is the whole point of it. An Ed25519 PRIVATE key in PKCS#8
+  # begins `MC4CAQAwBQYDK2VwBCIEIA`, a different prefix for a different
+  # structure, so this pattern cannot match one by construction rather
+  # than by anybody's assurance. Widen it only with the same property.
+  '''MCowBQYDK2VwAyEA[A-Za-z0-9+/=]+''',
+]
+
+[[allowlists]]
+description = "Camel-case identifier names that trip generic-api-key entropy"
+# Public parameter and property names on the DKIM and vault surfaces are
+# long camelCase words with no separators, which scores above the
+# generic-api-key entropy threshold. gitleaks reports the bare identifier
+# as the "secret"; stopwords match the extracted string literally and
+# suppress the finding.
+stopwords = [
+  "dkimPrivateKey",
+  "dkimPublicKey",
+  "mldsaPrivateKey",
+  "mldsaPublicKey",
+  "ed25519PrivateKey",
+  "ed25519PublicKey",
+  "vaultPassphrase",
+]

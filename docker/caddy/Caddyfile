@@ -1,0 +1,50 @@
+# Optional HTTPS terminator for the blamepost web UI.
+#
+# Only needed with `docker compose --profile tls up -d`. blamepost serves
+# the same pages on its own HTTPS port from the certificate it was given,
+# so reach for this when you want Caddy to hold and renew the public
+# certificate for the web interface, when you already standardise on
+# Caddy, or when something else on the host needs to share ports 80 and
+# 443.
+#
+# Set BLAMEPOST_WEB_HOSTNAME in your .env to the name this UI answers on,
+# for example mail.example.com. compose.yml passes it into this container,
+# and Caddy obtains and renews a certificate for that name on its own.
+#
+# blamepost obtains no certificate of its own. Every listener it runs
+# requires TLS and none has a plaintext mode, so it refuses to start
+# until BLAMEPOST_TLS_CERT and BLAMEPOST_TLS_KEY both point at files on
+# disk, and that holds whether or not this profile is up. The certificate
+# Caddy gets is Caddy's, kept on Caddy's own volume; supply blamepost's
+# pair the way you would without this profile.
+
+{$BLAMEPOST_WEB_HOSTNAME} {
+	encode zstd gzip
+
+	# The application sets its own security headers. It composes the
+	# framework's middleware and knows which ones apply per route. Adding
+	# a second, coarser set here would silently override the per-route
+	# policy. The one header worth asserting at the edge is HSTS, because
+	# it describes the transport this terminator owns.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+	}
+
+	# The port the application binds, which compose sets from one value so
+	# the published port, the health probe and this upstream cannot drift
+	# apart. The default here matches the application's own default, so a
+	# stack that never sets it still resolves to the same port.
+	# X-Forwarded-For, X-Forwarded-Proto and X-Forwarded-Host are set by
+	# the proxy already. Restating them here changes nothing, and Caddy
+	# says so as a warning on every start, which is how an operator
+	# learns to read past the warnings that do matter.
+	reverse_proxy blamepost:{$BLAMEPOST_HTTP_PORT:8080} {
+		# Fail fast rather than queueing behind a wedged upstream. The
+		# health path is the same readiness endpoint the container
+		# healthcheck uses, so a blamepost instance that booted without
+		# binding its listeners is taken out of rotation here too.
+		health_uri /healthz
+		health_interval 30s
+		health_timeout 5s
+	}
+}

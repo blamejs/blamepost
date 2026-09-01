@@ -1,0 +1,95 @@
+# Vendored dependencies are treated as binary so git never rewrites line
+# endings between Windows and Linux checkouts. The vendor manifest pins
+# SHA-256 hashes on the on-disk content; CRLF/LF conversion would break
+# the hash on the off-platform checkout.
+lib/vendor/** -text binary
+
+# Shell scripts MUST stay LF. They run inside Linux containers such as the
+# release image and ClusterFuzzLite, where Bash chokes on CRLF with
+# "$'\r': command not found". Without this rule, a Windows checkout's CRLF
+# rewrite ships into the Docker copy and the script fails at line 1.
+*.sh text eol=lf
+
+# The release and gate tooling. .editorconfig sets LF for the whole tree, but
+# an editor that ignores it, or a contributor with core.autocrlf left on,
+# rewrites a whole file on save and buries the real change in a full-file diff.
+# Pinning them here settles it at the git layer instead of per workstation.
+scripts/*.js text eol=lf
+
+# Config files mounted into the optional add-on containers. They are read
+# by Linux services, and a CRLF rewrite on a Windows checkout ships broken
+# configuration into the mount. compose.yml mounts docker/rspamd as a whole
+# directory, so the directory is pinned rather than a list of extensions:
+# every file under it reaches the container whatever it is named, and a
+# pattern per extension leaves the next one to fall through. The Caddy mount
+# names a single file, so that one is pinned as a file.
+docker/rspamd/** text eol=lf
+docker/**/*.conf text eol=lf
+docker/caddy/Caddyfile text eol=lf
+
+# The browser assets the web surface serves. A browser does not care
+# about line endings the way a shell does, so nothing breaks on a CRLF
+# rewrite here, but these ship in the tarball and an unpinned file turns
+# one changed line into a whole-file diff on the next Windows checkout,
+# which buries the change a reviewer came to read. Named as a tree for
+# the same reason the rspamd mount above is: a list per extension leaves
+# the next extension to fall through, and this directory already holds
+# four. The image rule follows the tree rule because the last matching
+# pattern wins and a PNG must not be normalized.
+lib/web/public/** text eol=lf
+lib/web/public/**/*.png -text binary
+
+# Test files carry NUL-byte and bare-CR fixtures for the wire-protocol
+# parsers, and git classifies a file containing a NUL as binary, which
+# skips line-ending normalization, so a text-mode write on Windows commits
+# CRLF verbatim and rewrites the whole file. SMTP, IMAP and ManageSieve
+# fixtures depend on exact CRLF placement, so pin them.
+#
+# One pattern for every JavaScript file under test/, rather than one per
+# suffix and one per depth. The earlier pair pinned `test/*.js` and
+# `test/**/*.test.js`, which between them covered the runner and every
+# suite and left `test/helpers/` unpinned: a pattern containing a slash is
+# anchored and its `*` does not cross one, so the helpers matched neither.
+# They are the shared substrate every layered suite builds its sessions,
+# wire clients and fixtures from, which makes them the worst files in the
+# directory to leave to a workstation setting. Same reasoning as the
+# rspamd mount above: a list per suffix leaves the next one to fall
+# through, so name the tree instead. The fixtures rule follows this one
+# deliberately, because the last matching pattern wins and a fixture
+# carrying NUL bytes must stay binary.
+test/**/*.js text eol=lf
+test/fixtures/** -text binary
+
+# Derived artifacts the release-notes generator owns end-to-end. Rebuild
+# emits LF, so the on-disk file is pinned to LF on every platform. Without
+# this, Windows checkouts would get CRLF and the generator's `--check`
+# drift gate in smoke would need to keep normalizing both sides before
+# comparing.
+CHANGELOG.md text eol=lf
+release-notes/*.json text eol=lf
+
+# Native modules are always binary.
+*.node binary
+*.so binary
+*.dylib binary
+*.dll binary
+*.a binary
+*.glibc binary
+*.musl binary
+
+# Standard binary types.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.tgz binary
+*.pdf binary
+
+# Message fixtures are byte-exact RFC 5322 artifacts. Never normalize them.
+*.eml -text binary

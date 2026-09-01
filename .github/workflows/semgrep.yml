@@ -1,0 +1,147 @@
+name: Semgrep SAST
+
+# Semgrep complements CodeQL: the registry security-audit, javascript
+# and secrets packs are a different rule set. Scoped to the shipped
+# surface (lib/, bin/); findings upload to the Security tab like CodeQL.
+# Non-blocking on findings, so a registry-rule false positive never
+# wedges the merge gate. The blocking ERROR-severity scan lives in
+# ci.yml.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "37 5 * * 1"
+  workflow_dispatch:
+
+permissions: read-all
+
+concurrency:
+  group: semgrep-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    name: Semgrep (registry packs, SARIF to the Security tab)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      security-events: write
+      contents: read
+      actions: read          # required for SARIF upload on private/GHAS repos
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Semgrep
+        # OSS CLI tracking latest, because a SAST ruleset is a moving
+        # security target and the engine is what fetches it. pipx ships on the
+        # ubuntu-latest runner image and installs into an isolated
+        # virtualenv, sidestepping PEP-668.
+        run: |
+          set -euo pipefail
+          pipx install semgrep
+          semgrep --version
+
+      - name: Scan (registry packs)
+        run: |
+          set +e
+          semgrep scan \
+            --config p/security-audit \
+            --config p/javascript \
+            --config p/secrets \
+            --sarif --output semgrep.sarif \
+            --metrics off \
+            --timeout 120 \
+            --exclude lib/vendor \
+            lib bin
+          code=$?
+          set -e
+          # Exit 0 (clean) and 1 (findings) are both fine, because
+          # findings are non-blocking and go to the Security tab. Exit >= 2 is a
+          # fatal configuration error (an unfetchable registry pack, an
+          # invalid rule, a missing config): fail loudly instead of
+          # silently disabling the scan.
+          if [ "$code" -ge 2 ]; then
+            echo "::error::Semgrep exited $code (configuration or infrastructure error, not findings). The scan did not run."
+            exit "$code"
+          fi
+
+      - name: Upload SARIF to the Security tab
+        # Only when the scan produced a SARIF. A Semgrep failure leaves
+        # no file, and upload-sarif errors on an absent path, reddening
+        # a non-blocking job. The upload itself is non-blocking too: a
+        # fork or Dependabot pull request runs with a read-only
+        # GITHUB_TOKEN (GitHub downgrades the requested
+        # security-events: write), so the upload fails a permission
+        # check even though the scan succeeded. The scan still gates on
+        # a configuration error above.
+        if: ${{ hashFiles('semgrep.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28  # v4.37.8
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+      - name: Account for rules that did not run
+        # A rule that failed to execute and a rule that ran and found
+        # nothing are the same thing to the exit code: semgrep reports the
+        # scan successful and exits 0 in both cases, so consulting only the
+        # exit status above measures whether semgrep started, not whether
+        # the ruleset was applied. The SARIF records each incomplete rule
+        # execution, so read it back and account for every one.
+        #
+        # Runs after the upload so results still reach the Security tab when
+        # coverage came up short. It gates on scan integrity, the same
+        # concern as the fatal-exit check above, not on findings.
+        if: ${{ !cancelled() && hashFiles('semgrep.sarif') != '' }}
+        run: |
+          set -euo pipefail
+          SEMGREP_SARIF=semgrep.sarif python3 <<'PY'
+          import json, os, re, sys
+
+          # Rules the open-source engine cannot run, on any repository. Their
+          # absence is a fixed property of this configuration rather than a
+          # regression, and each targets a web framework or crypto library
+          # reachable only through a runtime dependency. This package
+          # declares none, so nothing they look for can be present.
+          TIER = "only supported in the Pro engine"
+
+          # Registry rule metadata reaches the SARIF carrying whatever bytes
+          # its author wrote, and semgrep does not re-encode it, so the file
+          # is not reliably UTF-8. Only notification text is read here, and
+          # a replacement character in a message costs nothing, whereas a
+          # decode error would take down the check that reports lost
+          # coverage and leave the scan looking complete again.
+          with open(os.environ["SEMGREP_SARIF"], encoding="utf-8", errors="replace") as fh:
+              sarif = json.load(fh)
+
+          notes = []
+          for run in sarif.get("runs", []):
+              for inv in run.get("invocations", []):
+                  for note in inv.get("toolExecutionNotifications", []):
+                      kind = (note.get("descriptor") or {}).get("id", "?")
+                      text = re.sub(r"\s+", " ", (note.get("message") or {}).get("text", ""))
+                      notes.append((kind, text))
+
+          if not notes:
+              print("every rule completed")
+              sys.exit(0)
+
+          lost = [n for n in notes if TIER not in n[1]]
+          tier = [n for n in notes if TIER in n[1]]
+          print("rule executions that did not complete: %d" % len(notes))
+          print("  unavailable to the open-source engine: %d" % len(tier))
+          print("  incomplete for another reason:         %d" % len(lost))
+
+          if lost:
+              print("::error::%d rule execution(s) did not complete, so this scan "
+                    "covered less than its ruleset claims. Re-run, and raise "
+                    "--timeout if a rule timed out." % len(lost))
+              for kind, text in lost:
+                  print("::error::  [%s] %s" % (kind, text[:300]))
+              sys.exit(1)
+          PY

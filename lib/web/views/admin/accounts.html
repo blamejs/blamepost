@@ -1,0 +1,145 @@
+{% extends "layout" %}
+{% block title %}blamepost admin: accounts{% endblock %}
+{% block shell %}shell shell-admin{% endblock %}
+{% block content %}
+{{> admin-nav }}
+
+<section class="pane">
+  <header class="pane-head">
+    <div>
+      <h1 class="pane-title">Accounts</h1>
+      <p class="pane-sub">Mailbox owners on this server.</p>
+    </div>
+  </header>
+
+  {% if problem %}
+  <div class="notice notice-bad" role="alert">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>{{ problem }}</p>
+  </div>
+  {% endif %}
+
+  <div class="tablewrap">
+    <table class="grid">
+      <caption class="visually-hidden">Accounts</caption>
+      <thead>
+        <tr>
+          <th scope="col">Address</th>
+          <th scope="col">Name</th>
+          <th scope="col">State</th>
+          <th scope="col">Storage cap</th>
+          <th scope="col">Added</th>
+          <th scope="col"><span class="visually-hidden">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in accounts %}
+        <tr>
+          <th scope="row"><code>{{ a.address }}</code></th>
+          <td>{{ a.displayName }}{% if a.isAdmin %} <span class="pill">admin</span>{% endif %}</td>
+          <td>
+            <span class="pill pill-{{ a.status }}">{{ a.status }}</span>
+            {% if a.reason %}<span class="cell-detail">{{ a.reason }}</span>{% endif %}
+          </td>
+          <td>
+            {{ a.quotaLabel }}
+            {% if a.usedBucket %}
+            <span class="meter meter-inline"><span class="meter-fill w{{ a.usedBucket }}"></span></span>
+            {% endif %}
+          </td>
+          <td>{{ a.created }}</td>
+          <td class="row-actions">
+            <form method="post" action="/admin/accounts" class="inline-form">
+              <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+              <input type="hidden" name="id" value="{{ a.id }}">
+              {% if a.isReinstatable %}
+              <button type="submit" name="action" value="reinstate" class="btn">Reinstate</button>
+              {% endif %}
+              {% if a.isAdmin %}
+              <button type="submit" name="action" value="revoke-role" class="btn">Take back the console</button>
+              {% else %}
+              {% if a.isActive %}
+              <button type="submit" name="action" value="grant-role" class="btn">Give it the console</button>
+              {% endif %}
+              {% endif %}
+              {% if a.isActive %}
+              <button type="submit" name="action" value="suspend" class="btn">Suspend</button>
+              <button type="submit" name="action" value="archive" class="btn btn-danger">Archive</button>
+              {% endif %}
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <nav class="pager" aria-label="More accounts">
+    {% if prevHref %}<a class="btn btn-quiet" href="{{ prevHref }}">Previous</a>{% endif %}
+    {% if nextHref %}<a class="btn btn-quiet" href="{{ nextHref }}">Next</a>{% endif %}
+  </nav>
+
+  <h2 class="section-title">Create an account</h2>
+  <form method="post" action="/admin/accounts" class="rowform">
+    <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+    <input type="hidden" name="action" value="add">
+    <div class="field-pair">
+      <div class="field">
+        <label for="address">Address</label>
+        <input id="address" name="address" type="email" autocapitalize="none"
+               spellcheck="false" required>
+        <p class="hint">
+          The domain part must already be hosted here and accepting mail.
+          {% if domains %}Hosted now:{% for d in domains %} <code>{{ d.domain }}</code>{% endfor %}{% endif %}
+        </p>
+      </div>
+      <div class="field">
+        <label for="displayName">Name</label>
+        <input id="displayName" name="displayName" type="text">
+      </div>
+    </div>
+    <div class="field-pair">
+      <div class="field">
+        <label for="password">First password</label>
+        <input id="password" name="password" type="password" autocomplete="new-password" required>
+        <p class="hint">Hashed with Argon2id before it reaches disk, and checked against the policy first.</p>
+      </div>
+      <div class="field">
+        <label for="quotaBytes">Storage cap in bytes</label>
+        <input id="quotaBytes" name="quotaBytes" type="number" min="0" step="1" value="0">
+        <p class="hint">Zero leaves the account uncapped.</p>
+      </div>
+    </div>
+    <div class="field">
+      <label class="checkline" for="isAdmin">
+        <input id="isAdmin" name="isAdmin" type="checkbox">
+        Give this account the operator console
+      </label>
+    </div>
+    <button type="submit" class="btn btn-primary">Create account</button>
+  </form>
+
+  <p class="fineprint">
+    Suspending stops sign in and submission and leaves the mailbox alone. Archiving closes the
+    account and keeps its mail. Erasing the keys that unseal it is a separate, recorded decision
+    with its own reason, because it cannot be undone. Every one of these asks for a reason
+    before it happens, and archiving asks you to type the address as well, because the row
+    above and the row below look the same from a mouse.
+  </p>
+  <p class="fineprint">
+    The console is a grant over the whole server rather than over any mailbox: an account that
+    holds it reads every address, every hosted domain, the outbound spool and this trail. Take
+    it back when somebody stops needing it, or when a credential has been taken. Revoking
+    reaches a session that is already open, and it leaves the mailbox working, so it is the
+    narrower answer than suspending an account whose owner did nothing wrong.
+  </p>
+  <p class="fineprint">
+    An account out of service can have the role taken back and cannot be given it. Both
+    directions of that follow from the same fact: it authenticates nowhere, so a grant on it
+    would sit unused and read as an administrator on every listing until the mailbox came
+    back. Revoking is offered on every row that holds the role because this page is the only
+    place the role is granted or taken, and an account part way through an erasure cannot be
+    returned to service at all, so a row it was not offered on would keep the role for good.
+  </p>
+</section>
+{% endblock %}

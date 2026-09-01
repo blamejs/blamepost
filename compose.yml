@@ -1,0 +1,295 @@
+# blamepost: self-hosted mail server.
+#
+# The single all-in-one image is the documented default. Running
+# `docker compose up -d` with no profile gives a complete mail server:
+# MX, submission, IMAP, ManageSieve, and the web UI (webmail + admin +
+# JMAP) in one process against one volume.
+#
+# Optional add-on services sit behind compose profiles and are off unless
+# asked for:
+#
+#   --profile scan   content scanning (rspamd + ClamAV)
+#   --profile tls    Caddy in front of the web UI for ACME-managed HTTPS
+#
+#   docker compose --profile scan up -d
+#
+# Before the first start, put a TLS certificate and key where
+# BLAMEPOST_TLS_CERT and BLAMEPOST_TLS_KEY point. Every listener requires
+# TLS, so a server without them has nothing to start.
+#
+# After the first start, create the administrator account. `serve` does
+# not create one, so this is the step that leaves you able to sign in:
+#
+#   docker compose exec blamepost node bin/blamepost.js init \
+#     --admin-email admin@example.com
+#
+# Before serving real mail, publish the DNS records in
+# docs/operator-guide.md, set BLAMEPOST_DNS_ACKNOWLEDGED=1, and run
+# `blamepost domain acknowledge <domain> --by <who>` for each hosted
+# domain. The MX listener refuses to bind until you do.
+
+services:
+  blamepost:
+    image: ghcr.io/blamejs/blamepost:0.1.0
+    # Build locally instead of pulling by uncommenting this block.
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    container_name: blamepost
+    restart: unless-stopped
+
+    # The image runs as UID 65532 and the mail ports are below 1024. This
+    # sysctl lowers the unprivileged port floor inside this container's
+    # own network namespace, so it changes nothing on the host.
+    #
+    # Current Docker and Kubernetes already start that floor at 0 in a
+    # container's own namespace, so on those this states the requirement
+    # rather than creating it. That is the reason to keep it: a runtime
+    # that has not adopted the default, or an operator who has raised the
+    # floor, gets a server that binds instead of one that exits naming a
+    # port it could not take. The Dockerfile documents the alternative,
+    # which is to run high internal ports published to standard host
+    # ports. That approach rewrites the peer address and so degrades RBL
+    # and rate-limit accuracy.
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+
+    # Drop every capability. With the floor above, none are needed, not
+    # even NET_BIND_SERVICE.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    environment:
+      # ---- Required ----------------------------------------------------
+      # The public hostname your MX record points at. Must have forward
+      # and reverse DNS that agree (FCrDNS) or receivers will penalise
+      # your mail.
+      BLAMEPOST_HOSTNAME: ${BLAMEPOST_HOSTNAME:?set BLAMEPOST_HOSTNAME, for example mx.example.com}
+
+      # Seals DKIM private keys and account secrets at rest. Losing this
+      # makes sealed data unrecoverable, so back it up somewhere other
+      # than the data volume.
+      BLAMEPOST_VAULT_PASSPHRASE: ${BLAMEPOST_VAULT_PASSPHRASE:?set BLAMEPOST_VAULT_PASSPHRASE}
+
+      # Set to 1 once the DNS records in docs/operator-guide.md are live.
+      # The MX listener refuses to bind while this is unset.
+      BLAMEPOST_DNS_ACKNOWLEDGED: ${BLAMEPOST_DNS_ACKNOWLEDGED:-0}
+
+      # ---- The administrator account -------------------------------------
+      # These two are read by `blamepost init`, which is the command that
+      # creates the administrator, and by nothing else. `serve` never
+      # creates an account, so bringing this stack up leaves you with a
+      # running server and no way to sign in until you run:
+      #
+      #   docker compose exec blamepost node bin/blamepost.js init \
+      #     --admin-email admin@example.com
+      #
+      # Set both of these or neither. One without the other is refused at
+      # start, because an email with no password would leave the server
+      # choosing a credential and writing it to a log. With neither set,
+      # `init` generates a password and prints it once.
+      BLAMEPOST_ADMIN_EMAIL: ${BLAMEPOST_ADMIN_EMAIL:-}
+      BLAMEPOST_ADMIN_PASSWORD: ${BLAMEPOST_ADMIN_PASSWORD:-}
+
+      # ---- TLS ----------------------------------------------------------
+      # Every listener requires TLS and none has a plaintext mode, so the
+      # server refuses to start without this pair. Put the certificate in
+      # the data volume's tls/ folder, or bind a host path over it, and
+      # renew it with whatever renews your certificates today.
+      BLAMEPOST_TLS_CERT: ${BLAMEPOST_TLS_CERT:-/var/lib/blamepost/tls/fullchain.pem}
+      BLAMEPOST_TLS_KEY: ${BLAMEPOST_TLS_KEY:-/var/lib/blamepost/tls/privkey.pem}
+
+      # ---- Optional ------------------------------------------------------
+      BLAMEPOST_LOG_LEVEL: ${BLAMEPOST_LOG_LEVEL:-info}
+      BLAMEPOST_POP3_ENABLED: ${BLAMEPOST_POP3_ENABLED:-false}
+
+      # The browser, admin and JMAP port. In this stack it is set here and
+      # nowhere else: the published port below, the health probe and the
+      # optional terminator upstream all read this one value, so moving
+      # the port moves all four together. Setting httpPort in a mounted
+      # configuration file instead moves only the listener, and the probe
+      # would then report a healthy server unhealthy and restart it.
+      BLAMEPOST_HTTP_PORT: ${BLAMEPOST_HTTP_PORT:-8080}
+
+      # The same surface over HTTPS, when TLS terminates in this process.
+      # It is listed for the same reason as the line above: compose passes
+      # only the variables named here, so a value set in .env and never
+      # named reaches nothing, and the settings reference documents this
+      # one. Moving it moves the listener and the published port together.
+      BLAMEPOST_HTTPS_PORT: ${BLAMEPOST_HTTPS_PORT:-8443}
+
+    ports:
+      - "25:25"       # inbound MX
+      - "465:465"     # submission, implicit TLS
+      - "587:587"     # submission, STARTTLS
+      - "143:143"     # IMAP, STARTTLS
+      - "4190:4190"   # ManageSieve
+      - "${BLAMEPOST_HTTP_PORT:-8080}:${BLAMEPOST_HTTP_PORT:-8080}"   # webmail, admin, JMAP
+      - "${BLAMEPOST_HTTPS_PORT:-8443}:${BLAMEPOST_HTTPS_PORT:-8443}" # the same over TLS
+      # POP3 is opt-in. Publish this only with BLAMEPOST_POP3_ENABLED=true.
+      # - "110:110"
+      # IMAP and POP3 negotiate TLS in band, so nothing binds 993 or 995,
+      # and a TCP terminator in front of 143 or 110 does NOT supply them.
+      # Behind one the listener is handed a plaintext connection, so it
+      # refuses every credential with "AUTHENTICATE requires TLS (use
+      # STARTTLS first)". That refusal is correct rather than a bug: the
+      # listener cannot see TLS it was not part of, and treating a
+      # plaintext connection from a named source as encrypted would put
+      # an address check between a password and the wire. So a client
+      # that can only do implicit TLS has no route here today. Tracked
+      # upstream as blamejs#665, which asks for the implicit-TLS mode the
+      # submission listener already has on 465.
+      # The tls profile below is unrelated to any of that. It publishes
+      # 80 and 443 and proxies HTTP to the web interface, so it fronts
+      # webmail, admin and JMAP and reaches no mail listener.
+
+    volumes:
+      - blamepost-data:/var/lib/blamepost
+      # Mount a config file to override anything the environment does not
+      # cover. Environment values win over the file.
+      # - ./blamepost.config.json:/etc/blamepost/blamepost.config.json:ro
+
+    # The probe the image already declares, restated so this file can be
+    # read on its own. The two are compared character for character, so
+    # an edit here that is not made in the Dockerfile fails a gate rather
+    # than shipping two probes.
+    #
+    # `healthy` here means up and serving. It covers the state a fresh
+    # volume starts in, where no domain is hosted yet and port 25 stays
+    # shut until `blamepost init` runs: the endpoint answers degraded and
+    # names the listener it is holding back, rather than reporting a
+    # server that is working as one that failed to start. A listener that
+    # was meant to bind and did not fails /readyz instead.
+    #
+    # `degraded` is NOT only a startup condition, and this probe cannot
+    # tell you which kind you have. The endpoint answers 200 for every
+    # degraded reading, so Docker calls the container healthy in all of
+    # them. Five checks can produce one: the message store, a listener
+    # that failed to bind, a listener deliberately held back, the
+    # certificate, and the outbound queue. The last two are the ones that
+    # matter here, because both are slow failures a container runtime
+    # will never surface for you:
+    #
+    #   certificate  inside its expiry window, or already expired. The
+    #                server keeps working until the moment it does not,
+    #                and the renewal that stopped running did so weeks
+    #                earlier.
+    #   queue        mail is not moving: the spool has filled past the
+    #                point where it refuses new mail for forwarding, the
+    #                sweep is not armed, or this build cannot reach the
+    #                wire at all.
+    #
+    # Neither is critical on either tier, deliberately: a restart does
+    # not drain a queue and does not renew a certificate, so failing the
+    # probe would ask a supervisor to do the one thing that cannot help.
+    # That is the right call for the probe and it puts the burden on you.
+    # **Alert on `degraded`, not only on a failing container.** A policy
+    # watching container health alone will never see either of these.
+    # `GET /readyz` returns the reading with each check named; the
+    # operator guide's "When the queue stops moving" and "When a renewal
+    # stops running" cover what to do about each.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:'+(process.env.BLAMEPOST_HTTP_PORT||8080)+'/healthz').then(r=>r.text().then(t=>{process.exitCode=r.ok?0:1;process.stdout.write(t,()=>process.exit(r.ok?0:1))})).catch(e=>{process.stdout.write('probe did not answer: '+((e&&e.message)||e),()=>process.exit(1))})"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ---- Optional: content scanning -------------------------------------
+  # blamepost runs no content scoring of its own in this release, so these
+  # two are the scanning layer rather than an addition to one. Bringing
+  # them up starts the services; pointing mail at them is operator wiring
+  # in front of port 25 or after delivery, because the MX listener has no
+  # setting that reaches them yet. ROADMAP.md tracks that under Anti-abuse
+  # and content scanning. Enable with: docker compose --profile scan up -d
+  rspamd:
+    image: rspamd/rspamd:4.1.5
+    container_name: blamepost-rspamd
+    profiles: ["scan"]
+    restart: unless-stopped
+    volumes:
+      - ./docker/rspamd:/etc/rspamd/local.d:ro
+      - rspamd-data:/var/lib/rspamd
+    expose:
+      - "11333"
+    security_opt:
+      - no-new-privileges:true
+
+  clamav:
+    image: clamav/clamav:1.4.3
+    container_name: blamepost-clamav
+    profiles: ["scan"]
+    restart: unless-stopped
+    volumes:
+      - clamav-data:/var/lib/clamav
+    expose:
+      - "3310"
+    security_opt:
+      - no-new-privileges:true
+
+  # ---- Optional: HTTPS terminator -------------------------------------
+  # Only needed when you want a reverse proxy in front of the web UI. It
+  # publishes 80 and 443 and proxies HTTP to the web port below, so it
+  # fronts webmail, admin and JMAP and reaches no mail listener.
+  # blamepost serves the same pages on 8443 from the certificate it was
+  # given, so this is for operators who already standardise on Caddy and
+  # want it to hold the public certificate and renew it.
+  #
+  # Set BLAMEPOST_WEB_HOSTNAME in your .env before starting this profile.
+  # docker/caddy/Caddyfile opens its site block on it, and Caddy has no
+  # address to bind and no name to get a certificate for without it.
+  # Enable with: docker compose --profile tls up -d
+  caddy:
+    image: caddy:2.10.0-alpine
+    container_name: blamepost-caddy
+    profiles: ["tls"]
+    restart: unless-stopped
+    environment:
+      # The name the web interface answers on. Caddy reads it out of this
+      # environment to open its site block and to get a certificate for
+      # it, and nothing in blamepost reads it at all: the server has
+      # BLAMEPOST_HOSTNAME for the identity its mail listeners present and
+      # no setting for the name a proxy in front of it serves, because no
+      # part of the process ever sees that name.
+      #
+      # Left empty rather than refused when unset, because compose
+      # interpolates every service in this file whether or not its profile
+      # is selected, so a required marker here would stop the default
+      # `docker compose up -d` as well. Unset, Caddy fails to start on an
+      # empty site address, which is confined to this profile.
+      BLAMEPOST_WEB_HOSTNAME: ${BLAMEPOST_WEB_HOSTNAME:-}
+
+      # The Caddyfile reads this to reach the application, so the
+      # terminator follows the port the same way the published port and
+      # the health probe do rather than carrying a fourth copy of it.
+      BLAMEPOST_HTTP_PORT: ${BLAMEPOST_HTTP_PORT:-8080}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - blamepost
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  blamepost-data:
+  rspamd-data:
+  clamav-data:
+  caddy-data:
+  caddy-config:

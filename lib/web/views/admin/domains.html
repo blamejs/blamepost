@@ -1,0 +1,101 @@
+{% extends "layout" %}
+{% block title %}blamepost admin: domains{% endblock %}
+{% block shell %}shell shell-admin{% endblock %}
+{% block content %}
+{{> admin-nav }}
+
+<section class="pane">
+  <header class="pane-head">
+    <div>
+      <h1 class="pane-title">Domains</h1>
+      <p class="pane-sub">Every domain this server accepts mail for.</p>
+    </div>
+  </header>
+
+  {% if problem %}
+  <div class="notice notice-bad" role="alert">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>{{ problem }}</p>
+  </div>
+  {% endif %}
+
+  <div class="tablewrap">
+    <table class="grid">
+      <caption class="visually-hidden">Hosted domains</caption>
+      <thead>
+        <tr>
+          <th scope="col">Domain</th>
+          <th scope="col">State</th>
+          <th scope="col">DNS posture</th>
+          <th scope="col">Accounts</th>
+          <th scope="col">Added</th>
+          <th scope="col"><span class="visually-hidden">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in domains %}
+        <tr>
+          <th scope="row"><code>{{ d.domain }}</code></th>
+          <td>
+            {% if d.isActive %}
+            <span class="pill pill-ok">{{ d.status }}</span>
+            {% else %}
+            <span class="pill pill-warn">{{ d.status }}</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if d.acknowledged %}
+            <span class="pill pill-ok">{{ d.postureLabel }}</span>
+            <span class="cell-detail">{{ d.confirmedBy }} {{ d.confirmedAt }}</span>
+            {% else %}
+            <span class="pill pill-warn">{{ d.postureLabel }}</span>
+            {% endif %}
+          </td>
+          <td>{{ d.accountCount }}</td>
+          <td>{{ d.created }}</td>
+          <td class="row-actions">
+            <form method="post" action="/admin/domains" class="inline-form">
+              <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+              <input type="hidden" name="domain" value="{{ d.domain }}">
+              {% if d.needsAck %}
+              <button type="submit" name="action" value="confirm-dns" class="btn">Records are published</button>
+              {% endif %}
+              {% if d.isActive %}
+              <button type="submit" name="action" value="disable" class="btn btn-danger">Stop accepting</button>
+              {% else %}
+              <button type="submit" name="action" value="enable" class="btn">Accept again</button>
+              {% endif %}
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <h2 class="section-title">Host another domain</h2>
+  <form method="post" action="/admin/domains" class="rowform">
+    <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+    <input type="hidden" name="action" value="add">
+    <div class="field">
+      <label for="domain">Domain</label>
+      <input id="domain" name="domain" type="text" autocapitalize="none" spellcheck="false" required>
+      <p class="hint">
+        Adding a domain does not open the MX listener for it. Publish MX, SPF, DMARC, the
+        selector records, MTA-STS and TLS-RPT, then confirm the posture above.
+      </p>
+    </div>
+    <button type="submit" class="btn btn-primary">Add domain</button>
+  </form>
+
+  <p class="fineprint">
+    Confirming the posture is your statement that the records exist. It is not a check of them.
+    Run <code>blamepost doctor</code> to resolve each one and see what is actually published.
+  </p>
+  <p class="fineprint">
+    Withdrawing a domain stops mail for every account on it at once, and none of their owners
+    is told, so it asks you to type the domain and give a reason first. Putting it back is one
+    press and a reason.
+  </p>
+</section>
+{% endblock %}

@@ -1,0 +1,10 @@
+<form class="theme-switch inline-form" method="post" action="/prefs/theme" data-island="theme">
+  <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+  <input type="hidden" name="back" value="{{ backPath }}">
+  <button type="submit" name="theme" value="light" class="btn btn-quiet theme-btn"
+          aria-pressed="{% if theme == 'light' %}true{% else %}false{% endif %}">Light</button>
+  <button type="submit" name="theme" value="dark" class="btn btn-quiet theme-btn"
+          aria-pressed="{% if theme == 'dark' %}true{% else %}false{% endif %}">Dark</button>
+  <button type="submit" name="theme" value="system" class="btn btn-quiet theme-btn"
+          aria-pressed="{% if theme %}false{% else %}true{% endif %}">Auto</button>
+</form>

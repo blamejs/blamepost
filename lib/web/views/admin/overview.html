@@ -1,0 +1,64 @@
+{% extends "layout" %}
+{% block title %}blamepost admin: overview{% endblock %}
+{% block shell %}shell shell-admin{% endblock %}
+{% block content %}
+{{> admin-nav }}
+
+<section class="pane">
+  <header class="pane-head">
+    <div>
+      <h1 class="pane-title">Overview</h1>
+      <p class="pane-sub">{{ hostname }}</p>
+    </div>
+  </header>
+
+  {% if hasPending %}
+  <div class="notice notice-warn" role="status">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>
+      The MX listener stays closed for a domain until you confirm its DNS records exist.
+      Confirm on the Domains page once MX, SPF, DMARC, the selector record, MTA-STS and TLS-RPT
+      are published.
+    </p>
+  </div>
+  {% endif %}
+
+  <div class="tiles">
+    <a class="tile" href="/admin/domains">
+      <span class="tile-value">{{ domainCount }}</span>
+      <span class="tile-label">Domains</span>
+    </a>
+    <a class="tile" href="/admin/accounts">
+      <span class="tile-value">{{ accountCount }}</span>
+      <span class="tile-label">Accounts</span>
+    </a>
+    <a class="tile" href="/admin/dkim">
+      <span class="tile-value">{{ selectorCount }}</span>
+      <span class="tile-label">Selectors</span>
+    </a>
+    <a class="tile" href="/admin/queue">
+      <span class="tile-value">{{ queueDepth }}</span>
+      <span class="tile-label">Waiting to deliver</span>
+    </a>
+  </div>
+
+  {% if hasPending %}
+  <h2 class="section-title">Domains awaiting DNS confirmation</h2>
+  <ul class="plainlist">
+    {% for d in pendingDomains %}
+    <li><code>{{ d.domain }}</code></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <h2 class="section-title">Records every hosted domain needs</h2>
+  <dl class="reclist">
+    <dt>MX</dt><dd>Points at this listener's hostname.</dd>
+    <dt>SPF</dt><dd>TXT <code>v=spf1 ... -all</code>. The soft fail form invites spoofing.</dd>
+    <dt>DMARC</dt><dd>TXT at <code>_dmarc</code>, <code>p=quarantine</code> at the least, <code>p=reject</code> when you are ready.</dd>
+    <dt>DKIM</dt><dd>One TXT per live selector, at <code>&lt;selector&gt;._domainkey</code>.</dd>
+    <dt>MTA-STS</dt><dd>Policy at <code>mta-sts.&lt;domain&gt;/.well-known/mta-sts.txt</code> plus the TXT at <code>_mta-sts</code>.</dd>
+    <dt>TLS-RPT</dt><dd>TXT at <code>_smtp._tls</code>, naming where aggregate reports go.</dd>
+  </dl>
+</section>
+{% endblock %}

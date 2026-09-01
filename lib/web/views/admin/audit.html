@@ -1,0 +1,73 @@
+{% extends "layout" %}
+{% block title %}blamepost admin: audit{% endblock %}
+{% block shell %}shell shell-admin{% endblock %}
+{% block content %}
+{{> admin-nav }}
+
+<section class="pane">
+  <header class="pane-head">
+    <div>
+      <h1 class="pane-title">Audit</h1>
+      <p class="pane-sub">
+        Hash chained, and reading this page writes a row of its own. The chain shows these
+        rows agree with each other, which is a weaker thing than showing nothing was
+        changed: every row hash is computed from columns anyone can read, so a rewrite can
+        relink the whole sequence. What answers for that is the signed checkpoint and the
+        record kept beside the database, and <code>blamepost audit verify-chain</code> is
+        what reads them. This page does not.
+      </p>
+    </div>
+    <form class="findbar" method="get" action="/admin/audit">
+      <label class="visually-hidden" for="action">Action</label>
+      <input id="action" name="action" type="text" value="{{ action }}"
+             aria-label="Filter by action" autocomplete="off" spellcheck="false">
+      <label class="visually-hidden" for="outcome">Outcome</label>
+      <select id="outcome" name="outcome">
+        <option value="">Any outcome</option>
+        <option value="success">success</option>
+        <option value="failure">failure</option>
+        <option value="denied">denied</option>
+      </select>
+      <button type="submit" class="btn btn-quiet">Filter</button>
+    </form>
+  </header>
+
+  {% if empty %}
+  <div class="blank">
+    <p class="blank-head">No row matches.</p>
+    <p>Authentication, mailbox mutation, delivery and every administration action write here.</p>
+  </div>
+  {% else %}
+  <div class="tablewrap">
+    <table class="grid grid-dense">
+      <caption class="visually-hidden">Audit rows</caption>
+      <thead>
+        <tr>
+          <th scope="col">When</th>
+          <th scope="col">Action</th>
+          <th scope="col">Outcome</th>
+          <th scope="col">Actor</th>
+          <th scope="col">Detail</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr{% if r.denied %} class="row-denied"{% endif %}>
+          <td class="cell-when">{{ r.at }}</td>
+          <th scope="row"><code>{{ r.action }}</code></th>
+          <td>{{ r.outcome }}</td>
+          <td><code>{{ r.actor }}</code></td>
+          <td class="cell-detail">{{ r.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <nav class="pager" aria-label="More rows">
+    {% if newerHref %}<a class="btn btn-quiet" href="{{ newerHref }}">Newer</a>{% endif %}
+    {% if olderHref %}<a class="btn btn-quiet" href="{{ olderHref }}">Older</a>{% endif %}
+  </nav>
+</section>
+{% endblock %}

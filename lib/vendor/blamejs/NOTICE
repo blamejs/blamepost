@@ -1,0 +1,117 @@
+blamejs
+Copyright 2026 blamejs contributors
+
+This product includes software developed by the blamejs project
+(https://blamejs.com).
+
+Licensed under the Apache License, Version 2.0. See LICENSE for the full text.
+
+================================================================================
+Third-Party Components
+================================================================================
+
+blamejs vendors third-party libraries under lib/vendor/ rather than peer-
+depending them through npm. Each vendored component retains its original
+copyright and license. Bundle versions and source SHAs are tracked in
+lib/vendor/MANIFEST.json.
+
+--------------------------------------------------------------------------------
+Component:   @noble/ciphers
+Version:     2.4.0
+Source:      https://github.com/paulmillr/noble-ciphers
+License:     MIT
+Copyright:   Copyright (c) 2023 Paul Miller (https://paulmillr.com)
+Used for:    XChaCha20-Poly1305 authenticated encryption (lib/crypto.js,
+             lib/vault-wrap.js, via lib/vendor/noble-ciphers.cjs).
+             Thank you to Paul Miller for the audited noble-ciphers suite.
+--------------------------------------------------------------------------------
+Component:   @noble/curves
+Version:     2.4.0
+Source:      https://github.com/paulmillr/noble-curves
+License:     MIT
+Copyright:   Copyright (c) 2022 Paul Miller (https://paulmillr.com)
+Used for:    RFC 9497 Oblivious Pseudo-Random Function (OPRF / VOPRF / POPRF)
+             over ristretto255 / P-256 / P-384 / P-521 (lib/crypto-oprf.js,
+             via lib/vendor/noble-curves.cjs). Thank you to Paul Miller for the
+             audited noble-curves suite.
+--------------------------------------------------------------------------------
+Component:   @noble/hashes
+Version:     2.4.0
+Source:      https://github.com/paulmillr/noble-hashes
+License:     MIT
+Copyright:   Copyright (c) 2022 Paul Miller (https://paulmillr.com)
+Used for:    The client half of a hybrid exchange, as a browser build
+             (lib/vendor/browser/noble-hashes.mjs) — SHAKE256 as a KDF,
+             SHA-3, SHA-2, HMAC and HKDF. There is no server bundle: the
+             server side reaches all of these through node:crypto, so a
+             .cjs here would be a file nothing requires.
+             The same version is also carried INSIDE noble-curves.cjs and
+             noble-post-quantum.cjs, which bundle the parts of it they use
+             (SHA-2 in the first; SHA-3, SHAKE and HMAC in the second).
+             One version covers all three, so the hash a browser runs is
+             the hash inside the server's PQC bundle. Thank you to Paul
+             Miller for the audited noble-hashes suite.
+--------------------------------------------------------------------------------
+Component:   @noble/post-quantum
+Version:     0.7.1
+Source:      https://github.com/paulmillr/noble-post-quantum
+License:     MIT
+Copyright:   Copyright (c) 2024 Paul Miller (https://paulmillr.com)
+Used for:    FIPS 203 ML-KEM (ml_kem_512 / ml_kem_768 / ml_kem_1024),
+             FIPS 204 ML-DSA (ml_dsa_44 / ml_dsa_65 / ml_dsa_87),
+             FIPS 205 SLH-DSA (slh_dsa_sha2_*f / slh_dsa_shake_*f),
+             via lib/vendor/noble-post-quantum.cjs and the b.pqcSoftware
+             framework wrapper (lib/pqc-software.js). Server-side and
+             client-side; ciphertexts FIPS 203 conformant in both
+             directions with Node's built-in WebCrypto ML-KEM. Thank
+             you to Paul Miller for the auditable, dependency-free
+             reference implementation.
+--------------------------------------------------------------------------------
+Component:   @blamejs/pki
+Version:     0.5.31
+Source:      https://github.com/blamejs/pki
+License:     Apache-2.0
+Copyright:   Copyright (c) blamejs contributors
+Used for:    Pure-JS mTLS CA (default engine). Self-signed CA generation
+             (ML-DSA-87 by default, ECDSA P-384 bridge on opt-in), leaf-cert
+             signing for client certificates, X.509 CRL generation, and
+             PKCS#12 packaging (PBES2 + AES-256-CBC + PBKDF2-HMAC-SHA-512,
+             2,000,000 iterations; PBMAC1 integrity MAC). Also WebAuthn /
+             passkey registration + assertion verification (attestation
+             statement validation, COSE key handling, signature
+             verification) behind b.auth.passkey. Zero runtime
+             dependencies. Wired into b.mtlsCa via lib/mtls-engine-default.js
+             and b.auth.passkey via lib/auth/passkey.js, backed by the
+             bundle lib/vendor/blamejs-pki.cjs.
+--------------------------------------------------------------------------------
+Component:   SecLists — 10k-most-common.txt
+Version:     master snapshot (bundled 2026-05-02)
+Source:      https://github.com/danielmiessler/SecLists
+             https://github.com/danielmiessler/SecLists/blob/master/Passwords/Common-Credentials/10k-most-common.txt
+License:     CC-BY-3.0
+Copyright:   Copyright (c) Daniel Miessler and SecLists contributors
+Used for:    Top-10000 most-common (breach-derived) passwords. Loaded by
+             b.auth.password.policy() to satisfy NIST 800-63B §5.1.1.2's
+             "previously breached, dictionary, repetitive/sequential,
+             context-specific" check. Operators with deeper enforcement
+             (HIBP downloads, NCSC 100k) layer on top via opts.forbidCommon
+             — the bundled set is additive. Bundled at lib/vendor/
+             common-passwords-top-10000.txt; thank you to the SecLists
+             project maintainers for keeping a curated, freely-redistributable
+             baseline.
+--------------------------------------------------------------------------------
+Component:   publicsuffix-list (Mozilla Public Suffix List)
+Version:     master snapshot (bundled 2026-08-19)
+Source:      https://publicsuffix.org/list/public_suffix_list.dat
+License:     MPL-2.0
+Copyright:   Copyright (c) Mozilla Foundation and Public Suffix List contributors
+Used for:    Canonical catalog of effective top-level domains. Loaded at module
+             init by b.publicSuffix to derive organizational domains for
+             DMARCbis (psd= / np=) alignment, BIMI issuer scoping, cookie-scope
+             confinement, and same-site policy (lib/public-suffix.js, via
+             lib/vendor/public-suffix-list.dat). This is data, not a code
+             bundle. The list is vendored verbatim and unmodified and remains
+             licensed under the Mozilla Public License 2.0; its complete source
+             is available at the canonical URL above, satisfying MPL-2.0 §3.2.
+             The full MPL-2.0 text is at https://www.mozilla.org/MPL/2.0/.
+--------------------------------------------------------------------------------

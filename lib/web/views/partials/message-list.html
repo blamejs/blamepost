@@ -1,0 +1,43 @@
+<form method="post" action="{{ actionPath }}" class="listform" data-island="mailbox">
+  <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+
+  <div class="bulkbar" role="group" aria-label="Actions for the selected messages">
+    <button type="submit" name="action" value="read" class="btn">Mark read</button>
+    <button type="submit" name="action" value="unread" class="btn">Mark unread</button>
+    <button type="submit" name="action" value="flag" class="btn">Flag</button>
+    <button type="submit" name="action" value="trash" class="btn">Move to Trash</button>
+    <span class="bulk-move">
+      <label class="visually-hidden" for="destination">Destination folder</label>
+      <select id="destination" name="destination">
+        {% for f in folders %}<option value="{{ f.name }}">{{ f.label }}</option>{% endfor %}
+      </select>
+      <button type="submit" name="action" value="move" class="btn">Move</button>
+    </span>
+  </div>
+
+  <ol class="msglist">
+    {% for m in messages %}
+    <li class="msg{% if m.unread %} is-unread{% endif %}{% if m.deleted %} is-deleted{% endif %}">
+      <span class="msg-pick">
+        <input type="checkbox" name="objectId" value="{{ m.objectId }}" id="pick-{{ m.objectId }}">
+        <label class="visually-hidden" for="pick-{{ m.objectId }}">Select message from {{ m.from }}</label>
+      </span>
+      <span class="msg-avatar" aria-hidden="true">{{ m.initial }}</span>
+      <a class="msg-body" href="{{ m.href }}">
+        <span class="msg-top">
+          <span class="msg-from" title="{{ m.fromAddr }}">{{ m.from }}</span>
+          <span class="msg-when">{{ m.received }}</span>
+        </span>
+        <span class="msg-subject">{{ m.subject }}</span>
+        <span class="msg-preview">{{ m.preview }}</span>
+      </a>
+      <span class="msg-marks">
+        {% if m.flagged %}<span class="mark mark-flag" title="Flagged">Flagged</span>{% endif %}
+        {% if m.answered %}<span class="mark" title="Answered">Answered</span>{% endif %}
+        {% if m.legalHold %}<span class="mark mark-hold" title="Under legal hold">Hold</span>{% endif %}
+        <span class="msg-size">{{ m.sizeLabel }}</span>
+      </span>
+    </li>
+    {% endfor %}
+  </ol>
+</form>

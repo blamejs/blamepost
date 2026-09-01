@@ -1,0 +1,227 @@
+{
+  "_comment": "Vendored dependencies — no npm runtime packages. Use scripts/vendor-update.sh to update.",
+  "packages": {
+    "@noble/ciphers": {
+      "version": "2.4.0",
+      "license": "MIT",
+      "author": "Paul Miller",
+      "source": "https://github.com/paulmillr/noble-ciphers",
+      "_about": "The server and browser bundles are built from ONE npm install in a single vendor-update run, so the two halves of a hybrid exchange cannot be different versions of the same cipher. One `version` field covers both files.",
+      "exports": [
+        "xchacha20poly1305"
+      ],
+      "files": {
+        "server": "lib/vendor/noble-ciphers.cjs",
+        "browser": "lib/vendor/browser/noble-ciphers.mjs"
+      },
+      "bundler": "esbuild --format=cjs --platform=node (server), esbuild --format=esm --platform=browser (browser)",
+      "bundledAt": "2026-08-27T00:00:00Z",
+      "cpe": "cpe:2.3:a:paulmillr:noble-ciphers:2.4.0:*:*:*:*:node.js:*:*",
+      "hashes": {
+        "server": "sha256:acdcf1ba4bde8177cbfcfef22b543022284a1529afb68bc8329303837c8c021e",
+        "browser": "sha256:fc422d85a65c5dc1208066b0156e100c4790be3c8791f644b80524c25d4bc3ee"
+      },
+      "refreshedAt": "2026-08-28T04:49:21.011Z"
+    },
+    "@noble/hashes": {
+      "version": "2.4.0",
+      "license": "MIT",
+      "author": "Paul Miller",
+      "source": "https://github.com/paulmillr/noble-hashes",
+      "_about": "Browser build only. The server side reaches SHAKE256, SHA3-512, HMAC and HKDF through node:crypto, which has carried all four since the Node floor — a .cjs here would be a bundle nothing requires. A browser has no node:crypto, so the client half of a hybrid exchange needs its own copy, and this is the one blamejs owns, hashes, currency-checks and lists in its SBOM rather than a second vendoring path maintained consumer-side. The version matches the copy that @noble/curves and @noble/post-quantum already inline, so the browser hash and the hash inside the server's PQC bundle are the same code.",
+      "exports": [
+        "shake128",
+        "shake256",
+        "sha3_256",
+        "sha3_512",
+        "sha256",
+        "sha512",
+        "hmac",
+        "hkdf"
+      ],
+      "files": {
+        "browser": "lib/vendor/browser/noble-hashes.mjs"
+      },
+      "bundler": "esbuild --format=esm --platform=browser (browser only)",
+      "bundledAt": "2026-08-27T00:00:00Z",
+      "cpe": "cpe:2.3:a:paulmillr:noble-hashes:2.4.0:*:*:*:*:node.js:*:*",
+      "hashes": {
+        "browser": "sha256:0e135cbb496a1b7d15bf36b8c611a8feaad49ced60a03bf916bada78b589aa66"
+      },
+      "refreshedAt": "2026-08-28T04:49:21.011Z"
+    },
+    "@noble/curves": {
+      "version": "2.4.0",
+      "license": "MIT",
+      "author": "Paul Miller",
+      "source": "https://github.com/paulmillr/noble-curves",
+      "exports": [
+        "ristretto255_oprf",
+        "p256_oprf",
+        "p384_oprf",
+        "p521_oprf"
+      ],
+      "files": {
+        "server": "lib/vendor/noble-curves.cjs"
+      },
+      "bundler": "esbuild --format=cjs --platform=node",
+      "bundledAt": "2026-08-27T00:00:00Z",
+      "cpe": "cpe:2.3:a:paulmillr:noble-curves:2.4.0:*:*:*:*:node.js:*:*",
+      "hashes": {
+        "server": "sha256:477359f445eed241ad4ededb84921483c3c97618a160ef78b74bb1a421c17da7"
+      },
+      "refreshedAt": "2026-08-28T04:49:21.011Z",
+      "components": {
+        "@noble/hashes": {
+          "url": "https://github.com/paulmillr/noble-hashes",
+          "version": "2.4.0"
+        }
+      }
+    },
+    "@noble/post-quantum": {
+      "version": "0.7.1",
+      "license": "MIT",
+      "author": "Paul Miller",
+      "source": "https://github.com/paulmillr/noble-post-quantum",
+      "_about": "FIPS 203 / 204 / 205 PQC algorithms in pure JS. First-class on both server-side and client-side — interoperable with Node's built-in WebCrypto ML-KEM (a ciphertext encapsulated with Node ML-KEM-1024 decapsulates correctly with b.pqcSoftware.ml_kem_1024 and vice versa). Operators wire it server-side via `b.pqcSoftware.{ml_kem_1024,ml_dsa_87,slh_dsa_shake_256f,...}` (security-first defaults are the highest cat-5 levels), or re-bundle for browser / mobile clients shipping b.middleware.apiEncrypt.client. Older Node versions without the experimental WebCrypto ML-KEM extension can use the vendored bundle as the primary PQC path.",
+      "exports": [
+        "ml_kem512",
+        "ml_kem768",
+        "ml_kem1024",
+        "ml_dsa44",
+        "ml_dsa65",
+        "ml_dsa87",
+        "slh_dsa_sha2_128f",
+        "slh_dsa_sha2_192f",
+        "slh_dsa_sha2_256f",
+        "slh_dsa_shake_128f",
+        "slh_dsa_shake_192f",
+        "slh_dsa_shake_256f"
+      ],
+      "browser_exports": [
+        "ml_kem512",
+        "ml_kem768",
+        "ml_kem1024"
+      ],
+      "files": {
+        "server": "lib/vendor/noble-post-quantum.cjs",
+        "browser": "lib/vendor/browser/noble-post-quantum.mjs"
+      },
+      "bundler": "esbuild --format=cjs --platform=node (server), esbuild --format=esm --platform=browser (browser)",
+      "bundledAt": "2026-08-27T00:00:00Z",
+      "cpe": "cpe:2.3:a:paulmillr:noble-post-quantum:0.7.1:*:*:*:*:node.js:*:*",
+      "hashes": {
+        "server": "sha256:04eaaa4838b43162912c851dd2cab52ab82f56decad8542934171247017a6893",
+        "browser": "sha256:30ceef750bc57ae5f59c5aa7454eafb7aad55d30c261a1b5c538a66c569fc031"
+      },
+      "refreshedAt": "2026-08-28T04:49:21.011Z",
+      "components": {
+        "@noble/hashes": {
+          "url": "https://github.com/paulmillr/noble-hashes",
+          "version": "2.4.0"
+        },
+        "@noble/curves": {
+          "url": "https://github.com/paulmillr/noble-curves",
+          "version": "2.4.0"
+        },
+        "@noble/ciphers": {
+          "url": "https://github.com/paulmillr/noble-ciphers",
+          "version": "2.4.0"
+        }
+      }
+    },
+    "SecLists-common-passwords-top-10000": {
+      "version": "10k-most-common (master)",
+      "license": "CC-BY-3.0",
+      "author": "Daniel Miessler / SecLists contributors",
+      "source": "https://github.com/danielmiessler/SecLists",
+      "_about": "Top 10,000 most-common passwords (breach-derived). Loaded by b.auth.password.policy() to satisfy NIST 800-63B §5.1.1.2 'previously breached' check. Operators with deeper enforcement (HIBP downloads, NCSC 100k) layer on top via opts.forbidCommon — the bundled set is additive.",
+      "files": {
+        "server": "lib/vendor/common-passwords-top-10000.txt",
+        "data_js": "lib/vendor/common-passwords-top-10000.data.js"
+      },
+      "bundler": "curl https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10k-most-common.txt",
+      "bundledAt": "2026-05-13T00:00:00Z",
+      "hashes": {
+        "server": "sha256:3c04e3cec775a7d0e21e544d33810dd434cccdb02e98903ba12e506dd9cd01bd",
+        "data_js": "sha256:87b223beca89f33d2c2c32a2cfda0bc187e58061de40e7127bb5ffc4258c6e2a"
+      },
+      "runtime_artifact": "lib/vendor/common-passwords-top-10000.data.js",
+      "integrity_layers": "sha256 + sha3-512 + SLH-DSA-SHAKE-256f signature + in-payload canary (where applicable)",
+      "refreshedAt": "2026-08-28T04:49:21.011Z"
+    },
+    "bimi-trust-anchors": {
+      "version": "operator-managed",
+      "license": "BIMI Group / per-issuer",
+      "license_is_spdx": false,
+      "author": "BIMI Group / DigiCert / Entrust",
+      "source": "https://bimigroup.org/",
+      "_about": "BIMI (draft-blank-ietf-bimi) Group Verified Mark trust-anchor bundle (PEM, concatenated). Loaded by lib/mail-bimi.js for VMC + CMC chain validation. Source-tree default is empty-of-PEM — operators populate via the documented refresh procedure in the file header below; call-site overrides via b.mail.bimi.fetchAndVerifyMark({ trustAnchorsPem }) are supported. Refresh procedure pulls https://www.digicert.com/CACerts/DigiCertVerifiedMarkRootCA.pem + https://web.entrust.com/root-certificates/entrust_verified_mark_root_g3.cer and concatenates them into the file. The empty default ships with a runtime warning when b.mail.bimi loads it absent any operator-supplied trustAnchorsPem call-site override — the canary skip is intentional (the dual-hash + SLH-DSA signature cover the threat for a non-empty bundle; an empty bundle has no canary to verify).",
+      "_warning": "Empty PEM default — populate before invoking b.mail.bimi.fetchAndVerifyMark in production. b.mail.bimi emits a `bimi.trust-anchors.empty` runtime warning when this default is used without an operator-supplied trustAnchorsPem call-site override.",
+      "exports": [
+        "bimi-vmc-trust-anchors"
+      ],
+      "files": {
+        "server": "lib/vendor/bimi-trust-anchors.pem",
+        "data_js": "lib/vendor/bimi-trust-anchors.data.js"
+      },
+      "bundler": "operator-managed (see file header for refresh procedure)",
+      "bundledAt": "2026-08-17T00:00:00Z",
+      "hashes": {
+        "server": "sha256:5a2a4c695ff86db813284a35f985db7edf55b221fbd6e7d2ad7eb08344eccd72",
+        "data_js": "sha256:59ab628e10a3e10aa2e189cdb835e5d786939cc45f793e0e0390816ec3e9a0fd"
+      },
+      "runtime_artifact": "lib/vendor/bimi-trust-anchors.data.js",
+      "integrity_layers": "sha256 + sha3-512 + SLH-DSA-SHAKE-256f signature + in-payload canary (where applicable)",
+      "refreshedAt": "2026-08-28T04:49:21.011Z"
+    },
+    "publicsuffix-list": {
+      "version": "master",
+      "license": "MPL-2.0",
+      "author": "Mozilla Foundation",
+      "source": "https://publicsuffix.org/list/public_suffix_list.dat",
+      "_about": "Mozilla Public Suffix List — canonical catalog of effective top-level domains used by b.publicSuffix to derive organizational domains for DMARCbis (psd= / np=), BIMI, cookie-scope checks, and same-site policies. Loaded at module-init from lib/vendor/public-suffix-list.dat; the file is the data, not a code bundle.",
+      "files": {
+        "server": "lib/vendor/public-suffix-list.dat",
+        "data_js": "lib/vendor/public-suffix-list.data.js"
+      },
+      "bundler": "curl https://publicsuffix.org/list/public_suffix_list.dat",
+      "bundledAt": "2026-08-19T00:00:00Z",
+      "hashes": {
+        "server": "sha256:75142784c0308c8f7cd27f15fca80b9ddc09aeec05ae51c2f54fd0958351d9ad",
+        "data_js": "sha256:2435668e6d9964d95b283e5796938aa7c626ea0ca1eed4af8b1abec034f1761b"
+      },
+      "runtime_artifact": "lib/vendor/public-suffix-list.data.js",
+      "integrity_layers": "sha256 + sha3-512 + SLH-DSA-SHAKE-256f signature + in-payload canary (where applicable)",
+      "refreshedAt": "2026-08-28T04:49:21.011Z"
+    },
+    "@blamejs/pki": {
+      "version": "0.5.31",
+      "license": "Apache-2.0",
+      "author": "blamejs",
+      "source": "https://github.com/blamejs/pki",
+      "exports": [
+        "x509",
+        "crl",
+        "pkcs12",
+        "key",
+        "webcrypto",
+        "schema",
+        "csr",
+        "cms",
+        "ocsp",
+        "tsp"
+      ],
+      "files": {
+        "server": "lib/vendor/blamejs-pki.cjs"
+      },
+      "bundler": "esbuild --format=cjs --platform=node --external:crypto --external:node:crypto",
+      "bundledAt": "2026-08-25T00:00:00Z",
+      "cpe": "cpe:2.3:a:blamejs:pki:0.5.31:*:*:*:*:node.js:*:*",
+      "hashes": {
+        "server": "sha256:8cc54fdfb7ac5277fb30f054f57500a9e77ce6b2d2b8f6846a14766d217770db"
+      },
+      "refreshedAt": "2026-08-28T04:49:21.011Z"
+    }
+  }
+}

@@ -1,0 +1,188 @@
+# Workflow lint gate. Three tools, three layers:
+#
+#   - pinact refuses any `uses:` reference that isn't pinned to a
+#     40-character SHA carrying a tag-shaped version comment, and
+#     refuses a version comment that no longer matches the registered
+#     tag for that SHA. Defense against the CVE-2025-30066 class (the
+#     tj-actions/changed-files retroactive tag rewrite, March 2025).
+#     Exceptions live in .pinact.yaml.
+#   - zizmor runs a workflow-security audit: template injection,
+#     excessive permissions, dangerous triggers, unpinned uses, cache
+#     poisoning, ref confusion, impostor commits, unredacted secrets,
+#     and more.
+#   - actionlint does syntax and expression validation, plus shellcheck
+#     on every `run:` block.
+#
+# All three are necessary; none subsumes the others.
+
+name: actions lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '.pinact.yaml'
+      - '.github/zizmor.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: actions-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pinact:
+    name: pinact SHA and version-comment integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinact (release binary + sha256 verify)
+        # Install from the upstream release binary rather than the
+        # pinact-action wrapper: the wrapper is built for an
+        # auto-fix-and-commit flow, and this gate wants check-only
+        # behavior with full control over exit semantics.
+        env:
+          PINACT_VERSION: v3.10.1
+        run: |
+          set -euo pipefail
+          V="${PINACT_VERSION#v}"
+          curl -fsSLo /tmp/pinact.tar.gz "https://github.com/suzuki-shunsuke/pinact/releases/download/${PINACT_VERSION}/pinact_linux_amd64.tar.gz"
+          curl -fsSLo /tmp/pinact-checksums.txt "https://github.com/suzuki-shunsuke/pinact/releases/download/${PINACT_VERSION}/pinact_${V}_checksums.txt"
+          # Verify the downloaded tarball against the upstream-published
+          # checksum line. A retroactively rewritten upstream tarball
+          # fails closed. The workflow refuses rather than running an
+          # unverified binary.
+          ACTUAL=$(sha256sum /tmp/pinact.tar.gz | awk '{print $1}')
+          EXPECTED=$(grep 'pinact_linux_amd64.tar.gz$' /tmp/pinact-checksums.txt | awk '{print $1}')
+          if [ -z "$EXPECTED" ]; then
+            echo "::error::could not find pinact_linux_amd64.tar.gz line in the upstream checksums"
+            exit 1
+          fi
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::pinact tarball sha256 ${ACTUAL} does not match upstream-published ${EXPECTED}"
+            exit 1
+          fi
+          mkdir -p /tmp/pinact-bin
+          tar -xzf /tmp/pinact.tar.gz -C /tmp/pinact-bin
+          sudo install -m 0755 /tmp/pinact-bin/pinact /usr/local/bin/pinact
+          pinact --version
+
+      - name: pinact run --check (refuses any tag-shaped `uses:` reference)
+        # Exits nonzero if any `uses:` reference is tag-pinned rather
+        # than SHA-pinned, honoring the .pinact.yaml exceptions. This is
+        # the structural defense against the retroactive-tag-rewrite
+        # class.
+        run: |
+          set -euo pipefail
+          pinact run --check
+
+      - name: pinact run --verify (refuses version-comment / SHA mismatch)
+        # Re-resolves each pinned SHA's registered tag at check time and
+        # refuses if the version comment disagrees, catching an action
+        # whose tag was rewritten AFTER the workflow was pinned.
+        # Composing with `--check` keeps the gate in refuse mode rather
+        # than auto-rewriting.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pinact run --verify --check
+
+  zizmor:
+    name: zizmor workflow security audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install zizmor (release binary + sha256 verify)
+        # Direct release-binary install rather than a third-party setup
+        # action: a setup action can startup_failure the whole workflow
+        # before any job runs; a `run:` step cannot. zizmor publishes no
+        # checksums file, so the expected sha256 is pinned inline and a
+        # mismatch fails closed.
+        env:
+          ZIZMOR_VERSION: v1.18.0
+          ZIZMOR_SHA256:  8e7901319ab7b71c38d6d388a48e02ff65791e5971b2ee6577c9b5c3ab44c65f
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/zizmor.tar.gz "https://github.com/zizmorcore/zizmor/releases/download/${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          ACTUAL=$(sha256sum /tmp/zizmor.tar.gz | awk '{print $1}')
+          if [ "$ACTUAL" != "$ZIZMOR_SHA256" ]; then
+            echo "::error::zizmor tarball sha256 ${ACTUAL} does not match pinned ${ZIZMOR_SHA256}"
+            exit 1
+          fi
+          mkdir -p /tmp/zizmor-bin
+          tar -xzf /tmp/zizmor.tar.gz -C /tmp/zizmor-bin ./zizmor
+          sudo install -m 0755 /tmp/zizmor-bin/zizmor /usr/local/bin/zizmor
+          zizmor --version
+
+      - name: Run zizmor (fail on level=low across every rule class)
+        # Pure run-gate: zizmor exits nonzero on any finding. An inline
+        # `# zizmor: ignore[<rule>]` comment, with the reason written
+        # after it, is the suppression mechanism for a reviewed
+        # exception; `.github/zizmor.yml` carries the ones that cannot
+        # be written inline.
+        run: |
+          set -euo pipefail
+          zizmor --min-severity low --no-progress .github/workflows/
+
+  actionlint:
+    name: actionlint over YAML, expressions and shellcheck on `run:` blocks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint (release binary + sha256 verify)
+        # Direct release-binary install instead of a composite action:
+        # a composite can startup_failure the runner and take the whole
+        # workflow down before any job runs. The binary path also drops
+        # its transitive action surface, which fits a gate whose purpose
+        # is pinning discipline. Mirrors the pinact install above.
+        env:
+          ACTIONLINT_VERSION: v1.7.12
+        run: |
+          set -euo pipefail
+          V="${ACTIONLINT_VERSION#v}"
+          curl -fsSLo /tmp/actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}/actionlint_${V}_linux_amd64.tar.gz"
+          curl -fsSLo /tmp/actionlint-checksums.txt "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}/actionlint_${V}_checksums.txt"
+          ACTUAL=$(sha256sum /tmp/actionlint.tar.gz | awk '{print $1}')
+          EXPECTED=$(grep "actionlint_${V}_linux_amd64.tar.gz\$" /tmp/actionlint-checksums.txt | awk '{print $1}')
+          if [ -z "$EXPECTED" ]; then
+            echo "::error::could not find actionlint_${V}_linux_amd64.tar.gz line in the upstream checksums"
+            exit 1
+          fi
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::actionlint tarball sha256 ${ACTUAL} does not match upstream-published ${EXPECTED}"
+            exit 1
+          fi
+          mkdir -p /tmp/actionlint-bin
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp/actionlint-bin actionlint
+          sudo install -m 0755 /tmp/actionlint-bin/actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - name: Run actionlint (+ shellcheck on every run block)
+        # shellcheck ships preinstalled on ubuntu-latest; actionlint
+        # invokes it on each `run:` block automatically. A nonzero exit
+        # on any finding keeps this a hard gate.
+        run: |
+          set -euo pipefail
+          actionlint -color

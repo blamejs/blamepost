@@ -1,0 +1,64 @@
+# Socket Security policy for @blamejs/blamepost.
+# https://docs.socket.dev/docs/socket-yml
+#
+# blamepost ships ZERO npm runtime dependencies. The package.json
+# "dependencies" object is empty. The framework it composes, blamejs, is
+# vendored under lib/vendor/blamejs/ from a pinned, integrity-verified
+# registry tarball, and is only ever changed through
+# scripts/vendor-update.sh. The vendored tree is read-only here.
+#
+# The alert classes disabled below are inherent to what this package IS:
+# a mail server that listens on the network, reads its configuration
+# from the environment, and stores messages and keys on disk. They fire
+# identically on every release for the same benign reasons, so they are
+# dispositioned once, with rationale, rather than re-triaged each time.
+# A genuinely new surface can only arrive through a vendor refresh,
+# which is reviewed as its own change.
+#
+# The eval class is deliberately left enabled: nothing in this
+# repository builds a function from a string, so a future eval alert is
+# a real regression signal rather than noise.
+
+version: 2
+
+issueRules:
+  # Network access is the product. SMTP on 25, submission on 465 and 587,
+  # IMAP on 143, POP3 on 110, ManageSieve on 4190, the
+  # web app on 8080 and 8443, plus outbound MX lookup and delivery, and
+  # DNS.
+  networkAccess: false
+
+  # Environment variable access: configuration reads process.env for
+  # the BLAMEPOST_* variables (hostname, data directory, ports, vault
+  # passphrase, log level, listener toggles). Expected configuration
+  # surface.
+  envVars: false
+
+  # URL strings: RFC reference links in documentation and comments, and
+  # the reserved example domains used throughout the docs. Nothing is
+  # fetched at runtime beyond the endpoints an operator configures.
+  urlStrings: false
+
+  # Filesystem access: the server writes the message store, the blob
+  # directory, the outbound queue, sealed DKIM keys and structured logs
+  # under its data directory, and reads the operator's certificate from
+  # it. Filesystem access is the product, not an anomaly.
+  filesystemAccess: false
+
+  # Minified code: this detector also fires on high-density
+  # embedded-asset files. The vendored framework carries signed data
+  # payloads of that shape by design (a wrapped base64 body plus a
+  # signature line), each verified at load against its recorded hashes
+  # and signature. Known and reviewed at the pinned vendored release.
+  minifiedFile: false
+
+  # Copyleft license: the vendored framework carries the Public Suffix
+  # List verbatim under MPL-2.0, a data file rather than code. It is
+  # attributed in the vendored tree's NOTICE with its canonical source,
+  # satisfying MPL-2.0 section 3.2 source availability.
+  copyleftLicense: false
+
+  # Non-permissive license: the vendored framework carries a common
+  # password list under CC-BY-3.0, also a data file, attributed in the
+  # vendored tree's NOTICE with its copyright and source.
+  nonpermissiveLicense: false

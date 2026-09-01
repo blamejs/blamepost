@@ -1,0 +1,20 @@
+{
+  "packages": {
+    "blamejs": {
+      "version": "0.18.57",
+      "npm": "@blamejs/core",
+      "license": "Apache-2.0",
+      "source": "https://registry.npmjs.org/@blamejs/core/-/core-0.18.57.tgz",
+      "integrity": "sha512-DoywmBtu09b8A3drHufAZlBCbj1LKaSDIG27YZ3zXiPhLaXkX6Px6+iO9vwGy2lAFm81n+9oQb3NXCJ+xNc65A==",
+      "bundledAt": "2026-08-29T00:00:00Z",
+      "bundler": "npm registry tarball, integrity-verified before extraction",
+      "files": {
+        "server": "lib/vendor/blamejs/"
+      },
+      "hashes": {
+        "server": "sha256-tree:dbbaf7a16fd5d3dfbd48d03ff0c87a9b17b71b17380e57d648a0d80de8e66f15"
+      },
+      "refreshedAt": "2026-08-30T03:51:58.837Z"
+    }
+  }
+}

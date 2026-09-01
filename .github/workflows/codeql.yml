@@ -1,0 +1,54 @@
+name: CodeQL SAST
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "31 5 * * 1"
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  analyze:
+    name: CodeQL analysis (javascript-typescript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      security-events: write
+      contents: read
+      actions: read          # required for SARIF upload on private/GHAS repos
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # CodeQL maintains a single combined language ID for JavaScript +
+      # TypeScript. blamepost ships CommonJS JavaScript only (no
+      # transpilation step, because every transpilation hop is a
+      # supply-chain hop); the language ID picks up the .js files
+      # under lib/ and bin/ regardless.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28  # v4.37.8
+        with:
+          languages: javascript-typescript
+          # Scope (paths) and query suite live in the config file so
+          # analysis covers the deployed surface, which is the mail
+          # stack, the web app and the CLI. Test fixtures, build
+          # tooling and the vendored tree stay out of scope.
+          # security-extended catches SQL
+          # injection, XSS, prototype pollution, command injection,
+          # ReDoS, unsafe deserialization, SSRF and hardcoded
+          # credentials; findings surface as SARIF in the Security tab.
+          config-file: ./.github/codeql/codeql-config.yml
+
+      # Auto-build is skipped: CommonJS needs no build step, and CodeQL
+      # extracts straight from source.
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28  # v4.37.8
+        with:
+          category: "/language:javascript-typescript"

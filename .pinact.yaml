@@ -1,0 +1,44 @@
+# pinact configuration. It refuses any tag-shaped `uses:` reference except
+# the documented exceptions below.
+#
+# 1. The SLSA reusable workflow. SLSA's internal builder-fetch step
+#    refuses non-tag `BUILDER_REF` values ("Invalid ref: <40-hex>.
+#    Expected ref of the form refs/tags/vX.Y.Z"), so the call MUST be
+#    tag-pinned. Mitigated by slsa-framework's upstream tag-protection
+#    and immutable-release rules. The same suppression appears as a
+#    per-line `# allow:slsa-framework-action-not-sha-pinned` marker in
+#    `.github/workflows/npm-publish.yml` for the codebase-patterns gate.
+#
+# 2. aquasecurity/trivy-action. The aquasecurity organization enables a
+#    GitHub org-level IP allow-list that returns 403 to Actions runner
+#    IPs on the commits API, so `pinact run --verify`'s online tag
+#    re-resolution cannot complete from CI (it succeeds from
+#    unrestricted IPs). The action stays SHA-pinned in the workflow and
+#    remains auditable inline; this entry only exempts it from the
+#    online re-verification that the upstream organization makes
+#    impossible from a runner.
+#
+# This list answers one question: should pinact rewrite a reference to a
+# commit id. It does not answer whether the pinned version is still the
+# latest release, and `scripts/check-actions-currency.js` keeps the two
+# apart. A commit-id pin named here is exempt from that gate as well,
+# because the reason it is here is an API that refuses the runner. A
+# tag-pinned reference named here is not: the entry says only "leave this
+# one tag-shaped", and a tag can be repointed at new code with no local
+# diff, so the version behind it is the only thing left to check.
+
+version: 3
+
+ignore_actions:
+  # pinact v3 treats both `name` and `ref` as regular expressions, and
+  # both are required (a name-only entry fails config load with
+  # "initialize ignore_action: ref is required"). `ref: .*` matches the
+  # tag-pinned ref this single exception carries.
+  - name: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml
+    ref: .*
+  # Pinned to the exact SHA the workflows reference, so a future
+  # tag-shaped trivy-action reference no longer matches this exemption
+  # and fails `pinact run --check` instead of riding the wildcard
+  # through.
+  - name: aquasecurity/trivy-action
+    ref: ^ed142fd0673e97e23eac54620cfb913e5ce36c25$

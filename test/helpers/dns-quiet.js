@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
+"use strict";
+/**
+ * A command-line run whose resolver has gone quiet.
+ *
+ * The posture check reads DNS through the resolver `blamepost.resolver()`
+ * builds, and that resolver fetches over DoH from whatever endpoint
+ * `b.network.dns.useDnsOverHttps` names. Pointing the endpoint at an
+ * address nothing answers on is therefore the whole fault: every lookup
+ * fails to complete, through the shipped transport, with no handle
+ * replaced and nothing patched.
+ *
+ * It has to be loaded into the spawned process, because the claim under
+ * test is what `blamepost doctor` prints and what it exits with, and both
+ * belong to a process the caller does not share.
+ *
+ * The address is the loopback discard port. A connection refused is a
+ * lookup that failed in a few milliseconds, which is the same verdict a
+ * silent nameserver produces at the end of a budget and costs no wall
+ * clock to reach. Callers check the port is closed before they rely on
+ * it, since a machine that has something listening there would be
+ * measuring a different failure.
+ *
+ * Nothing under `lib/` or `bin/` reads the variable below, and the run
+ * takes the shipped code path in full. The guard is here so a caller can
+ * read the endpoint out of this file without pointing its own resolver
+ * at a dead port by doing so.
+ */
+
+var b = require("../../lib/vendor/blamejs");
+
+// Where the resolver is sent. Port 9 is the discard service, which
+// nothing runs, so a connection to it is refused rather than accepted
+// and left hanging.
+var QUIET_HOST = "127.0.0.1";
+var QUIET_PORT = 9;
+var QUIET_ENDPOINT = "https://" + QUIET_HOST + ":" + QUIET_PORT + "/dns-query";
+
+// The variable the spawner sets on the run under test. Read here and
+// nowhere else in the repository.
+var ARMED_VAR = "BLAMEPOST_DNS_QUIET";
+
+if (process.env[ARMED_VAR] === "1") {
+  b.network.dns.useDnsOverHttps({ url: QUIET_ENDPOINT });
+}
+
+module.exports = {
+  // The path to hand `--require`, so a caller names this file by asking
+  // it rather than by rebuilding the path and drifting from it.
+  PRELOAD:   __filename,
+  ARMED_VAR: ARMED_VAR,
+  HOST:      QUIET_HOST,
+  PORT:      QUIET_PORT,
+  ENDPOINT:  QUIET_ENDPOINT,
+};

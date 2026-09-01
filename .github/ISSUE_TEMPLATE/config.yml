@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/blamejs/blamepost/security/advisories/new
+    about: Report a security vulnerability privately. SECURITY.md carries the disclosure policy and response times.
+  - name: Question or general discussion
+    url: https://github.com/blamejs/blamepost/discussions
+    about: Questions, deployment help, design discussion, or an idea you want to socialize before opening a feature request.

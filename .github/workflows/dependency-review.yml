@@ -1,0 +1,66 @@
+name: Dependency review
+
+# Two guards on a pull request:
+#  1. dependency-review-action blocks a dependency change that adds a
+#     known vulnerability (>= high) or a disallowed license.
+#  2. an explicit check that package.json declares no runtime
+#     dependencies. dependency-review only fails on advisories and
+#     licenses, so a clean-but-new permissive runtime dependency would
+#     slip past it; this step is the actual zero-runtime-dependency gate.
+on:
+  pull_request:
+    branches: [main]
+
+permissions: read-all
+
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    name: Dependency review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Enforce zero runtime dependencies
+        run: |
+          deps=$(node -e "
+            var p = require('./package.json');
+            var fields = ['dependencies', 'optionalDependencies', 'peerDependencies'];
+            var found = {};
+            fields.forEach(function (f) { Object.keys(p[f] || {}).forEach(function (k) { found[f + ':' + k] = (p[f])[k]; }); });
+            (p.bundledDependencies || p.bundleDependencies || []).forEach(function (k) { found['bundledDependencies:' + k] = true; });
+            process.stdout.write(JSON.stringify(found));
+          ")
+          if [ "$deps" != "{}" ]; then
+            echo "::error::package.json declares runtime dependencies: $deps. blamepost ships none (dependencies / optionalDependencies / peerDependencies / bundledDependencies). Vendor under lib/vendor/ with scripts/vendor-update.sh instead."
+            exit 1
+          fi
+          echo "no runtime dependencies in any field"
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
+        with:
+          fail-on-severity: high
+          # fail-on-scopes defaults to `runtime` only. This repository
+          # ships zero runtime dependencies, so its entire dependency
+          # surface is the dev toolchain, and without `development`
+          # that surface would go unchecked.
+          fail-on-scopes: runtime, development
+          # Default-DENY licenses: only these permissive SPDX
+          # identifiers are allowed, so any copyleft variant (GPL, LGPL,
+          # AGPL, and forms not enumerated) is rejected without relying
+          # on a denylist of deprecated identifiers. A compound
+          # `A AND B` license passes only when every clause is
+          # allow-listed.
+          allow-licenses: Apache-2.0, MIT, BSD-2-Clause, BSD-2-Clause-Views, BSD-3-Clause, ISC, 0BSD, Unlicense, CC0-1.0, BlueOak-1.0.0, Python-2.0
+          comment-summary-in-pr: on-failure

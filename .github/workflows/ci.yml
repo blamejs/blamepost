@@ -1,0 +1,908 @@
+# Smoke, static gates, container build and supply-chain scans on every
+# push and pull request.
+#
+# Output posture: every step's full output is shown. No step redirects
+# to `>/dev/null` and none runs with `--quiet` or `--silent`. An
+# operator reading a failed run sees what actually fired without
+# re-running it locally.
+#
+# The lint jobs additionally capture their output and surface it on the
+# workflow Step Summary and, for pull requests, in a sticky comment that
+# is updated rather than re-posted on each push.
+#
+# Every third-party action is SHA-pinned with a trailing version
+# comment; `.pinact.yaml` carries the only documented exceptions.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags:     ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Workflow-level permissions are least-privilege (read-only). Per-job
+# permissions blocks elevate only where a job genuinely needs write.
+# Only lint-summary does, to post a pull-request comment.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Backstop against a hung child no watchdog reaped. Sized above the
+    # largest per-file watchdog allowance below, which for a file that
+    # drives the shipped image is the base budget plus the harness's own
+    # image-build and health-wait ceilings, with reporting slack. A stuck
+    # job fails here instead of riding the 6-hour GitHub default.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Smoke runs on ubuntu only: the mail listeners bind POSIX
+        # sockets, and the few files that drive the shipped image need a
+        # container engine. Neither is modeled faithfully by the Windows
+        # or macOS runners.
+        os: [ubuntu-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 24.19.0 LTS
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '24.19.0'
+
+      - name: Show Node + npm version
+        run: node --version && npm --version
+
+      - name: Install devDependencies (lockfile-pinned)
+        # blamepost ships ZERO npm runtime dependencies. blamejs is
+        # vendored under lib/vendor/blamejs/, and devDependencies never
+        # reach the published tarball per the `files` allowlist in
+        # package.json. `npm ci` installs exactly the committed lockfile
+        # with integrity hashes, so OpenSSF Scorecard's
+        # Pinned-Dependencies query sees a pinned install (it keys on
+        # the `ci` verb, not a name@version specifier).
+        run: npm ci --no-audit --no-fund
+
+      - name: Build the image the container-driving tests use
+        # A few integration files drive the shipped image, and each runs
+        # in its own process. Without a prebuilt tag each would build its
+        # own copy, and under parallel smoke those builds race instead of
+        # sharing a layer cache. Build once here and point the harness at
+        # the result through the same hook a release pipeline uses to
+        # test the artifact it just produced. No build cache, so a broken
+        # layer cannot be masked by a cached one.
+        run: docker build --file Dockerfile --tag blamepost-integration:ci .
+
+      - name: Run smoke
+        env:
+          # Fork each test file rather than running one long-lived
+          # in-process pass: a file that hangs is SIGKILLed by the
+          # parent at SMOKE_FILE_TIMEOUT_MS and reported BY NAME
+          # instead of freezing the run until the job timeout. A hang
+          # looks like a vault first-run key generation stalled on a
+          # starved runner, or a listener that never releases its port.
+          SMOKE_PARALLEL: "4"
+          # Several Argon2id key-stretch calls can queue onto the libuv
+          # threadpool (default 4) at once under parallel smoke; a
+          # larger pool removes the contention and idle threads are free.
+          UV_THREADPOOL_SIZE: "16"
+          # Per-file watchdog budget, generous over the heaviest file
+          # while still failing a genuinely stuck one well inside the
+          # job ceiling. A file that drives the shipped image gets this
+          # budget plus the harness's image-build and health-wait
+          # ceilings, because a cold build runs for minutes before the
+          # test body starts.
+          SMOKE_FILE_TIMEOUT_MS: "300000"
+          # The runner holds only the files that drive the shipped image
+          # behind a container engine, and this makes an absent engine
+          # refuse the run rather than report those files as skipped.
+          # The runner image ships one; if it ever stops doing so, the
+          # tool going missing is the finding, and a skip on a release
+          # branch would otherwise read as the same green as a run that
+          # made those checks.
+          SMOKE_REQUIRE_CONTAINER: "1"
+          # The tag built above, so the container-driving files assert
+          # against one image rather than each building their own.
+          BLAMEPOST_TEST_IMAGE: blamepost-integration:ci
+        run: node test/smoke.js
+
+      - name: Upload smoke log on failure
+        # `.test-output/smoke.log` carries every line of stdout/stderr
+        # from the run via synchronous fd writes. Read it before
+        # re-running anything.
+        #
+        # The artifact also carries `smoke-<pid>.log`, the same content
+        # written a second time. That pair exists because several runs
+        # against one working tree used to destroy each other's output;
+        # here there is exactly one run, so the two agree and either can
+        # be read. The whole directory is uploaded rather than the one
+        # file, so a gate that persisted its own log arrives with it.
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: smoke-log-${{ matrix.os }}
+          path: .test-output/
+          if-no-files-found: ignore
+          retention-days: 5
+
+  api-snapshot:
+    name: API surface snapshot gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 24.19.0 LTS
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '24.19.0'
+
+      - name: Compare against the committed baseline
+        # Fails on breaking changes (removed methods, changed
+        # signatures). Additive changes are logged but pass. The
+        # baseline is refreshed at the next release commit alongside the
+        # version bump, so the new surface is tracked from then on.
+        run: node scripts/check-api-snapshot.js
+
+  static-gates:
+    # The static gates that read the committed tree and answer a question
+    # about it. Every one of them can answer from a checkout alone, so
+    # every one of them runs here, on the pull request, where a finding
+    # costs one push to act on. The alternative is a gate that first
+    # executes on a tag push, which is after the merge and after the
+    # decision it was supposed to inform.
+    #
+    # The first step runs the chain package.json declares under
+    # `scripts.gates`, rather than restating its members here. That list
+    # is the one place this repository names its static gates, and
+    # executing it means a gate added to the chain starts running
+    # pre-merge with no second edit to this file. The steps after it are
+    # the gates that are not chain members; each carries `if: always()`
+    # so one failure still leaves the rest reported in the same run
+    # instead of one per push. A failing step still fails the job.
+    #
+    # `npm ci` is deliberately absent: none of these gates loads anything
+    # from node_modules, and an install that is not needed is a minute of
+    # supply chain on every pull request.
+    name: Static gates (source-tree answerable)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 24.19.0 LTS
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '24.19.0'
+
+      - name: Declared static-gate chain (package.json scripts.gates)
+        # Codebase-patterns detectors, source comment blocks, the API
+        # surface snapshot, one spelling per word, the @status lifecycle,
+        # the engine floor, vendored-tree integrity and the pin currency.
+        # Every one of them runs and every one reports a verdict, so a
+        # failing gate no longer takes the ones behind it down with it and
+        # a single push shows all of them at once. The gates are ordered
+        # cheapest first, which decides how soon a failure is seen rather
+        # than which gates get measured.
+        run: npm run gates
+
+      - name: CHANGELOG derived from the structured release notes
+        # Reads CHANGELOG.md against release-notes/, so it answers from
+        # the checkout. Left to the publish workflow it first spoke after
+        # the merge, on the tag, where a hand-edited entry is a follow-up
+        # release rather than a review comment.
+        if: always()
+        run: node scripts/generate-changelog-entry.js --check
+
+      - name: Release-notes consolidation gate
+        if: always()
+        run: node scripts/consolidate-release-notes.js --check
+
+      - name: CHANGELOG section extract
+        # The extract the release workflow uses to pull one version's
+        # notes into the published release body. A boundary bug here
+        # publishes two releases' notes under one tag, and the shape it
+        # reads is committed, so the question is answerable now.
+        if: always()
+        run: node scripts/check-changelog-extract.js
+
+      - name: Packed-file allowlist vs .gitignore
+        # The `files` allowlist against .gitignore. It runs as the
+        # prepack hook too, but prepack only fires when somebody packs,
+        # and a pull request that breaks the allowlist should not have to
+        # wait for that.
+        if: always()
+        run: node scripts/check-pack-against-gitignore.js
+
+  vendor-currency:
+    # Asserts the vendored blamejs tree in lib/vendor/ matches the version
+    # the registry currently publishes. A stale vendored copy is a release
+    # blocker, because "zero npm runtime dependencies" is only a security
+    # posture if the snapshot being shipped is fresh. An unreachable
+    # registry reports as unknown rather than as current: a network failure
+    # that reads as up to date is the one answer this gate must never give.
+    name: Vendor currency (vendored tree vs npm latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 24.19.0 LTS
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '24.19.0'
+
+      - name: Run vendor-currency check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/check-vendor-currency.js
+
+  actions-currency:
+    # Asserts every SHA-pinned action in .github/workflows matches the
+    # latest upstream release. A stale pin becomes a release blocker
+    # HERE, with a ready-to-paste replacement line in the report, rather
+    # than surfacing later as a Dependabot pull request.
+    name: Actions currency (pinned actions vs upstream latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 24.19.0 LTS
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '24.19.0'
+
+      - name: Run actions-currency check
+        # Resolves each pinned `uses: owner/repo@<sha>  # vX.Y.Z`
+        # against the GitHub API (releases/latest, falling back to the
+        # highest semver tag) and fails on any stale finding. API errors
+        # stay advisory unless the script's strict flag is set, so a
+        # transient API hang doesn't block an unrelated release.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/check-actions-currency.js
+
+      - name: Run pin-all check (committed lockfiles + pinned digests in sync)
+        # Aggregated pin gate: verifies every committed lockfile matches
+        # its package.json, so `npm ci` installs the reviewed versions.
+        # `node scripts/pin-all.js --fix` re-pins every segment.
+        run: node scripts/pin-all.js --check
+
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          # gitleaks scans the full history on a non-shallow checkout,
+          # so a secret committed anywhere on the branch is caught even
+          # when a later commit reverts it.
+          fetch-depth: 0
+
+      - name: Install gitleaks (release binary + sha256 verify)
+        # The `gitleaks/gitleaks-action` wrapper requires a commercial
+        # license for organization accounts; the underlying binary is
+        # Apache-2.0 with no such requirement, so install and invoke it
+        # directly. Exact version plus an inline expected sha256: a
+        # checksums file downloaded from the same release as the tarball
+        # can only detect transport corruption, because a compromised
+        # release ships matching checksums. The expected hash is pinned
+        # here instead, where a bump is reviewed before it can execute
+        # in CI. New detection rules ride deliberate version bumps.
+        #
+        # Authenticate the github.com download so the shared-runner-IP
+        # unauthenticated rate limit does not 403 the install mid-run;
+        # curl drops the Authorization header on the cross-host redirect
+        # to the release-asset CDN, so the token only reaches github.com.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256:  551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          TARBALL="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          BASE="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -o "/tmp/${TARBALL}" "${BASE}/${TARBALL}"
+          ACTUAL=$(sha256sum "/tmp/${TARBALL}" | awk '{print $1}')
+          if [ "$ACTUAL" != "$GITLEAKS_SHA256" ]; then
+            echo "::error::gitleaks tarball sha256 ${ACTUAL} does not match pinned ${GITLEAKS_SHA256}"
+            exit 1
+          fi
+          tar -xzf "/tmp/${TARBALL}" -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Run gitleaks
+        # The ruleset catches cloud credentials, registry tokens and
+        # generic high-entropy strings. `.gitleaks.toml` carries the
+        # allowlist for the vendored crypto bundles, whose binary
+        # payloads trip entropy heuristics. `--redact` strips secret
+        # values from the report so an accidentally-committed one is not
+        # re-printed in the CI log.
+        run: |
+          set -euo pipefail
+          gitleaks git --config=.gitleaks.toml --redact --verbose --exit-code=1
+
+  osv-scan:
+    name: OSV-Scanner (known CVEs in the vendored tree)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 24.19.0 LTS
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '24.19.0'
+
+      - name: Build vendored-tree CycloneDX SBOM
+        # blamejs is vendored under lib/vendor/, so `npm audit` and
+        # Dependabot never see it. The vendor-currency job tracks
+        # whether the vendored copy is up to date, but currency is not
+        # the same as "no known CVE": this SBOM emits each vendored
+        # library as an npm purl so a published advisory can be matched
+        # against the exact version being shipped.
+        run: node scripts/build-vendored-sbom.js > sbom.vendored.cdx.json
+
+      - name: Detect vendored bundles
+        # lib/vendor/ holds only its manifest until the first vendor
+        # refresh lands, and OSV-Scanner warns rather than no-ops when a
+        # directory target contains nothing scannable. Gate the
+        # directory scan on real vendored content so the scan is exact
+        # in both states. It is never silenced with a blanket allow
+        # flag, which would also mute a future misconfigured scan.
+        id: vendor
+        run: |
+          set -euo pipefail
+          COUNT=$(find lib/vendor -type f ! -name 'MANIFEST.json' ! -name 'README.md' | wc -l)
+          echo "vendored files: $COUNT"
+          if [ "$COUNT" -gt 0 ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "lib/vendor/ carries no vendored bundle yet, so the directory scan is skipped."
+          fi
+
+      - name: Scan the dev toolchain lockfile
+        # The published tarball ships zero runtime dependencies, so the
+        # scannable dependency surface is the dev toolchain the
+        # committed lockfile pins, which is exactly the supply chain
+        # that runs during a release.
+        uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67  # v2.5.1
+        with:
+          scan-args: |-
+            --lockfile=package-lock.json
+
+      - name: Scan the vendored tree for known CVEs
+        # A hit means a published advisory affects a version being
+        # vendored: refresh with `bash scripts/vendor-update.sh` (the
+        # vendor-currency job names the upstream release) and re-run.
+        if: steps.vendor.outputs.present == 'true'
+        uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67  # v2.5.1
+        with:
+          scan-args: |-
+            --sbom=sbom.vendored.cdx.json
+            -r lib/vendor/
+
+  semgrep:
+    name: Semgrep (complementary SAST)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Semgrep
+        # OSS CLI from PyPI tracking latest, because a SAST ruleset is
+        # a moving security target and the engine is what fetches it. pipx ships
+        # on the ubuntu-latest runner image and installs into an
+        # isolated virtualenv, sidestepping PEP-668.
+        run: |
+          set -euo pipefail
+          pipx install semgrep
+          semgrep --version
+
+      - name: Run Semgrep (curated security packs, ERROR severity)
+        # Complementary to CodeQL: the registry security-audit and
+        # javascript packs are a different rule set. Scoped to the
+        # shipped surface at ERROR severity, which is the
+        # high-confidence subset, and any match fails the job.
+        # Structural-drift classes a
+        # generic SAST rule cannot express are covered by the in-repo
+        # detectors in codebase-patterns.test.js. A confirmed false
+        # positive is silenced with an inline `// nosemgrep: <rule>`
+        # carrying the reason.
+        run: |
+          semgrep scan \
+            --config=p/security-audit \
+            --config=p/javascript \
+            --severity=ERROR \
+            --error \
+            --metrics=off \
+            --disable-version-check \
+            --exclude=lib/vendor \
+            lib/ bin/
+
+  lint-actions:
+    name: actionlint (workflow lint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint (release binary + sha256 verify)
+        # Direct release-binary install instead of a composite action:
+        # a composite can startup_failure the runner and take the whole
+        # workflow down before any job runs, and the binary path drops
+        # its transitive action surface. Mirrors the install pattern in
+        # actions-lint.yml.
+        env:
+          ACTIONLINT_VERSION: v1.7.12
+        run: |
+          set -euo pipefail
+          V="${ACTIONLINT_VERSION#v}"
+          curl -fsSLo /tmp/actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}/actionlint_${V}_linux_amd64.tar.gz"
+          curl -fsSLo /tmp/actionlint-checksums.txt "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}/actionlint_${V}_checksums.txt"
+          ACTUAL=$(sha256sum /tmp/actionlint.tar.gz | awk '{print $1}')
+          EXPECTED=$(grep "actionlint_${V}_linux_amd64.tar.gz\$" /tmp/actionlint-checksums.txt | awk '{print $1}')
+          if [ -z "$EXPECTED" ]; then
+            echo "::error::could not find actionlint_${V}_linux_amd64.tar.gz line in the upstream checksums"
+            exit 1
+          fi
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::actionlint tarball sha256 ${ACTUAL} does not match upstream-published ${EXPECTED}"
+            exit 1
+          fi
+          mkdir -p /tmp/actionlint-bin
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp/actionlint-bin actionlint
+          sudo install -m 0755 /tmp/actionlint-bin/actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - name: Run actionlint
+        # actionlint shells out to the shellcheck already on the runner
+        # for every `run:` block, so a shell bug inside a workflow step
+        # is caught here too.
+        run: actionlint -color
+
+  container-build:
+    # Builds the shipped image and proves the container reaches its own
+    # declared HEALTHCHECK. This is the gate that catches a Dockerfile
+    # or entrypoint change that builds cleanly but never becomes
+    # serviceable.
+    name: Container build + healthcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      - name: Build the image into the local daemon
+        # No build cache: this job builds from source on every run so a
+        # broken layer cannot be masked by a cached one, and so the
+        # workflow keeps no writable cache for a fork pull request to
+        # poison.
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          push: false
+          tags: blamepost:ci
+
+      - name: Assert the image declares a HEALTHCHECK
+        # The healthcheck is the container's own liveness contract.
+        # Compose, Kubernetes and `docker ps` all read it. An image that
+        # declares none silently reports healthy forever, so refuse
+        # rather than smoke-test a container whose health is unknowable.
+        run: |
+          set -euo pipefail
+          DECLARED=$(docker inspect blamepost:ci --format '{{if .Config.Healthcheck}}yes{{else}}no{{end}}')
+          if [ "$DECLARED" != "yes" ]; then
+            echo "::error::The built image declares no HEALTHCHECK. Add one to the Dockerfile."
+            exit 1
+          fi
+          docker inspect blamepost:ci --format '{{json .Config.Healthcheck}}'
+
+      - name: Start the container
+        # Hardened flags match the documented run posture: every Linux
+        # capability dropped and none added back, with the unprivileged
+        # port floor lowered inside the container's own network namespace
+        # so the MX, submission, IMAP and ManageSieve listeners take their
+        # ports. That sysctl is namespaced and changes nothing on the
+        # runner. It is what compose.yml sets and what the README runs, so
+        # a healthy verdict here is a verdict on the posture an operator
+        # gets rather than on a capability nothing ships with.
+        #
+        # The certificate is generated here rather than obtained. Every
+        # listener requires TLS and none has a plaintext mode, so a
+        # container with no certificate has nothing to start. A run that
+        # reached a certificate authority would be testing the network
+        # instead of the image.
+        #
+        # BLAMEPOST_DNS_ACKNOWLEDGED is set because the boot gate refuses
+        # the whole listener sequence rather than the MX listener alone.
+        # This image hosts no domains yet, so the per domain half of the
+        # gate has nothing to wait on.
+        run: |
+          set -euo pipefail
+          VAULT_PASSPHRASE=$(openssl rand -hex 32)
+          ADMIN_PASSWORD=$(openssl rand -hex 16)
+          mkdir -p "${RUNNER_TEMP}/tls"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -subj "/CN=mx.example.com" \
+            -addext "subjectAltName=DNS:mx.example.com" \
+            -keyout "${RUNNER_TEMP}/tls/privkey.pem" \
+            -out "${RUNNER_TEMP}/tls/fullchain.pem"
+          chmod 0644 "${RUNNER_TEMP}/tls/privkey.pem" "${RUNNER_TEMP}/tls/fullchain.pem"
+          docker run -d --name blamepost-ci \
+            --init \
+            --security-opt no-new-privileges:true \
+            --cap-drop ALL \
+            --sysctl net.ipv4.ip_unprivileged_port_start=0 \
+            -v "${RUNNER_TEMP}/tls:/etc/blamepost/tls:ro" \
+            -e BLAMEPOST_HOSTNAME=mx.example.com \
+            -e BLAMEPOST_VAULT_PASSPHRASE="$VAULT_PASSPHRASE" \
+            -e BLAMEPOST_ADMIN_EMAIL=admin@example.com \
+            -e BLAMEPOST_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+            -e BLAMEPOST_TLS_CERT=/etc/blamepost/tls/fullchain.pem \
+            -e BLAMEPOST_TLS_KEY=/etc/blamepost/tls/privkey.pem \
+            -e BLAMEPOST_DNS_ACKNOWLEDGED=1 \
+            -e BLAMEPOST_LOG_LEVEL=debug \
+            blamepost:ci
+
+      - name: Wait for the container to report healthy
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 90); do
+            STATUS=$(docker inspect blamepost-ci --format '{{.State.Health.Status}}')
+            if [ "$STATUS" = "healthy" ]; then
+              echo "Container reported healthy."
+              exit 0
+            fi
+            if [ "$STATUS" = "unhealthy" ]; then
+              echo "::error::Container healthcheck reported unhealthy."
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "::error::Container never left '${STATUS}' within the wait budget."
+          exit 1
+
+      - name: Capture container diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== docker ps ==="
+          docker ps -a --filter name=blamepost-ci
+          echo "=== docker inspect (State) ==="
+          docker inspect blamepost-ci --format '{{json .State}}' || true
+          echo "=== docker logs ==="
+          docker logs blamepost-ci 2>&1 || echo "  (container gone)"
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f blamepost-ci 2>/dev/null || true
+
+  lint-eslint:
+    name: ESLint (lib + bin + scripts + tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      outcome: ${{ steps.eslint.outcome }}
+      output:  ${{ steps.eslint.outputs.output }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 24.19.0 LTS
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '24.19.0'
+
+      - name: Install devDependencies (lockfile-pinned)
+        run: npm ci --no-audit --no-fund
+
+      - name: Run ESLint (max-warnings 0)
+        # Capture the full output so the sticky pull-request comment and
+        # the Step Summary can show exactly what failed without anyone
+        # re-running it locally. `set +e` keeps the capture from
+        # short-circuiting; the original exit code is re-emitted at the
+        # end so the job still fails.
+        id: eslint
+        run: |
+          set +e
+          OUTPUT=$(npx --no-install eslint --max-warnings 0 . 2>&1)
+          EXIT_CODE=$?
+          set -e
+
+          echo "$OUTPUT"
+
+          {
+            echo "output<<ESLINT_EOF"
+            echo "$OUTPUT"
+            echo "ESLINT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "::error::ESLint found issues"
+          fi
+          exit $EXIT_CODE
+
+  lint-hadolint:
+    name: Hadolint (Dockerfile)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      outcome: ${{ steps.hadolint_result.outputs.outcome }}
+      output:  ${{ steps.hadolint_result.outputs.output }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Hadolint (strict, all severities)
+        # `no-fail` is off: any error or warning fails the job. The
+        # config at .hadolint.yaml carries the small set of rules that
+        # conflict with intentional patterns.
+        if: always()
+        id: hadolint
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387  # v3.5.0
+        with:
+          dockerfile: Dockerfile
+          config:     .hadolint.yaml
+          format:     tty
+          no-fail:    false
+          failure-threshold: warning
+
+      - name: Capture Hadolint result
+        if: always()
+        id: hadolint_result
+        env:
+          HADOLINT_OUTCOME: ${{ steps.hadolint.outcome }}
+        run: |
+          if [ -z "${HADOLINT_RESULTS:-}" ]; then
+            echo "outcome=$HADOLINT_OUTCOME" >> "$GITHUB_OUTPUT"
+            echo "output=" >> "$GITHUB_OUTPUT"
+          else
+            echo "outcome=$HADOLINT_OUTCOME" >> "$GITHUB_OUTPUT"
+            {
+              echo "output<<HADOLINT_EOF"
+              printf '%s\n' "$HADOLINT_RESULTS"
+              echo "HADOLINT_EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+  lint-shellcheck:
+    name: ShellCheck (shell scripts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      outcome: ${{ steps.shellcheck.outcome }}
+      output:  ${{ steps.shellcheck.outputs.output }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect shell scripts
+        id: sh
+        run: |
+          # The linter exits 3 on empty input, so skip the lint step
+          # when nothing matches; it re-arms the moment a tracked .sh
+          # appears.
+          count=$(git ls-files '*.sh' | wc -l)
+          echo "Tracked .sh files: $count"
+          git ls-files '*.sh' || true
+          echo "found=$count" >> "$GITHUB_OUTPUT"
+
+      - name: Run ShellCheck
+        # Captures the full output the same way ESLint does so the
+        # sticky comment and Step Summary can show what failed.
+        if: steps.sh.outputs.found != '0'
+        id: shellcheck
+        run: |
+          SCRIPTS=$(git ls-files '*.sh')
+          echo "Checking: $SCRIPTS"
+
+          set +e
+          OUTPUT=$(echo "$SCRIPTS" | xargs shellcheck --severity=style --format=gcc 2>&1)
+          EXIT_CODE=$?
+          set -e
+
+          echo "$OUTPUT"
+
+          {
+            echo "output<<SHELLCHECK_EOF"
+            echo "$OUTPUT"
+            echo "SHELLCHECK_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "::error::ShellCheck found issues"
+          fi
+          exit $EXIT_CODE
+
+  # Aggregates the three lint outcomes into one status table on the
+  # workflow Step Summary and, for pull requests, into a sticky comment.
+  # `if: always()` so the summary still posts when a lint job fails,
+  # which is the case most worth seeing at a glance.
+  lint-summary:
+    name: Lint summary
+    needs: [lint-eslint, lint-hadolint, lint-shellcheck]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write   # sticky pull-request comment with lint outcomes
+    steps:
+      - name: Build summary
+        id: summary
+        env:
+          ESLINT_OUTCOME:     ${{ needs.lint-eslint.result }}
+          HADOLINT_OUTCOME:   ${{ needs.lint-hadolint.result }}
+          SHELLCHECK_OUTCOME: ${{ needs.lint-shellcheck.result }}
+          ESLINT_OUTPUT:      ${{ needs.lint-eslint.outputs.output }}
+          HADOLINT_OUTPUT:    ${{ needs.lint-hadolint.outputs.output }}
+          SHELLCHECK_OUTPUT:  ${{ needs.lint-shellcheck.outputs.output }}
+        run: |
+          PASS="✅"
+          FAIL="❌"
+
+          ESLINT_OK=$( [ "$ESLINT_OUTCOME" = "success" ] && echo "true" || echo "false" )
+          HADOLINT_OK=$( [ "$HADOLINT_OUTCOME" = "success" ] && echo "true" || echo "false" )
+          SHELLCHECK_OK=$( [ "$SHELLCHECK_OUTCOME" = "success" ] || [ "$SHELLCHECK_OUTCOME" = "skipped" ] && echo "true" || echo "false" )
+
+          ESLINT_ICON=$( [ "$ESLINT_OK" = "true" ] && echo "$PASS" || echo "$FAIL" )
+          HADOLINT_ICON=$( [ "$HADOLINT_OK" = "true" ] && echo "$PASS" || echo "$FAIL" )
+          SHELLCHECK_ICON=$( [ "$SHELLCHECK_OK" = "true" ] && echo "$PASS" || echo "$FAIL" )
+
+          ALL_OK=true
+          [ "$ESLINT_OK" = "true" ] && [ "$HADOLINT_OK" = "true" ] && [ "$SHELLCHECK_OK" = "true" ] || ALL_OK=false
+
+          {
+            echo "body<<SUMMARY_EOF"
+            # Sticky-comment marker. It is always present so the next
+            # run's matcher finds and updates the existing comment
+            # regardless of pass/fail state.
+            echo "<!-- blamepost-lint-comment -->"
+            if [ "$ALL_OK" = "true" ]; then
+              echo "Linting finished with no errors or warnings."
+              echo ""
+            fi
+            echo "| Check | Status |"
+            echo "|-------|--------|"
+            echo "| ESLint (JS + bug-class rules) | $ESLINT_ICON |"
+            echo "| Hadolint (Dockerfile)         | $HADOLINT_ICON |"
+            echo "| ShellCheck (shell scripts)    | $SHELLCHECK_ICON |"
+
+            if [ "$ESLINT_OK" != "true" ] && [ -n "$ESLINT_OUTPUT" ]; then
+              echo ""
+              echo "<details><summary>ESLint output</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "$ESLINT_OUTPUT"
+              echo '```'
+              echo "</details>"
+            fi
+
+            if [ "$HADOLINT_OK" != "true" ] && [ -n "$HADOLINT_OUTPUT" ]; then
+              echo ""
+              echo "<details><summary>Hadolint output</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "$HADOLINT_OUTPUT"
+              echo '```'
+              echo "</details>"
+            fi
+
+            if [ "$SHELLCHECK_OK" != "true" ] && [ -n "$SHELLCHECK_OUTPUT" ]; then
+              echo ""
+              echo "<details><summary>ShellCheck output</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "$SHELLCHECK_OUTPUT"
+              echo '```'
+              echo "</details>"
+            fi
+
+            echo "SUMMARY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "all_ok=$ALL_OK" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Lint results"
+            echo ""
+            echo "| Check | Status |"
+            echo "|-------|--------|"
+            echo "| ESLint     | $ESLINT_ICON |"
+            echo "| Hadolint   | $HADOLINT_ICON |"
+            echo "| ShellCheck | $SHELLCHECK_ICON |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the pull request
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          PR_BODY: ${{ steps.summary.outputs.body }}
+        with:
+          script: |
+            const body = process.env.PR_BODY;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('<!-- blamepost-lint-comment -->')
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail if any linter failed
+        if: always()
+        env:
+          ALL_OK: ${{ steps.summary.outputs.all_ok }}
+        run: |
+          if [ "$ALL_OK" != "true" ]; then
+            echo "One or more linters failed"
+            exit 1
+          fi

@@ -1,0 +1,85 @@
+{% extends "layout" %}
+{% block title %}blamepost admin: {{ pending.title }}{% endblock %}
+{% block shell %}shell shell-admin{% endblock %}
+{% block content %}
+{{> admin-nav }}
+
+<section class="pane">
+  <header class="pane-head">
+    <div>
+      <h1 class="pane-title">{{ pending.title }}</h1>
+      <p class="pane-sub">{{ pending.summary }}</p>
+    </div>
+  </header>
+
+  {% if pending.problem %}
+  <div class="notice notice-bad" role="alert">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>{{ pending.problem }}</p>
+  </div>
+  {% endif %}
+
+  <div class="notice notice-warn" role="status">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>{{ pending.consequence }}</p>
+  </div>
+
+  {% if pending.subjects %}
+  <div class="tablewrap">
+    <table class="grid">
+      <caption class="visually-hidden">What this reaches</caption>
+      <thead>
+        <tr>
+          <th scope="col">Affected</th>
+          <th scope="col">Detail</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in pending.subjects %}
+        <tr>
+          <th scope="row"><code>{{ s.name }}</code></th>
+          <td>{{ s.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <form method="post" action="{{ pending.postTo }}" class="rowform">
+    <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+    <input type="hidden" name="action" value="{{ pending.action }}">
+    {% for f in pending.carry %}
+    <input type="hidden" name="{{ f.name }}" value="{{ f.value }}">
+    {% endfor %}
+
+    {% if pending.prompt %}
+    <div class="field">
+      <label for="confirm">{{ pending.prompt }}</label>
+      <input id="confirm" name="confirm" type="text" autocomplete="off"
+             autocapitalize="none" spellcheck="false" required>
+      <p class="hint">{{ pending.promptHint }}</p>
+    </div>
+    {% endif %}
+
+    {% if pending.needsReason %}
+    <div class="field">
+      <label for="reason">Why you are doing this</label>
+      <input id="reason" name="reason" type="text" autocomplete="off" required>
+      <p class="hint">
+        Recorded against this act in the audit trail, in a column of its own. It is what
+        somebody reading the trail afterwards has to go on, so write what you would say to
+        them rather than what fills the box.
+      </p>
+    </div>
+    {% endif %}
+
+    <div class="formbar">
+      <button type="submit" class="btn btn-danger">{{ pending.verb }}</button>
+      <a class="btn btn-quiet" href="{{ pending.backHref }}">Leave it alone</a>
+    </div>
+  </form>
+
+  <p class="fineprint">{{ pending.fineprint }}</p>
+</section>
+{% endblock %}

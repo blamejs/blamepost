@@ -1,0 +1,17 @@
+{% extends "layout" %}
+{% block title %}blamepost: {{ headline }}{% endblock %}
+{% block shell %}shell shell-centered{% endblock %}
+{% block content %}
+<section class="card card-error">
+  <p class="error-code">{{ status }}</p>
+  <h1 class="card-title">{{ headline }}</h1>
+  <p class="card-sub">{{ detail }}</p>
+  <p class="formbar">
+    {% if account %}
+    <a class="btn btn-primary" href="{{ inboxHref }}">Back to mail</a>
+    {% else %}
+    <a class="btn btn-primary" href="/sign-in">Sign in</a>
+    {% endif %}
+  </p>
+</section>
+{% endblock %}

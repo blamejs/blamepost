@@ -1,0 +1,11 @@
+<nav class="adminnav" aria-label="Administration">
+  <p class="adminnav-title">Server</p>
+  <ul>
+    {% for item in nav %}
+    <li>
+      <a class="adminnav-link{% if item.current %} is-current{% endif %}" href="{{ item.href }}"
+         {% if item.current %}aria-current="page"{% endif %}>{{ item.label }}</a>
+    </li>
+    {% endfor %}
+  </ul>
+</nav>

@@ -1,0 +1,122 @@
+# What a build uploads to the daemon before a single instruction runs.
+#
+# The syntax here is not .gitignore's, and that is the trap this file is
+# written around. A .gitignore pattern with no slash in it matches at
+# every depth, so `*.log` there reaches a log twelve directories down. A
+# .dockerignore pattern is matched against the whole relative path with
+# Go's filepath.Match, whose `*` never crosses a separator, so `*.log`
+# here means "a log in the context root" and nothing below it. The two
+# files sit side by side and read as one vocabulary; only one of them
+# means what it appears to.
+#
+# So every exclusion below carries the `**/` prefix, which covers the
+# context root as well as every directory under it. There is no bare
+# name here to read as reaching the whole tree while covering one
+# directory of it, and no judgment call about which patterns were meant
+# to reach: they all do. test/layer-2-integration/build-context.test.js
+# holds that by planting a file for every pattern in this file, at the
+# root and one directory in, and rendering the result with docker, so
+# what is asserted is where a file ends up rather than what a line says.
+#
+# The last line that matches a path decides it, which is what the
+# re-include at the end of this file depends on.
+
+# Version control and CI definitions.
+**/.git
+**/.github
+**/.gitignore
+**/.gitattributes
+
+# Editor, OS and assistant scratch.
+**/.vscode
+**/.idea
+**/.claude
+**/.DS_Store
+**/Thumbs.db
+**/desktop.ini
+
+# Maintainer-local notes and internal specs. Nothing in the build reads
+# them and they are not written for anyone running this server.
+**/CLAUDE.md
+**/AGENTS.md
+**/memory
+
+# Dependency and build output. Nothing is resolved from a registry at
+# build time: the framework is vendored in the tree and ships with it, so
+# a dependency directory in the context is a developer's local install.
+**/node_modules
+**/dist
+**/build
+**/coverage
+**/public/dist
+
+# Registry configuration. The build installs nothing, and this file is
+# where a registry credential lives when one exists.
+**/.npmrc
+
+# Runtime state. A data directory holds live mail, account credentials and
+# sealed DKIM private keys, whether it sits at the container path or at a
+# developer's local override.
+**/data
+**/data-e2e
+**/blobs
+**/queue
+**/tls
+**/acme
+**/var
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite-wal
+**/*.sqlite-shm
+
+# Test fixtures, and the diagnostics the gates persist. A gate log carries
+# captured source and whole failure transcripts.
+**/test
+**/.test-output
+**/*.log
+**/*.pid
+**/*.pid.lock
+
+# Credential and secret material, excluded at every depth rather than in
+# the context root alone.
+#
+# .env is named because the compose stack reads the vault passphrase from
+# the environment and documents a local build from this same directory in
+# the same file. An operator who follows both halves has the passphrase
+# that seals every key on their data volume sitting in the context root.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.crt
+**/*.cert
+**/*.p12
+**/*.pfx
+**/secrets.json
+**/credentials.json
+**/id_rsa*
+**/id_ed25519*
+
+# Backup and patch artifacts.
+**/*.bak
+**/*.orig
+**/*.rej
+
+# The vendored framework is what the image is built from, and one rule
+# above reaches into it: it carries a trust anchor whose extension is on
+# the credential list. An image built without that file ships a vendored
+# tree that no longer matches the one lib/vendor/MANIFEST.json pins, which
+# breaks the integrity check for everyone who did not vendor it
+# themselves. This must stay last, because the last matching line wins.
+#
+# It names the certificate shape rather than the subtree, and the
+# difference is the whole point of the line. The last matching line
+# decides a path, so a re-include written as `lib/vendor/**` does not
+# restore one anchor: it cancels every exclusion above it for everything
+# under that prefix, and the environment file, private key, registry
+# configuration and database withheld everywhere else are uploaded from
+# there. The Dockerfile copies `lib` whole into the runtime stage, so
+# those do not stop at the daemon: they ship inside the image.
+!lib/vendor/**/*.pem

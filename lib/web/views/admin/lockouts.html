@@ -1,0 +1,323 @@
+{% extends "layout" %}
+{% block title %}blamepost admin: lockouts{% endblock %}
+{% block shell %}shell shell-admin{% endblock %}
+{% block content %}
+{{> admin-nav }}
+
+<section class="pane">
+  <header class="pane-head">
+    <div>
+      <h1 class="pane-title">Sign-in lockouts</h1>
+      <p class="pane-sub">
+        Wrong passwords spend a mailbox's budget, and once it is gone the right password is
+        refused too, on every protocol at once. This is where you give it back.
+      </p>
+    </div>
+  </header>
+
+  {% if problem %}
+  <div class="notice notice-bad" role="alert">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>{{ problem }}</p>
+  </div>
+  {% endif %}
+
+  {% if empty %}
+  <div class="blank">
+    <p class="blank-head">Nothing recorded.</p>
+    <p>No mailbox has run out of sign-in attempts on this server since the audit trail begins.</p>
+  </div>
+  {% else %}
+  {% if anyStanding %}
+  <div class="notice notice-warn" role="status">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>{{ standing }} of the lockouts below are still inside the window they were recorded to lift in.</p>
+  </div>
+  {% endif %}
+
+  <div class="tablewrap">
+    <table class="grid">
+      <caption class="visually-hidden">Sign-in lockouts this server has recorded, with the counters behind them</caption>
+      <thead>
+        <tr>
+          <th scope="col">Mailbox</th>
+          <th scope="col">Counted against</th>
+          <th scope="col">Ran out</th>
+          <th scope="col">Lifts</th>
+          <th scope="col">Times</th>
+          <th scope="col">Recorded</th>
+          <th scope="col">Right now</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <th scope="row">
+            {% if r.isMailbox %}
+            <code>{{ r.address }}</code>
+            {% else %}
+            <code>{{ r.unhosted }}</code>
+            <span class="cell-detail">No mailbox here holds that address.</span>
+            {% endif %}
+          </th>
+          <td>
+            {% if r.perSource %}
+            <span class="pill">one machine</span>
+            <span class="cell-detail"><code>{{ r.source }}</code></span>
+            {% else %}
+            <span class="pill">the mailbox, from anywhere</span>
+            {% endif %}
+          </td>
+          <td>{{ r.engaged }}</td>
+          <td>{{ r.lifts }}</td>
+          <td>{{ r.runLength }}</td>
+          <td>
+            {% if r.released %}
+            <span class="pill pill-active">released</span>
+            {% else %}
+            {% if r.standing %}
+            <span class="pill pill-suspended">inside the window</span>
+            {% if r.isMailbox %}
+            <span class="cell-detail"><a href="{{ r.fillHref }}">Release this one</a></span>
+            {% endif %}
+            {% else %}
+            <span class="pill">window passed</span>
+            {% endif %}
+            {% endif %}
+          </td>
+          <td>
+            {% if r.live %}
+            {% if r.live.held %}
+            <span class="pill pill-suspended">holding now</span>
+            <span class="cell-detail">Lifts {{ r.live.lifts }}.</span>
+            {% else %}
+            <span class="pill pill-active">clear now</span>
+            {% if r.live.counting %}
+            <span class="cell-detail">{{ r.live.attempts }} wrong passwords counted since.</span>
+            {% endif %}
+            {% endif %}
+            {% if r.stale %}
+            <span class="cell-detail">
+              The record to the left has not run out yet and this budget is free, which is what a
+              row written before a restart looks like: the counters are held in the running
+              process and the rows are on disk.
+            </span>
+            {% endif %}
+            {% if r.newerHold %}
+            <span class="cell-detail">
+              Held under a lockout more recent than this row. Read the newest row for this
+              mailbox rather than this one.
+            </span>
+            {% endif %}
+            {% else %}
+            <span class="pill">no live reading</span>
+            <span class="cell-detail">
+              No mailbox here holds that address, so there is no budget to ask about.
+            </span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <h2 class="section-title">Read the counters for one mailbox</h2>
+  <p class="fineprint">
+    The table above is the record, and a mailbox reaches it only once a budget has already run
+    out. This asks the counters themselves, which are what actually refuse a password. It is
+    the way to answer somebody who cannot sign in and is not on the list: a mailbox partway
+    through its attempts is recorded nowhere, and neither is one that has never been touched.
+  </p>
+  <form method="get" action="/admin/lockouts" class="rowform">
+    <div class="field-pair">
+      <div class="field">
+        <label for="read-address">Mailbox</label>
+        <input id="read-address" name="address" type="email" autocapitalize="none"
+               spellcheck="false" value="{{ lookup.address }}" required>
+      </div>
+      <div class="field">
+        <label for="read-source">A machine, to read its own budget as well</label>
+        <input id="read-source" name="source" type="text" autocapitalize="none"
+               spellcheck="false" value="{{ lookup.source }}">
+      </div>
+    </div>
+    <button type="submit" class="btn">Read the counters</button>
+  </form>
+
+  {% if lookupProblem %}
+  <div class="notice notice-bad" role="alert">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>{{ lookupProblem }}</p>
+  </div>
+  {% endif %}
+
+  {% if lookup %}
+  <div class="tablewrap">
+    <table class="grid">
+      <caption class="visually-hidden">The sign-in budgets kept for {{ lookup.address }}, read from the counters</caption>
+      <thead>
+        <tr>
+          <th scope="col">Budget</th>
+          <th scope="col">Right now</th>
+          <th scope="col">Lifts</th>
+          <th scope="col">Wrong passwords counted</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">
+            <code>{{ lookup.address }}</code>
+            <span class="cell-detail">the mailbox, from anywhere</span>
+          </th>
+          <td>
+            {% if lookup.mailbox.held %}
+            <span class="pill pill-suspended">holding now</span>
+            {% else %}
+            <span class="pill pill-active">clear now</span>
+            {% endif %}
+          </td>
+          <td>{{ lookup.mailbox.lifts }}</td>
+          <td>
+            {% if lookup.mailbox.held %}
+            <span class="cell-detail">Not a number a held budget can carry. See below.</span>
+            {% else %}
+            {{ lookup.mailbox.attempts }} wrong passwords counted
+            {% endif %}
+          </td>
+        </tr>
+        {% if lookup.peer %}
+        <tr>
+          <th scope="row">
+            <code>{{ lookup.source }}</code>
+            <span class="cell-detail">one machine, for this mailbox</span>
+          </th>
+          <td>
+            {% if lookup.peer.held %}
+            <span class="pill pill-suspended">holding now</span>
+            {% else %}
+            <span class="pill pill-active">clear now</span>
+            {% endif %}
+          </td>
+          <td>{{ lookup.peer.lifts }}</td>
+          <td>
+            {% if lookup.peer.held %}
+            <span class="cell-detail">Not a number a held budget can carry. See below.</span>
+            {% else %}
+            {{ lookup.peer.attempts }} wrong passwords counted
+            {% endif %}
+          </td>
+        </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+  {% if lookup.sourceUnreadable %}
+  <p class="fineprint">
+    Nothing in what you named for a machine reads as an address, so there is no machine budget
+    to answer about and no machine budget was ever kept under it. The mailbox row above still
+    stands. Copy the machine out of the table above rather than retyping it: what a counter is
+    kept under is a key this server wrote, and an IPv6 client is recorded as the prefix its
+    site is allocated rather than as the address it dialled from.
+  </p>
+  {% endif %}
+  {% endif %}
+
+  <h2 class="section-title">Give a mailbox its attempts back</h2>
+  <form method="post" action="/admin/lockouts" class="rowform">
+    <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+    <div class="field-pair">
+      <div class="field">
+        <label for="address">Mailbox</label>
+        <input id="address" name="address" type="email" autocapitalize="none"
+               spellcheck="false" value="{{ filled.address }}" required>
+        <p class="hint">
+          An address this server hosts no mailbox at is refused rather than reported released,
+          so a typo here cannot read as a fix.
+        </p>
+      </div>
+      <div class="field">
+        <label for="source">The machine that was failing, if the account holder can name it</label>
+        <input id="source" name="source" type="text" autocapitalize="none"
+               spellcheck="false" value="{{ filled.source }}">
+        <p class="hint">
+          A smaller budget is kept against each source address on its own. Leaving this empty
+          releases the mailbox and leaves that one alone, which is what refuses the account
+          holder from one machine while every other machine works. Copy it out of the table
+          above rather than retyping it: a machine this server cannot read as an address
+          refuses the whole release, mailbox included, rather than releasing half of it under
+          a notice that reads as a fix.
+        </p>
+      </div>
+    </div>
+    <div class="field">
+      <label for="reason">Why</label>
+      <input id="reason" name="reason" type="text" required>
+      <p class="hint">
+        Required, and recorded in the audit trail against you. Releasing a budget is the one
+        action here that takes a defense away from somebody else's mailbox.
+      </p>
+    </div>
+    <button type="submit" class="btn btn-primary">Release the budget</button>
+  </form>
+
+  <h2 class="section-title">Reading the counts</h2>
+  <p class="fineprint">
+    A count of wrong passwords is an early warning and nothing else. The failure that spends a
+    budget resets the count, because the wait that follows is the answer rather than the
+    number, so a budget that is holding somebody out reads zero and so does a mailbox nobody
+    has ever guessed at. That is why no count is shown beside a budget that is holding. What is
+    worth reading there is the Times column in the table above: how many times that budget has
+    run out, which is what sets how long each wait is.
+  </p>
+  <p class="fineprint">
+    The Recorded column is what was written down when a budget ran out, and Right now is the
+    counter itself. They answer different questions and they can disagree. The counters are
+    held in this running process and the rows are on disk, so a lockout recorded before a
+    restart stands over a budget that is already free, and the row says so where that has
+    happened.
+  </p>
+
+  <h2 class="section-title">What this releases, and what it does not</h2>
+  <p class="fineprint">
+    Five wrong passwords inside a quarter of an hour spend a mailbox's budget. The wait that
+    follows starts at a minute and grows with each further run at the same mailbox, up to six
+    hours, and the count decays a quarter of an hour after the last failure. A source address
+    the mailbox has already signed in from is still let in while the budget is spent, which is
+    why a desk machine often keeps working while a phone does not.
+  </p>
+  <p class="fineprint">
+    Each listener that authenticates also counts authentication failures per source address, and
+    that budget is a separate one. Nothing on this page releases it, nothing on this page reads
+    it, and nothing in this server can do either. It does not work the way the mailbox budget
+    above does: it is a rolling quarter of an hour, so it lifts a quarter of an hour after the
+    <em>earliest</em> of the failures that spent it, not after the most recent attempt. Once the
+    budget is spent the listener refuses the sign-in and closes the connection before it reaches
+    the password, so nothing further is counted and going on trying does not push the wait back.
+    A mailbox that reads clear here can still be refused on one protocol, from one machine, until
+    that window passes.
+  </p>
+  <p class="fineprint">
+    The sign-in form itself has a third bound, and it counts something different again: not wrong
+    passwords but posts, whatever they carried, {{ signInPosts }} of them in any
+    {{ signInMinutes }}-minute slot from one
+    source address. Past that the form answers <em>Too Many Requests</em> until the slot ends. It
+    is a ceiling on work rather than on guessing, because every post to that form costs this
+    server one password check whether or not the address named has a mailbox here. Nothing on this
+    page reads or releases it, and waiting out the slot is the only thing that clears it.
+  </p>
+  <p class="fineprint">
+    The source address it counts against is the machine this server sees on the connection, and
+    that is not always the reader's. Behind a terminator holding the certificate for the web
+    interface, every browser arrives from the terminator's own address and that count is shared
+    across everyone signing in. It is well clear of a busy morning and nowhere near a script, so
+    the bound still separates the two; if you reach it, everyone waits out the same slot.
+  </p>
+  <p class="fineprint">
+    This is not the way to stop an account signing in. A spent budget is a mailbox that cannot
+    get in and should be able to; suspending it on the accounts page is a mailbox that should
+    not, and the two are separate gates.
+  </p>
+</section>
+{% endblock %}

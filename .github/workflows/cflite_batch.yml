@@ -1,0 +1,116 @@
+name: ClusterFuzzLite batch fuzzing
+
+# Deep continuous fuzzing on a daily schedule. Each target runs for 30
+# minutes, long enough to explore paths the 60-second pull-request
+# budget cannot reach. Findings upload as crash artifacts.
+#
+# See cflite_pr.yml for why jazzer.js is invoked directly instead of
+# through the ClusterFuzzLite v1 action wrapper, and for how the harness
+# set is discovered.
+
+on:
+  schedule:
+    - cron: '17 5 * * *'   # daily 05:17 UTC
+  workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: 'Per-target fuzz budget (seconds)'
+        required: false
+        default: '1800'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cflite-batch-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Discover fuzz harnesses
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.harnesses.outputs.targets }}
+      any:     ${{ steps.harnesses.outputs.any }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Enumerate fuzz/*.fuzz.js
+        id: harnesses
+        run: |
+          set -euo pipefail
+          if [ ! -d fuzz ]; then
+            echo "targets=[]" >> "$GITHUB_OUTPUT"
+            echo "any=false" >> "$GITHUB_OUTPUT"
+            echo "No fuzz/ directory, so there is nothing to fuzz."
+            exit 0
+          fi
+          TARGETS=$(find fuzz -maxdepth 1 -name '*.fuzz.js' -type f -printf '%f\n' \
+            | sed 's/\.fuzz\.js$//' \
+            | sort \
+            | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
+          if [ "$TARGETS" = "[]" ]; then
+            echo "any=false" >> "$GITHUB_OUTPUT"
+            echo "fuzz/ carries no *.fuzz.js harness yet."
+          else
+            echo "any=true" >> "$GITHUB_OUTPUT"
+            echo "Harnesses: $TARGETS"
+          fi
+
+  fuzz:
+    name: ClusterFuzzLite batch ${{ matrix.target }}
+    needs: discover
+    if: needs.discover.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.discover.outputs.targets) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 24.19.0 LTS
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '24.19.0'
+
+      - name: Install jazzer.js
+        run: npm ci --prefix fuzz
+
+      - name: Fuzz ${{ matrix.target }}
+        env:
+          FUZZ_TIME: ${{ inputs.fuzz_seconds || '1800' }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          harness="fuzz/${TARGET}.fuzz.js"
+          corpus="fuzz/${TARGET}_seed_corpus"
+          echo "::group::jazzer fuzz $harness ($FUZZ_TIME s)"
+          if [ -d "$corpus" ]; then
+            npx --prefix fuzz jazzer "$harness" "$corpus" -- \
+              -max_total_time="$FUZZ_TIME" -error_exitcode=1 -timeout=30
+          else
+            npx --prefix fuzz jazzer "$harness" -- \
+              -max_total_time="$FUZZ_TIME" -error_exitcode=1 -timeout=30
+          fi
+          echo "::endgroup::"
+
+      - name: Upload crash artifact
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fuzz-batch-crash-${{ matrix.target }}
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+          if-no-files-found: ignore

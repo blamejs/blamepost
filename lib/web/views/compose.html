@@ -1,0 +1,75 @@
+{% extends "layout" %}
+{% block title %}blamepost mail: write{% endblock %}
+{% block shell %}shell shell-mail{% endblock %}
+{% block content %}
+{{> folder-nav }}
+
+<section class="pane">
+  <header class="pane-head">
+    <div>
+      <h1 class="pane-title">Write a message</h1>
+      <p class="pane-sub">Sending from {{ fromAddr }}. Delivery runs the outbound policy chain: MX lookup, MTA-STS, DANE, then retry with a notification if it cannot be handed over.</p>
+    </div>
+  </header>
+
+  {% if problem %}
+  <div class="notice notice-bad" role="alert">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>{{ problem }}</p>
+  </div>
+  {% endif %}
+
+  <form method="post" action="/compose" class="composer" data-island="compose">
+    <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+    <input type="hidden" name="inReplyTo" value="{{ draft.inReplyTo }}">
+    <input type="hidden" name="references" value="{{ draft.references }}">
+
+    {% if mayChooseAuthor %}
+    <div class="field">
+      <label for="from">From</label>
+      <select id="from" name="from">
+        {% for author in authors %}<option value="{{ author.address }}"{% if author.isChosen %} selected{% endif %}>{{ author.address }}</option>{% endfor %}
+      </select>
+      <p class="hint">Your own address and every address the operator has pointed at this mailbox. Replies and delivery reports come back to your own address whichever one you write as.</p>
+    </div>
+    {% endif %}
+
+    <div class="field">
+      <label for="to">To</label>
+      <input id="to" name="to" type="text" value="{{ draft.to }}" autocomplete="off"
+             spellcheck="false" autocapitalize="none" required>
+      <p class="hint">Separate several recipients with commas.</p>
+    </div>
+
+    <div class="field-pair">
+      <div class="field">
+        <label for="cc">Copy</label>
+        <input id="cc" name="cc" type="text" value="{{ draft.cc }}" autocomplete="off"
+               spellcheck="false" autocapitalize="none">
+      </div>
+      <div class="field">
+        <label for="bcc">Blind copy</label>
+        <input id="bcc" name="bcc" type="text" value="{{ draft.bcc }}" autocomplete="off"
+               spellcheck="false" autocapitalize="none">
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="subject">Subject</label>
+      <input id="subject" name="subject" type="text" value="{{ draft.subject }}">
+    </div>
+
+    <div class="field">
+      <label for="text">Message</label>
+      <textarea id="text" name="text" rows="18" spellcheck="true">{{ draft.text }}</textarea>
+    </div>
+
+    <div class="formbar">
+      <button type="submit" class="btn btn-primary">Send</button>
+      <a class="btn btn-quiet" href="{{ inboxHref }}">Discard</a>
+      <p class="fineprint">Outbound mail is signed for the sending domain before it leaves.</p>
+    </div>
+  </form>
+</section>
+{% endblock %}
+{% block islands %}<script src="/static/islands/compose.js" defer></script>{% endblock %}

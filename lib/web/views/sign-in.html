@@ -1,0 +1,43 @@
+{% extends "layout" %}
+{% block title %}blamepost: sign in{% endblock %}
+{% block shell %}shell shell-centered{% endblock %}
+{% block content %}
+<section class="card card-signin">
+  <div class="signin-mark" aria-hidden="true">
+    <img src="/static/assets/logo-mono.svg" alt="" width="56" height="56" decoding="async">
+  </div>
+
+  <h1 class="card-title">Sign in</h1>
+  <p class="card-sub">Mail on {{ hostname }}.</p>
+
+  {% if problem %}
+  <div class="notice notice-bad" role="alert">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>{{ problem }}</p>
+  </div>
+  {% endif %}
+
+  <form method="post" action="/sign-in" class="signin-form">
+    <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+
+    <div class="field">
+      <label for="address">Address</label>
+      <input id="address" name="address" type="email" value="{{ address }}"
+             autocomplete="username" autocapitalize="none" spellcheck="false" required>
+    </div>
+
+    <div class="field">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password"
+             autocomplete="current-password" required>
+    </div>
+
+    <button type="submit" class="btn btn-primary btn-wide">Sign in</button>
+  </form>
+
+  <p class="fineprint">
+    The session cookie carries the <code>__Host-</code> prefix and the Secure attribute, so this
+    page is served over TLS. Repeated failures from one address are slowed down.
+  </p>
+</section>
+{% endblock %}

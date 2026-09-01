@@ -1,0 +1,135 @@
+name: ClusterFuzzLite PR fuzzing
+
+# Coverage-guided fuzzing via jazzer.js + libFuzzer against every
+# `fuzz/*.fuzz.js` harness on each pull request that touches the mail
+# stack or the harnesses themselves. The wire-protocol readers parse
+# bytes an unauthenticated stranger controls, which is where every
+# parser CVE in this product category has come from. Those readers are
+# SMTP, IMAP, JMAP, POP3, ManageSieve and MIME.
+#
+# jazzer.js is invoked directly rather than through the
+# google/clusterfuzzlite/actions/build_fuzzers wrapper: the wrapper's v1
+# image refuses to fuzz JavaScript projects (it rejects both a real
+# sanitizer and an empty one for JS). The .clusterfuzzlite/ directory
+# stays the canonical integration spec: what an OSS-Fuzz submission
+# mirrors, what OpenSSF Scorecard's Fuzzing check detects, and what
+# would re-engage if a JS fix ships upstream.
+#
+# Findings: jazzer's `-error_exitcode=1` fails the step with the
+# reproducer printed inline, and the libFuzzer crash artifact lands at
+# `crash-*` in the workspace and uploads on failure.
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'lib/**'
+      - 'fuzz/**'
+      - '.clusterfuzzlite/**'
+      - '.github/workflows/cflite_pr.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cflite-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    # The harness set is read from the tree rather than duplicated as a
+    # hand-maintained matrix: a new `fuzz/<name>.fuzz.js` is fuzzed from
+    # the commit that adds it, and a removed one stops being scheduled,
+    # with no second list to keep in agreement.
+    name: Discover fuzz harnesses
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.harnesses.outputs.targets }}
+      any:     ${{ steps.harnesses.outputs.any }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Enumerate fuzz/*.fuzz.js
+        id: harnesses
+        run: |
+          set -euo pipefail
+          if [ ! -d fuzz ]; then
+            echo "targets=[]" >> "$GITHUB_OUTPUT"
+            echo "any=false" >> "$GITHUB_OUTPUT"
+            echo "No fuzz/ directory, so there is nothing to fuzz."
+            exit 0
+          fi
+          TARGETS=$(find fuzz -maxdepth 1 -name '*.fuzz.js' -type f -printf '%f\n' \
+            | sed 's/\.fuzz\.js$//' \
+            | sort \
+            | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
+          if [ "$TARGETS" = "[]" ]; then
+            echo "any=false" >> "$GITHUB_OUTPUT"
+            echo "fuzz/ carries no *.fuzz.js harness yet."
+          else
+            echo "any=true" >> "$GITHUB_OUTPUT"
+            echo "Harnesses: $TARGETS"
+          fi
+
+  fuzz:
+    name: ClusterFuzzLite ${{ matrix.target }}
+    needs: discover
+    if: needs.discover.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.discover.outputs.targets) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 24.19.0 LTS
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '24.19.0'
+
+      - name: Install jazzer.js
+        run: npm ci --prefix fuzz
+
+      - name: Fuzz ${{ matrix.target }}
+        env:
+          # 60s per target on a pull request. cflite_batch.yml runs the
+          # deeper daily schedule that reaches paths this budget cannot.
+          FUZZ_TIME: '60'
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          harness="fuzz/${TARGET}.fuzz.js"
+          corpus="fuzz/${TARGET}_seed_corpus"
+          echo "::group::jazzer fuzz $harness ($FUZZ_TIME s)"
+          # The seed corpus goes in as the first positional argument when
+          # present; libFuzzer treats directory arguments as corpus inputs.
+          if [ -d "$corpus" ]; then
+            npx --prefix fuzz jazzer "$harness" "$corpus" -- \
+              -max_total_time="$FUZZ_TIME" -error_exitcode=1 -timeout=30
+          else
+            npx --prefix fuzz jazzer "$harness" -- \
+              -max_total_time="$FUZZ_TIME" -error_exitcode=1 -timeout=30
+          fi
+          echo "::endgroup::"
+
+      - name: Upload crash artifact
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+          if-no-files-found: ignore

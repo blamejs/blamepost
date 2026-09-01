@@ -1,0 +1,29 @@
+name: "blamepost CodeQL config"
+
+# Scope security analysis to DEPLOYED code: the server itself under lib/ and
+# bin/, which is what the published package and the container image both
+# carry.
+#
+# Excluded are code paths that never run in a deployment. The vendored
+# framework under lib/vendor/ is third-party code analyzed upstream, and
+# re-analyzing it here would report findings this repository cannot fix and
+# must not patch in place. Test fixtures under test/ carry deliberately
+# hostile inputs for the wire-protocol parsers, so a scanner reads them as
+# the attacks they imitate. Release and gate tooling under scripts/ runs on a
+# maintainer's machine and in CI, never in front of a network socket. Any
+# browser-side third-party bundle that lands under lib/web/public/vendor/ is
+# excluded on the same grounds as the server-side vendored tree.
+#
+# Quality in those excluded paths is enforced separately by eslint and by the
+# codebase-patterns detectors, which DO walk test/ and scripts/.
+queries:
+  - uses: security-extended
+
+paths:
+  - lib
+  - bin
+
+paths-ignore:
+  - lib/vendor
+  - lib/web/public/vendor
+  - "**/node_modules"

@@ -1,0 +1,102 @@
+{% extends "layout" %}
+{% block title %}blamepost admin: aliases{% endblock %}
+{% block shell %}shell shell-admin{% endblock %}
+{% block content %}
+{{> admin-nav }}
+
+<section class="pane">
+  <header class="pane-head">
+    <div>
+      <h1 class="pane-title">Aliases</h1>
+      <p class="pane-sub">Addresses that resolve to somewhere else at delivery time.</p>
+    </div>
+  </header>
+
+  {% if problem %}
+  <div class="notice notice-bad" role="alert">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>{{ problem }}</p>
+  </div>
+  {% endif %}
+
+  <div class="tablewrap">
+    <table class="grid">
+      <caption class="visually-hidden">Aliases</caption>
+      <thead>
+        <tr>
+          <th scope="col">Address</th>
+          <th scope="col">Delivers to</th>
+          <th scope="col">State</th>
+          <th scope="col"><span class="visually-hidden">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in aliases %}
+        <tr>
+          <th scope="row"><code>{{ a.address }}</code></th>
+          <td><code>{{ a.destination }}</code></td>
+          <td>
+            {% if a.isActive %}
+            <span class="pill pill-ok">{{ a.status }}</span>
+            {% else %}
+            <span class="pill pill-warn">{{ a.status }}</span>
+            {% endif %}
+          </td>
+          <td class="row-actions">
+            <form method="post" action="/admin/aliases" class="inline-form">
+              <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+              <input type="hidden" name="action" value="remove">
+              <input type="hidden" name="id" value="{{ a.id }}">
+              <button type="submit" class="btn btn-danger">Remove</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <h2 class="section-title">Add an alias</h2>
+  <form method="post" action="/admin/aliases" class="rowform">
+    <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+    <input type="hidden" name="action" value="add">
+    <div class="field-pair">
+      <div class="field">
+        <label for="address">Address</label>
+        <input id="address" name="address" type="email" autocapitalize="none" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="destination">Delivers to</label>
+        <input id="destination" name="destination" type="text" autocapitalize="none"
+               spellcheck="false" required>
+        <p class="hint">Separate several destinations with commas. Each becomes its own rule.</p>
+      </div>
+    </div>
+    <div class="field-pair">
+      <div class="field">
+        <label class="checkline" for="catchAll">
+          <input id="catchAll" name="catchAll" type="checkbox">
+          Claim everything a domain is sent that nothing else matches
+        </label>
+      </div>
+      <div class="field">
+        <label for="domain">Domain for the catch all</label>
+        <select id="domain" name="domain">
+          {% for d in domains %}<option value="{{ d.domain }}">{{ d.domain }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+    <button type="submit" class="btn btn-primary">Add alias</button>
+  </form>
+
+  <p class="fineprint">
+    Forwarding to an address outside this server rewrites the return path, so the receiving side
+    still sees an SPF result that matches the host handing the message over.
+  </p>
+  <p class="fineprint">
+    Removing deletes the row rather than disabling it, so putting one back means writing it
+    again from what you remember of it. It asks you to type the address first, and it takes one
+    leg of a fan-out at a time: an address forwarding to four people has four rows.
+  </p>
+</section>
+{% endblock %}

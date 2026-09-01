@@ -1,0 +1,31 @@
+{% extends "layout" %}
+{% block title %}blamepost mail: search{% endblock %}
+{% block shell %}shell shell-mail{% endblock %}
+{% block content %}
+{{> folder-nav }}
+
+<section class="pane">
+  <header class="pane-head">
+    <div>
+      <h1 class="pane-title">Search</h1>
+      {% if searched %}
+      <p class="pane-sub">{{ searchQuery }}{% if folder %}, in {{ folder.label }}{% endif %}</p>
+      {% else %}
+      <p class="pane-sub">The index is sealed. Terms are hashed with the same key the store used to write them, so the query never travels as plain text.</p>
+      {% endif %}
+    </div>
+  </header>
+
+  {% if empty %}
+  <div class="blank">
+    <p class="blank-head">No message matches that.</p>
+    <p>Search runs across subject, body and addresses inside one folder. Pick another folder from the list to widen it.</p>
+  </div>
+  {% endif %}
+
+  {% if hasResults %}
+  {{> message-list }}
+  {% endif %}
+</section>
+{% endblock %}
+{% block islands %}<script src="/static/islands/mailbox.js" defer></script>{% endblock %}

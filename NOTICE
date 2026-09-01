@@ -1,0 +1,53 @@
+blamepost
+Copyright 2026 blamejs contributors
+
+This product includes software developed by the blamepost project
+(https://github.com/blamejs/blamepost).
+
+Licensed under the Apache License, Version 2.0. See LICENSE for the full text.
+
+================================================================================
+Third-Party Components
+================================================================================
+
+blamepost has zero npm runtime dependencies. It vendors exactly one third-party
+component, under lib/vendor/, rather than resolving it from a registry at run
+time. The component retains its original copyright and license. Its version, the
+registry tarball it came from, and the publisher integrity digest verified before
+extraction are all recorded in lib/vendor/MANIFEST.json, alongside a hash of the
+extracted tree. The vendored tree is refreshed only through
+scripts/vendor-update.sh.
+
+--------------------------------------------------------------------------------
+Component:   blamejs
+Version:     0.18.57
+Package:     @blamejs/core (npm), vendored from the published registry tarball
+Source:      https://github.com/blamejs/blamejs
+License:     Apache-2.0
+Copyright:   Copyright (c) blamejs contributors
+Used for:    The entire runtime substrate. Every wire listener composes a
+             blamejs mail primitive: b.mail.server.mx (inbound SMTP),
+             b.mail.server.submission (authenticated submission),
+             b.mail.server.imap, b.mail.server.jmap, b.mail.server.pop3
+             and b.mail.server.managesieve, each over the b.mailStore
+             message substrate and the b.mail.agent dispatch layer.
+             Delivery runs
+             through b.mail.send.deliver; inbound authentication through
+             b.mail.spf / b.mail.dkim / b.mail.dmarc;
+             filtering through b.mail.sieve. Storage, sealed columns, the
+             audit chain, the vault, sessions, the HTTP router and the
+             security middleware behind webmail and admin all come from the
+             same vendored tree (lib/vendor/blamejs/).
+--------------------------------------------------------------------------------
+
+blamejs carries vendored dependencies of its own. They are cryptographic
+bundles and data files that are not blamepost's to re-attribute. Their
+copyright, license and provenance are recorded in the NOTICE and
+lib/vendor/MANIFEST.json that ship inside the vendored tree, at:
+
+    lib/vendor/blamejs/NOTICE
+    lib/vendor/blamejs/lib/vendor/MANIFEST.json
+
+Read those files for the full transitive attribution. blamepost does not
+restate them here, because restating them creates a second copy that drifts
+from the one the code actually loads.

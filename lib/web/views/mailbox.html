@@ -1,0 +1,35 @@
+{% extends "layout" %}
+{% block title %}blamepost mail: {{ folder.label }}{% endblock %}
+{% block shell %}shell shell-mail{% endblock %}
+{% block content %}
+{{> folder-nav }}
+
+<section class="pane">
+  <header class="pane-head">
+    <div>
+      <h1 class="pane-title">{{ folder.label }}</h1>
+      <p class="pane-sub">{{ quotaCount }} stored, {{ quotaUsed }}{% if quotaCap %} of {{ quotaCap }}{% endif %}</p>
+    </div>
+    {% if quotaBucket %}
+    <div class="meter" title="{{ quotaPercent }} percent of the cap in use">
+      <div class="meter-fill w{{ quotaBucket }}"></div>
+    </div>
+    {% endif %}
+  </header>
+
+  {% if empty %}
+  <div class="blank">
+    <p class="blank-head">Nothing in {{ folder.label }}.</p>
+    <p>New mail lands here as the listener accepts it. Nothing polls from the browser, so reload when you want to look again.</p>
+  </div>
+  {% else %}
+  {{> message-list }}
+  {% endif %}
+
+  <nav class="pager" aria-label="More messages">
+    {% if newestHref %}<a class="btn btn-quiet" href="{{ newestHref }}">Newest</a>{% endif %}
+    {% if olderHref %}<a class="btn btn-quiet" href="{{ olderHref }}">Older</a>{% endif %}
+  </nav>
+</section>
+{% endblock %}
+{% block islands %}<script src="/static/islands/mailbox.js" defer></script>{% endblock %}

@@ -1,0 +1,29 @@
+# Principals allowed to sign blamepost commits and tags.
+#
+# The format is the one `git` reads through `gpg.ssh.allowedSignersFile` and
+# `ssh-keygen -Y verify` reads through `-f`: a principal, the namespace the
+# key may sign in, and the key itself. `namespaces="git"` confines each key
+# to git objects, so a signature made for anything else does not verify here.
+#
+# Verify this file out of band before trusting it, because it lives in the
+# repository whose tags it is used to check. Two independent anchors:
+#
+#   SECURITY.md records the SHA256 fingerprint of every key below, and its
+#   own history is commit-signed, so an edit to either is visible.
+#
+#   GitHub publishes the maintainer's signing keys, and every key below
+#   appears among them:
+#     gh api users/dotCooCoo/ssh_signing_keys --jq '.[].key'
+#   That list is a superset. It carries keys used for other projects, so
+#   finding a key there is not on its own a reason to trust it for this one;
+#   this file is what decides that. Note also that
+#   https://github.com/dotCooCoo.keys is a DIFFERENT list again. It returns
+#   authentication keys, and a key registered for signing alone does not
+#   appear there.
+#
+# A key is added here in the same commit that records its fingerprint in
+# SECURITY.md. A key is removed only when every tag it signed has been
+# re-signed or is no longer offered, because removing it turns each of those
+# signatures into a verification failure that reads like tampering.
+
+security@blamejs.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF9jouzSOMrodVB6exBzW1f05wjbzLYW/85v4Rfh+bP3

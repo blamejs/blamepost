@@ -1,0 +1,113 @@
+{% extends "layout" %}
+{% block title %}blamepost admin: selectors{% endblock %}
+{% block shell %}shell shell-admin{% endblock %}
+{% block content %}
+{{> admin-nav }}
+
+<section class="pane">
+  <header class="pane-head">
+    <div>
+      <h1 class="pane-title">Signing selectors</h1>
+      <p class="pane-sub">
+        Outbound mail is signed twice per domain, once with Ed25519 and once with RSA, so a
+        receiver that implements either still verifies. Both signatures ship on every message,
+        and the two are the only algorithms a DKIM signature can name.
+      </p>
+    </div>
+    <form method="post" action="/admin/dkim" class="inline-form">
+      <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+      <button type="submit" name="action" value="sweep" class="btn">Withdraw expired</button>
+    </form>
+  </header>
+
+  {% if problem %}
+  <div class="notice notice-bad" role="alert">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>{{ problem }}</p>
+  </div>
+  {% endif %}
+
+  {% if empty %}
+  <div class="blank">
+    <p class="blank-head">No domain holds keys yet.</p>
+    <p>Mint a pair below. Mail from a domain with no active selector goes out unsigned, which most receivers treat far less kindly than a sender they have never seen.</p>
+  </div>
+  {% endif %}
+
+  {% for card in cards %}
+  <article class="keycard">
+    <header class="keycard-head">
+      <h2 class="keycard-title"><code>{{ card.domain }}</code></h2>
+      <form method="post" action="/admin/dkim" class="inline-form">
+        <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+        <input type="hidden" name="domain" value="{{ card.domain }}">
+        <input type="hidden" name="selector" value="{{ card.activeSelector }}">
+        <button type="submit" name="action" value="rotate" class="btn btn-primary">Mint the next pair</button>
+        {% if card.hasActive %}
+        <button type="submit" name="action" value="retire" class="btn">Retire this pair</button>
+        {% endif %}
+      </form>
+    </header>
+
+    <div class="tablewrap">
+      <table class="grid grid-dense">
+        <caption class="visually-hidden">Selectors for {{ card.domain }}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Selector</th>
+            <th scope="col">Signs with</th>
+            <th scope="col">State</th>
+            <th scope="col">Publish until</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in card.selectors %}
+          <tr>
+            <th scope="row"><code>{{ s.selector }}</code></th>
+            <td>{{ s.algorithm }}</td>
+            <td>
+              {% if s.isActive %}
+              <span class="pill pill-ok">{{ s.state }}</span>
+              {% else %}
+              <span class="pill">{{ s.state }}</span>
+              {% endif %}
+            </td>
+            <td>{{ s.until }}</td>
+          </tr>
+          <tr class="row-detail">
+            <td colspan="4">
+              <p class="reclabel">TXT at <code>{{ s.dnsName }}</code></p>
+              <pre class="record">{{ s.record }}</pre>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </article>
+  {% endfor %}
+
+  {% if unkeyed %}
+  <h2 class="section-title">Domains with no keys</h2>
+  <form method="post" action="/admin/dkim" class="rowform">
+    <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+    <input type="hidden" name="action" value="generate">
+    <div class="field">
+      <label for="domain">Domain</label>
+      <select id="domain" name="domain" required>
+        {% for d in unkeyed %}<option value="{{ d.domain }}">{{ d.domain }}</option>{% endfor %}
+      </select>
+      <p class="hint">Minting writes the private halves sealed under the vault and prints the records to publish.</p>
+    </div>
+    <button type="submit" class="btn btn-primary">Mint a key pair</button>
+  </form>
+  {% endif %}
+
+  <p class="fineprint">
+    Rotation is three steps and the order matters. Mint the next pair and publish its records,
+    wait for them to resolve everywhere, then retire the outgoing pair. The retiring records stay
+    published through their overlap so mail already in flight still verifies, and withdrawing them
+    is the last step, never the first.
+  </p>
+</section>
+{% endblock %}

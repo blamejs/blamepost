@@ -1,0 +1,956 @@
+{
+  "generator": "scripts/refresh-api-snapshot.js",
+  "packageVersion": "0.1.0",
+  "surface": {
+    "certificateReport": {
+      "kind": "function",
+      "arity": 1
+    },
+    "create": {
+      "kind": "function",
+      "arity": 1
+    },
+    "frameworkVersion": {
+      "kind": "string"
+    },
+    "mail": {
+      "kind": "object",
+      "members": {
+        "compose": {
+          "kind": "object",
+          "members": {
+            "create": {
+              "kind": "function",
+              "arity": 1
+            },
+            "normalizeAddress": {
+              "kind": "function",
+              "arity": 2
+            },
+            "splitAddressHeader": {
+              "kind": "function",
+              "arity": 1
+            }
+          }
+        },
+        "delivery": {
+          "kind": "object",
+          "members": {
+            "SPOOL_FULL_CODE": {
+              "kind": "string"
+            },
+            "SPOOL_SETTLE_MS": {
+              "kind": "number"
+            },
+            "create": {
+              "kind": "function",
+              "arity": 1
+            },
+            "daneEnforcementStatus": {
+              "kind": "function",
+              "arity": 2
+            },
+            "wireDeliveryStatus": {
+              "kind": "function",
+              "arity": 1
+            }
+          }
+        },
+        "dkim": {
+          "kind": "object",
+          "members": {
+            "ALGORITHMS": {
+              "kind": "object",
+              "members": {
+                "eddsa": {
+                  "kind": "string"
+                },
+                "rsa": {
+                  "kind": "string"
+                }
+              }
+            },
+            "CODES": {
+              "kind": "object",
+              "members": {
+                "keyFileHeld": {
+                  "kind": "string"
+                },
+                "keyNotSealed": {
+                  "kind": "string"
+                },
+                "keySealUnopened": {
+                  "kind": "string"
+                },
+                "keyUnreadable": {
+                  "kind": "string"
+                },
+                "keysAlreadyActive": {
+                  "kind": "string"
+                },
+                "keysStranded": {
+                  "kind": "string"
+                },
+                "noActiveSelector": {
+                  "kind": "string"
+                },
+                "noSuchSelector": {
+                  "kind": "string"
+                },
+                "selectorNameCollision": {
+                  "kind": "string"
+                },
+                "selectorNameTooLong": {
+                  "kind": "string"
+                },
+                "selectorTaken": {
+                  "kind": "string"
+                }
+              }
+            },
+            "create": {
+              "kind": "function",
+              "arity": 1
+            },
+            "eraseKeyFiles": {
+              "kind": "function",
+              "arity": 3
+            }
+          }
+        },
+        "listeners": {
+          "kind": "object",
+          "members": {
+            "DEFAULTS": {
+              "kind": "object",
+              "members": {
+                "imap": {
+                  "kind": "object",
+                  "members": {
+                    "address": {
+                      "kind": "string"
+                    },
+                    "enabled": {
+                      "kind": "boolean"
+                    },
+                    "port": {
+                      "kind": "number"
+                    }
+                  }
+                },
+                "managesieve": {
+                  "kind": "object",
+                  "members": {
+                    "address": {
+                      "kind": "string"
+                    },
+                    "enabled": {
+                      "kind": "boolean"
+                    },
+                    "port": {
+                      "kind": "number"
+                    }
+                  }
+                },
+                "mx": {
+                  "kind": "object",
+                  "members": {
+                    "address": {
+                      "kind": "string"
+                    },
+                    "enabled": {
+                      "kind": "boolean"
+                    },
+                    "port": {
+                      "kind": "number"
+                    }
+                  }
+                },
+                "pop3": {
+                  "kind": "object",
+                  "members": {
+                    "address": {
+                      "kind": "string"
+                    },
+                    "enabled": {
+                      "kind": "boolean"
+                    },
+                    "port": {
+                      "kind": "number"
+                    }
+                  }
+                },
+                "submission": {
+                  "kind": "object",
+                  "members": {
+                    "address": {
+                      "kind": "string"
+                    },
+                    "enabled": {
+                      "kind": "boolean"
+                    },
+                    "port": {
+                      "kind": "number"
+                    }
+                  }
+                },
+                "submissions": {
+                  "kind": "object",
+                  "members": {
+                    "address": {
+                      "kind": "string"
+                    },
+                    "enabled": {
+                      "kind": "boolean"
+                    },
+                    "port": {
+                      "kind": "number"
+                    }
+                  }
+                }
+              }
+            },
+            "LISTENER_STATES": {
+              "kind": "object",
+              "members": {
+                "BOUND": {
+                  "kind": "string"
+                },
+                "DISABLED": {
+                  "kind": "string"
+                },
+                "UNBOUND": {
+                  "kind": "string"
+                },
+                "WITHHELD": {
+                  "kind": "string"
+                }
+              }
+            },
+            "RATE_LIMIT_KEYS": {
+              "kind": "array",
+              "length": 4,
+              "members": [
+                "maxConcurrentConnectionsPerIp",
+                "connectionsPerIpPerMinute",
+                "authFailuresPerIpPer15Min",
+                "rcptFailuresPerIpPerMinute"
+              ]
+            },
+            "STALE_AFTER_ROTATION": {
+              "kind": "array",
+              "length": 0,
+              "members": []
+            },
+            "WITHHELD_RATE_LIMIT_KEYS": {
+              "kind": "object",
+              "members": {
+                "disabled": {
+                  "kind": "string"
+                },
+                "minBytesPerSecond": {
+                  "kind": "string"
+                }
+              }
+            },
+            "compileSearch": {
+              "kind": "function",
+              "arity": 2
+            },
+            "create": {
+              "kind": "function",
+              "arity": 1
+            },
+            "keyAgreementGroups": {
+              "kind": "function",
+              "arity": 0
+            },
+            "permittedAuthors": {
+              "kind": "function",
+              "arity": 2
+            }
+          }
+        },
+        "posture": {
+          "kind": "object",
+          "members": {
+            "DNS_ANSWER_BUDGET_MS": {
+              "kind": "number"
+            },
+            "SEVERITY": {
+              "kind": "object",
+              "members": {
+                "advised": {
+                  "kind": "string"
+                },
+                "required": {
+                  "kind": "string"
+                }
+              }
+            },
+            "create": {
+              "kind": "function",
+              "arity": 1
+            },
+            "tlsRptEndpoint": {
+              "kind": "function",
+              "arity": 2
+            },
+            "txtLookup": {
+              "kind": "function",
+              "arity": 1
+            },
+            "withinDnsBudget": {
+              "kind": "function",
+              "arity": 3
+            }
+          }
+        }
+      }
+    },
+    "productionPosture": {
+      "kind": "function",
+      "arity": 1
+    },
+    "resolver": {
+      "kind": "function",
+      "arity": 1
+    },
+    "tlsContext": {
+      "kind": "function",
+      "arity": 1
+    },
+    "version": {
+      "kind": "string"
+    },
+    "web": {
+      "kind": "object",
+      "members": {
+        "NOTICES": {
+          "kind": "object",
+          "members": {
+            "account-added": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "alias-added": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "alias-removed": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "archived": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "dns-confirmed": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "domain-added": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "domain-saved": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "flagged": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "keys-minted": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "keys-retiring": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "keys-rotated": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "keys-swept": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "keys-swept-stranded": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "lockout-clear": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "lockout-clear-both": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "lockout-released": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "lockout-released-both": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "lockout-released-machine": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "lockout-released-mailbox": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "move-refused": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "moved": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "purge-faulted": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "purge-refused": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "purged": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "queue-cancelled": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "queue-none-held": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "queue-part-destroyed": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "queue-part-held": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "queue-ran": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "reinstated": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "role-granted": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "role-revoked": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "sent": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "signed-out": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "suspended": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "trashed": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            }
+          }
+        },
+        "PAGE_SIZE": {
+          "kind": "number"
+        },
+        "PUBLIC_DIR": {
+          "kind": "string"
+        },
+        "REQUIRED_AGENT": {
+          "kind": "array",
+          "length": 5,
+          "members": [
+            "search",
+            "fetch",
+            "thread",
+            "quota",
+            "flag"
+          ]
+        },
+        "REQUIRED_COMPOSE": {
+          "kind": "array",
+          "length": 1,
+          "members": [
+            "send"
+          ]
+        },
+        "REQUIRED_DELIVERY": {
+          "kind": "array",
+          "length": 6,
+          "members": [
+            "bounce",
+            "describe",
+            "queue.list",
+            "queue.remove",
+            "queue.runDue",
+            "queue.show"
+          ]
+        },
+        "REQUIRED_DKIM": {
+          "kind": "array",
+          "length": 5,
+          "members": [
+            "list",
+            "generate",
+            "rotate",
+            "retire",
+            "sweep"
+          ]
+        },
+        "REQUIRED_STORE": {
+          "kind": "array",
+          "length": 17,
+          "members": [
+            "accounts.authenticate",
+            "accounts.get",
+            "accounts.list",
+            "accounts.create",
+            "accounts.suspend",
+            "accounts.reinstate",
+            "accounts.delete",
+            "accounts.unlock",
+            "accounts.lockoutState",
+            "accounts.setAdmin",
+            "domains.add",
+            "domains.list",
+            "domains.acknowledgeDns",
+            "domains.setStatus",
+            "aliases.add",
+            "aliases.list",
+            "aliases.remove"
+          ]
+        },
+        "SESSION_COOKIE": {
+          "kind": "string"
+        },
+        "THEME_COOKIE": {
+          "kind": "string"
+        },
+        "VIEWS_DIR": {
+          "kind": "string"
+        },
+        "create": {
+          "kind": "function",
+          "arity": 1
+        },
+        "serve": {
+          "kind": "function",
+          "arity": 1
+        }
+      }
+    }
+  },
+  "sinceByPrimitive": {
+    "blamepost.config.load": "0.1.0",
+    "blamepost.config.redacted": "0.1.0",
+    "blamepost.config.ensureDataDirectories": "0.1.0",
+    "blamepost.resolver": "0.1.0",
+    "blamepost.tlsContext": "0.1.0",
+    "blamepost.certificateReport": "0.1.0",
+    "blamepost.productionPosture": "0.1.0",
+    "blamepost.create": "0.1.0",
+    "blamepost.mail.compose.normalizeAddress": "0.1.0",
+    "blamepost.mail.compose.splitAddressHeader": "0.1.0",
+    "blamepost.mail.compose.create": "0.1.0",
+    "blamepost.mail.compose.build": "0.1.0",
+    "blamepost.mail.compose.send": "0.1.0",
+    "blamepost.mail.compose.reply": "0.1.0",
+    "blamepost.mail.compose.forward": "0.1.0",
+    "blamepost.mail.delivery.wireDeliveryStatus": "0.1.0",
+    "blamepost.mail.delivery.daneEnforcementStatus": "0.1.0",
+    "blamepost.mail.delivery.create": "0.1.0",
+    "blamepost.mail.delivery.send": "0.1.0",
+    "blamepost.mail.delivery.bounce": "0.1.0",
+    "blamepost.mail.delivery.reports": "0.1.0",
+    "blamepost.mail.delivery.queue": "0.1.0",
+    "blamepost.mail.delivery.tlsRpt": "0.1.0",
+    "blamepost.mail.delivery.start": "0.1.0",
+    "blamepost.mail.delivery.stop": "0.1.0",
+    "blamepost.mail.dkim.eraseKeyFiles": "0.1.0",
+    "blamepost.mail.dkim.create": "0.1.0",
+    "blamepost.mail.dkim.generate": "0.1.0",
+    "blamepost.mail.dkim.rotate": "0.1.0",
+    "blamepost.mail.dkim.retire": "0.1.0",
+    "blamepost.mail.dkim.sweep": "0.1.0",
+    "blamepost.mail.dkim.list": "0.1.0",
+    "blamepost.mail.dkim.dnsRecords": "0.1.0",
+    "blamepost.mail.dkim.signerFor": "0.1.0",
+    "blamepost.mail.dkim.sign": "0.1.0",
+    "blamepost.mail.listeners.keyAgreementGroups": "0.1.0",
+    "blamepost.mail.listeners.permittedAuthors": "0.1.0",
+    "blamepost.mail.listeners.compileSearch": "0.1.0",
+    "blamepost.mail.listeners.create": "0.1.0",
+    "blamepost.mail.listeners.relay": "0.1.0",
+    "blamepost.mail.listeners.start": "0.1.0",
+    "blamepost.mail.listeners.stop": "0.1.0",
+    "blamepost.mail.listeners.bound": "0.1.0",
+    "blamepost.mail.listeners.describe": "0.1.0",
+    "blamepost.mail.mailbox.TABLES": "0.1.0",
+    "blamepost.mail.mailbox.headerBreak": "0.1.0",
+    "blamepost.mail.mailbox.reportedHeaderBlock": "0.1.0",
+    "blamepost.mail.mailbox.sequenceSet": "0.1.0",
+    "blamepost.mail.mailbox.assertRoleGate": "0.1.0",
+    "blamepost.mail.mailbox.agent": "0.1.0",
+    "blamepost.mail.mailbox.create": "0.1.0",
+    "blamepost.mail.mailbox.accountFolders": "0.1.0",
+    "blamepost.mail.mailbox.onFiled": "0.1.0",
+    "blamepost.mail.mailbox.searchScan": "0.1.0",
+    "blamepost.mail.mailbox.expungeObjects": "0.1.0",
+    "blamepost.mail.mailbox.moveObjects": "0.1.0",
+    "blamepost.mail.mailbox.eraseAccountMail": "0.1.0",
+    "blamepost.mail.mailbox.legalHold.place": "0.1.0",
+    "blamepost.mail.mailbox.legalHold.release": "0.1.0",
+    "blamepost.mail.mailbox.legalHold.status": "0.1.0",
+    "blamepost.mail.mailbox.describe": "0.1.0",
+    "blamepost.mail.posture.withinDnsBudget": "0.1.0",
+    "blamepost.mail.posture.txtLookup": "0.1.0",
+    "blamepost.mail.posture.tlsRptEndpoint": "0.1.0",
+    "blamepost.mail.posture.create": "0.1.0",
+    "blamepost.mail.posture.check": "0.1.0",
+    "blamepost.store.accounts.create": "0.1.0",
+    "blamepost.store.accounts.get": "0.1.0",
+    "blamepost.store.accounts.list": "0.1.0",
+    "blamepost.store.accounts.authenticate": "0.1.0",
+    "blamepost.store.accounts.unlock": "0.1.0",
+    "blamepost.store.accounts.lockoutState": "0.1.0",
+    "blamepost.store.accounts.setPassword": "0.1.0",
+    "blamepost.store.accounts.suspend": "0.1.0",
+    "blamepost.store.accounts.reinstate": "0.1.0",
+    "blamepost.store.accounts.setAdmin": "0.1.0",
+    "blamepost.store.accounts.delete": "0.1.0",
+    "blamepost.store.actor.build": "0.1.0",
+    "blamepost.store.actor.forRequest": "0.1.0",
+    "blamepost.store.actor.forCommandLine": "0.1.0",
+    "blamepost.store.actor.runAs": "0.1.0",
+    "blamepost.store.actor.enterAs": "0.1.0",
+    "blamepost.store.actor.current": "0.1.0",
+    "blamepost.store.actor.record": "0.1.0",
+    "blamepost.store.address.parse": "0.1.0",
+    "blamepost.store.address.canonical": "0.1.0",
+    "blamepost.store.address.canonicalDomain": "0.1.0",
+    "blamepost.store.address.catchAllFor": "0.1.0",
+    "blamepost.store.aliases.add": "0.1.0",
+    "blamepost.store.aliases.list": "0.1.0",
+    "blamepost.store.aliases.setStatus": "0.1.0",
+    "blamepost.store.aliases.remove": "0.1.0",
+    "blamepost.store.blobs.pathFor": "0.1.0",
+    "blamepost.store.blobs.create": "0.1.0",
+    "blamepost.store.blobs.reconcile": "0.1.0",
+    "blamepost.store.blobs.reclaim": "0.1.0",
+    "blamepost.store.domains.add": "0.1.0",
+    "blamepost.store.domains.get": "0.1.0",
+    "blamepost.store.domains.list": "0.1.0",
+    "blamepost.store.domains.setStatus": "0.1.0",
+    "blamepost.store.domains.acknowledgeDns": "0.1.0",
+    "blamepost.store.domains.remove": "0.1.0",
+    "blamepost.store.domains.addSelector": "0.1.0",
+    "blamepost.store.domains.listSelectors": "0.1.0",
+    "blamepost.store.domains.retireSelector": "0.1.0",
+    "blamepost.store.domains.removeSelector": "0.1.0",
+    "blamepost.store.open": "0.1.0",
+    "blamepost.store.openSnapshot": "0.1.0",
+    "blamepost.store.close": "0.1.0",
+    "blamepost.store.isOpen": "0.1.0",
+    "blamepost.store.snapshotInEffect": "0.1.0",
+    "blamepost.store.StoreError": "0.1.0",
+    "blamepost.store.resolve": "0.1.0",
+    "blamepost.web.create.drainJmapWebSockets": "0.1.0",
+    "blamepost.web.create.mountJmapWebSocket": "0.1.0",
+    "blamepost.web.serve": "0.1.0",
+    "blamepost.web.serve.start": "0.1.0",
+    "blamepost.web.serve.stop": "0.1.0",
+    "blamepost.web.serve.describe": "0.1.0"
+  },
+  "removedPrimitives": {
+    "blamepost.store.snapshotPathFor": {
+      "since": "0.1.0",
+      "removedIn": "0.1.0"
+    }
+  },
+  "membershipByArray": {
+    "blamepost.mail.listeners.STALE_AFTER_ROTATION": "constraint",
+    "blamepost.mail.listeners.RATE_LIMIT_KEYS": "capability",
+    "blamepost.web.REQUIRED_AGENT": "constraint",
+    "blamepost.web.REQUIRED_STORE": "constraint",
+    "blamepost.web.REQUIRED_COMPOSE": "constraint",
+    "blamepost.web.REQUIRED_DKIM": "constraint",
+    "blamepost.web.REQUIRED_DELIVERY": "constraint"
+  }
+}

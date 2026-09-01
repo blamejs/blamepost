@@ -1,0 +1,123 @@
+name: OpenSSF Scorecard
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "27 5 * * 1"
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      security-events: write
+      id-token: write
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard (SARIF, for the Security tab + public badge)
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc  # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      # The SARIF code-scanning format carries no aggregate score, so
+      # the threshold gate reads it from the JSON output (top-level
+      # `.score`, the documented aggregate). A second run is cheaper
+      # than losing either the Security-tab integration or the enforced
+      # floor; this one does not re-publish, since the SARIF run above
+      # already fed the public API.
+      - name: Run Scorecard (JSON, for the threshold gate)
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc  # v2.4.4
+        with:
+          results_file: results.json
+          results_format: json
+          publish_results: false
+
+      - name: Upload SARIF artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload JSON results artifact (score source for the gate)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scorecard-json
+          path: results.json
+          retention-days: 5
+
+      - name: Upload SARIF to the GitHub Security tab
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28  # v4.37.8
+        with:
+          sarif_file: results.sarif
+
+  # The threshold gate runs in a SEPARATE job because the
+  # scorecard-action workflow-restriction policy requires the `analysis`
+  # job to contain only `uses:` steps, because the verifier rejects any
+  # `run:` step on the signing path. The gate downloads the JSON artifact the
+  # analysis job uploaded and asserts the aggregate score meets
+  # SCORECARD_MIN. The minimum defaults to 6.0, a structural floor for a
+  # young single-maintainer pre-1.0 repository where Maintained /
+  # Contributors / CII-Badge / Code-Review scores are constrained by
+  # repository age and ownership shape rather than by security posture.
+  # Raise it with the SCORECARD_MIN repository variable. The gate fails
+  # CLOSED on a parse failure: an unextractable score is a red job
+  # demanding a one-line fix, where a warning on a green run would
+  # silently retire the floor after an output-shape change.
+  threshold:
+    name: Threshold gate
+    needs: analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Download JSON results artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: scorecard-json
+
+      - name: Threshold gate (fail when aggregate score < SCORECARD_MIN)
+        env:
+          SCORECARD_MIN: ${{ vars.SCORECARD_MIN || '6.0' }}
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::error::jq not on the runner, so the threshold gate cannot evaluate the score. Install jq in this step or fix the runner image."
+            exit 1
+          fi
+          # The Scorecard JSON carries the aggregate at the top-level
+          # `.score` (documented, stable); older builds used
+          # `.aggregateScore`. Try both.
+          SCORE=$(jq -r '(.score // .aggregateScore // empty)' results.json | head -1)
+          if [ -z "$SCORE" ] || [ "$SCORE" = "null" ]; then
+            echo "::error::Could not extract the aggregate score from results.json (looked for .score, then .aggregateScore)."
+            echo "::error::The Scorecard JSON output shape changed, so update the jq paths above. The gate fails closed rather than silently retiring the score floor."
+            exit 1
+          fi
+          echo "[scorecard] aggregate score: ${SCORE} (min: ${SCORECARD_MIN})"
+          BELOW=$(awk -v s="$SCORE" -v t="$SCORECARD_MIN" 'BEGIN{print (s+0 < t+0)}')
+          if [ "$BELOW" = "1" ]; then
+            echo "::error::Scorecard aggregate score ${SCORE} is below the minimum ${SCORECARD_MIN}."
+            echo "::error::See the SARIF artifact and the GitHub Security tab for which checks regressed."
+            exit 1
+          fi
+          {
+            echo "### OpenSSF Scorecard"
+            echo ""
+            echo "Aggregate score: \`${SCORE}\` (min: \`${SCORECARD_MIN}\`)"
+          } >> "$GITHUB_STEP_SUMMARY"

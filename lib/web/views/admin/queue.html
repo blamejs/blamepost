@@ -1,0 +1,93 @@
+{% extends "layout" %}
+{% block title %}blamepost admin: queue{% endblock %}
+{% block shell %}shell shell-admin{% endblock %}
+{% block content %}
+{{> admin-nav }}
+
+<section class="pane">
+  <header class="pane-head">
+    <div>
+      <h1 class="pane-title">Outbound queue</h1>
+      <p class="pane-sub">Messages this server accepted and has not yet handed over.</p>
+    </div>
+  </header>
+
+  {% if problem %}
+  <div class="notice notice-bad" role="alert">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>{{ problem }}</p>
+  </div>
+  {% endif %}
+
+  {% if empty %}
+  <div class="blank">
+    <p class="blank-head">Nothing waiting.</p>
+    <p>Every accepted message has reached a receiving server, or has ended in a report back to its sender.</p>
+  </div>
+  {% else %}
+  <form method="post" action="/admin/queue" class="listform">
+    <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+    <div class="bulkbar" role="group" aria-label="Queue actions">
+      <button type="submit" name="action" value="run" class="btn">Retry everything now</button>
+      <button type="submit" name="action" value="cancel" class="btn btn-danger">Cancel the selected</button>
+    </div>
+
+    <div class="tablewrap">
+      <table class="grid">
+        <caption class="visually-hidden">Messages waiting to deliver</caption>
+        <thead>
+          <tr>
+            <th scope="col"><span class="visually-hidden">Select</span></th>
+            <th scope="col">Recipient</th>
+            <th scope="col">Sender</th>
+            <th scope="col">Tries</th>
+            <th scope="col">Next try</th>
+            <th scope="col">Last answer</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for e in entries %}
+          <tr>
+            <td>
+              <input type="checkbox" name="id" value="{{ e.id }}" id="q-{{ e.id }}">
+              <label class="visually-hidden" for="q-{{ e.id }}">Select the message to {{ e.recipient }}</label>
+            </td>
+            <th scope="row"><code>{{ e.recipient }}</code></th>
+            <td><code>{{ e.sender }}</code></td>
+            <td>{{ e.attempts }}</td>
+            <td>{{ e.nextTry }}</td>
+            <td class="cell-reason">
+              {% if e.unreadable %}
+              Spool entry unreadable. Prune it from the command line.
+              {% else %}
+              <code>{{ e.reasonCode }}</code> {{ e.reason }}
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </form>
+  {% endif %}
+
+  <p class="fineprint">
+    Retrying reaches every entry whose moment has arrived, and the ones that answer transiently
+    again go back with their attempt count intact, so the retry budget still runs out on schedule.
+  </p>
+  <p class="fineprint">
+    Cancelling shows you what it is about to erase and asks for the count and a reason before
+    it does. The count is taken again when you send it, so a message that reaches its recipient
+    while you are reading stops the whole cancellation rather than being quietly left out.
+  </p>
+  <p class="fineprint">
+    A cancelled message whose sender is a mailbox on this server gets a delivery report, so
+    nobody here is left believing a message went out when it did not. A cancelled message whose
+    sender this server hosts nothing at does not: that address arrived on the wire and whoever
+    sent the message chose it, so writing to it would mail a stranger's choice of address from
+    this server. Mail arriving through a forwarding alias is the ordinary case, and mail sent
+    under a stolen credential is the case you are most likely here for. The audit trail records
+    which senders were told and which were not, so you can tell anyone who needs to know.
+  </p>
+</section>
+{% endblock %}

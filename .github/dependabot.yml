@@ -1,0 +1,54 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "github-actions"
+    # codeql-action ships init / analyze / upload-sarif from one
+    # repository at one version. Split pull requests leave the workflows
+    # on mixed versions, which the actions-currency gate refuses and the
+    # CodeQL bundle rejects at run time. Grouping them means a bump
+    # arrives as a single coherent pull request.
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
+
+  # devDependencies only. blamepost ships zero npm RUNTIME dependencies.
+  # blamejs is vendored under lib/vendor/, which Dependabot cannot see;
+  # vendored currency is tracked by scripts/check-vendor-currency.js.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "devdeps"
+
+  # Fuzz-harness workspace (jazzer.js). Dev-only, never published; keeps
+  # the coverage-guided fuzz toolchain current.
+  - package-ecosystem: "npm"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "fuzz"
+
+  # The shipped container image. Keeps the base image in the root
+  # Dockerfile current; release-container.yml resolves the base tag to a
+  # digest at build time so the scanned image is the published one.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "deps"
+      - "docker"

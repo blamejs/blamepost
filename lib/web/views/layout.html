@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en"{% if theme %} data-theme="{{ theme }}"{% endif %}>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>{% block title %}blamepost{% endblock %}</title>
+  <link rel="stylesheet" href="/static/blamepost.css">
+  <link rel="icon" type="image/svg+xml" href="/static/assets/favicon.svg">
+  <link rel="alternate icon" type="image/png" href="/static/assets/favicon.png">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png">
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar-in">
+    {{> brand }}
+
+    {% if account %}
+    <form class="findbar" method="get" action="/search" role="search">
+      <input id="q" type="search" name="q" value="{{ searchQuery }}"
+             aria-label="Search mail" autocomplete="off" spellcheck="false">
+      {% if folder %}<input type="hidden" name="folder" value="{{ folder.name }}">{% endif %}
+      <button type="submit" class="btn btn-quiet">Search</button>
+    </form>
+    {% endif %}
+
+    <nav class="topnav" aria-label="Account">
+      {{> theme-switch }}
+      {% if account %}
+      <a class="topnav-link" href="{{ inboxHref }}">Mail</a>
+      {% if isAdmin %}<a class="topnav-link" href="/admin">Admin</a>{% endif %}
+      <span class="whoami" title="{{ account.address }}">{{ accountName }}</span>
+      <form method="post" action="/sign-out" class="inline-form">
+        <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+        <button type="submit" class="btn btn-quiet">Sign out</button>
+      </form>
+      {% else %}
+      <a class="topnav-link" href="/sign-in">Sign in</a>
+      {% endif %}
+    </nav>
+  </div>
+</header>
+
+{{> notice }}
+
+<main id="content" class="{% block shell %}shell{% endblock %}">
+{% block content %}{% endblock %}
+</main>
+
+<footer class="footer">
+  <span>blamepost on {{ hostname }}</span>
+  <span class="footer-links">
+    <a href="/.well-known/security.txt">Security contact</a>
+    <a href="/healthz">Readiness</a>
+  </span>
+</footer>
+
+<script src="/static/islands/theme.js" defer></script>
+{% block islands %}{% endblock %}
+</body>
+</html>
