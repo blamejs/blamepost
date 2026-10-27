@@ -1,0 +1,17 @@
+From: Alice <alice@example.com>
+To: Bob <bob@example.net>
+Subject: a multipart whose closing boundary never arrives
+Message-ID: <unterminated@example.com>
+Date: Mon, 16 Jun 2025 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="bnd-1"
+
+--bnd-1
+Content-Type: text/plain; charset=us-ascii
+
+the first part
+
+--bnd-1
+Content-Type: text/html; charset=us-ascii
+
+<p>the second part, and the closing boundary is missing</p>

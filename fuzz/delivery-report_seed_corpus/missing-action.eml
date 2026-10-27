@@ -1,0 +1,24 @@
+From: MAILER-DAEMON@relay.example.net
+To: postmaster@example.com
+Subject: Delivery Status Notification
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=delivery-status; boundary="rpt-3"
+
+--rpt-3
+Content-Type: text/plain; charset=us-ascii
+
+The second recipient group carries no Action.
+
+--rpt-3
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns; relay.example.net
+
+Final-Recipient: rfc822; bob@example.net
+Action: delivered
+Status: 2.0.0
+
+Final-Recipient: rfc822; carol@example.org
+Status: 5.0.0
+
+--rpt-3--

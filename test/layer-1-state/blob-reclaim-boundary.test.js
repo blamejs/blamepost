@@ -76,14 +76,48 @@ function digestsIn(list) {
   return (list || []).map(function (entry) { return entry.digest; });
 }
 
-// Take the row away and put the file back outside the settle window, so
-// what is left is a body a reclaim is entitled to remove. This is the
-// half of an interrupted delivery that leaves octets nothing names.
-function strand(objectid, bodyPath) {
+// Take the row away and put the file back by a given age, so what is
+// left is a body with nothing naming it and a chosen amount of time
+// behind it. This is the half of an interrupted delivery that leaves
+// octets nothing names.
+function strandAt(objectid, bodyPath, ageMs) {
   b.db.from(MESSAGES).where({ objectid: objectid }).deleteOne();
-  var aged = new Date(Date.now() - WELL_AGED_MS);
+  var aged = new Date(Date.now() - ageMs);
   nodeFs.utimesSync(bodyPath, aged, aged);
 }
+
+// The same, aged clear of the settle window, which is what the cases
+// about the row rather than the clock want.
+function strand(objectid, bodyPath) {
+  strandAt(objectid, bodyPath, WELL_AGED_MS);
+}
+
+// How long a body has to have been unreferenced before a reclaim will
+// remove it, as the operator guide promises it.
+//
+// Written here rather than read from the module. Every other case in
+// this file ages its fixtures at `blobs.SETTLE_MS` plus a margin, which
+// is right for them: what they are about is the row, and a fixture that
+// tracks the window cannot fall inside it as the window moves. But it
+// makes all of them silent about the window's WIDTH, and the width is
+// the part the guide promises and the part an operator schedules a
+// reclaim around. Narrowed to an hour, every case here still passes and the
+// verb starts removing bodies whose delivery is still being written,
+// which is the one thing the wait exists to prevent.
+var DOCUMENTED_SETTLE_MS = b.constants.TIME.hours(24);
+
+// The sentence that promises it, so a document edited to say something
+// else fails here rather than leaving the number above describing
+// nothing.
+var SETTLE_PROMISE_RE = /only removed once it has been unreferenced for a day/;
+var SETTLE_REFERENCE  = "docs/operator-guide.md";
+
+// Either side of the documented window by an hour. Coarse enough that a
+// filesystem storing timestamps to the second cannot round a fixture
+// across the boundary it was placed on.
+var MARGIN_MS      = b.constants.TIME.hours(1);
+var JUST_INSIDE_MS = DOCUMENTED_SETTLE_MS - MARGIN_MS;
+var JUST_PAST_MS   = DOCUMENTED_SETTLE_MS + MARGIN_MS;
 
 // One file the volume will not give up, for the length of one call.
 //
@@ -250,6 +284,75 @@ async function oneFileTheVolumeWillNotGiveUp(handle, accountId, blobDir) {
     JSON.stringify(digestsIn(again.reclaimed)));
 }
 
+// The width of the wait, driven from both sides.
+//
+// A body that nothing references and a body whose row is still being
+// written look identical on the volume, and time is the only thing that
+// separates them. The guide tells an operator the separation is a day
+// and that no flag shortens it, so the width is a promise rather than an
+// implementation detail: too narrow and a reclaim removes mail that was
+// arriving normally, too wide and the octets an operator ran the verb to
+// free stay where they are with no way to reach them.
+//
+// Both edges are placed with an hour to spare and neither reads the
+// module's own constant, so a window moved in either direction fails
+// here.
+async function theSettleWindowIsTheWidthTheGuidePromises(handle, accountId, blobDir) {
+  var guide = nodeFs.readFileSync(
+    nodePath.join(helpers.REPO_ROOT, SETTLE_REFERENCE), "utf8");
+  count("the operator guide promises a settle window, so this is comparing something",
+    SETTLE_PROMISE_RE.test(guide), SETTLE_REFERENCE);
+
+  function strandedAt(subject, ageMs) {
+    var bytes  = message(subject);
+    var stored = handle.mailbox.appendMessage("INBOX", bytes, { actor: { id: accountId } });
+    var digest = b.db.from(MESSAGES).where({ objectid: stored.objectid }).first().blobDigest;
+    var bodyPath = blobs.pathFor(blobDir, digest);
+    strandAt(stored.objectid, bodyPath, ageMs);
+    return { digest: digest, path: bodyPath };
+  }
+
+  var young = strandedAt("stranded an hour inside the window", JUST_INSIDE_MS);
+  var old   = strandedAt("stranded an hour past the window", JUST_PAST_MS);
+
+  var seen = handle.blobs.reconcile({ verify: false });
+  count("the window the reclaim reports is the day the guide promises, so an operator " +
+    "reading when a body becomes reclaimable is reading the number they were given",
+    seen.settleMs === DOCUMENTED_SETTLE_MS,
+    "reports " + seen.settleMs + "ms against the documented " + DOCUMENTED_SETTLE_MS + "ms");
+
+  function verdictFor(report, digest) {
+    var matched = (report.orphans || []).filter(function (o) { return o.digest === digest; });
+    return matched.length === 1 ? matched[0].reclaimable : null;
+  }
+  count("a body unreferenced for an hour less than the window is not yet reclaimable, so " +
+    "a delivery still being written is not read as octets to free",
+    verdictFor(seen, young.digest) === false, JSON.stringify(digestsIn(seen.orphans)));
+  count("and one unreferenced an hour longer is, so the wait ends when the guide says it " +
+    "ends rather than at some later width nobody was told about",
+    verdictFor(seen, old.digest) === true, JSON.stringify(digestsIn(seen.orphans)));
+
+  var run = await handle.blobs.reclaim({ reason: "the width of the settle window" });
+  count("the reclaim removes the body past the window",
+    digestsIn(run.reclaimed).indexOf(old.digest) !== -1 &&
+    nodeFs.existsSync(old.path) === false, JSON.stringify(digestsIn(run.reclaimed)));
+  var held = (run.heldBack || []).filter(function (e) { return e.digest === young.digest; });
+  count("and leaves the one inside it where it is, named as held back rather than passed " +
+    "over in silence",
+    held.length === 1 && nodeFs.existsSync(young.path),
+    JSON.stringify(digestsIn(run.heldBack)) + ", still on disk " +
+      nodeFs.existsSync(young.path));
+  count("and the moment it names as the one that body becomes reclaimable is its own age " +
+    "plus the documented window, which is what an operator schedules the next run against",
+    held.length === 1 &&
+    held[0].reclaimableAt ===
+      nodeFs.statSync(young.path).mtimeMs + DOCUMENTED_SETTLE_MS,
+    held.length === 1
+      ? "names " + held[0].reclaimableAt + " against " +
+        (nodeFs.statSync(young.path).mtimeMs + DOCUMENTED_SETTLE_MS)
+      : "nothing was held back");
+}
+
 // ---- runner ----------------------------------------------------------------
 
 async function run() {
@@ -279,6 +382,7 @@ async function run() {
     var blobDir = handle.mailbox.describe().blobDir;
     await bothSidesOfTheBoundary(handle, alice.id, blobDir);
     await oneFileTheVolumeWillNotGiveUp(handle, alice.id, blobDir);
+    await theSettleWindowIsTheWidthTheGuidePromises(handle, alice.id, blobDir);
 
     return helpers.getChecks();
   } finally {

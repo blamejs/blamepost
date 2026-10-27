@@ -52,6 +52,16 @@ function refuses(label, fn) {
   check(label, thrown);
 }
 
+// What a call threw, or the empty string when it returned. Beside
+// `refuses` rather than inside it, because a refusal that arrives for
+// the wrong reason is indistinguishable from the right one when all that
+// is read is whether something was thrown.
+function refusalFrom(fn) {
+  try { fn(); }
+  catch (e) { return (e && e.message) || String(e); }
+  return "";
+}
+
 async function run() {
   var sent  = [];
   var filed = [];
@@ -185,6 +195,23 @@ async function run() {
   check("a plain list splits on its commas",
     splitAddressHeader("a@example.com, b@example.net").length === 2);
 
+  // RFC 5322 §3.2.2: a comment is text. A double quote, a comma or an
+  // angle bracket inside one opens or ends nothing, and a backslash in
+  // one escapes the character after it.
+  var quoteInComment = "Alice (nickname \"Ace) <alice@example.com>";
+  check("a quote inside a comment does not open a quoted string, so the angle address " +
+    "after it is the address",
+    normalizeAddress(quoteInComment, "test").address === "alice@example.com");
+  var commentedList = splitAddressHeader(
+    "Alice (says \"hi, there) <alice@example.com>, (a <b> c) bob@example.net");
+  check("and a comma or an angle bracket inside a comment separates and opens nothing",
+    commentedList.length === 2 &&
+    normalizeAddress(commentedList[0], "test").address === "alice@example.com" &&
+    normalizeAddress(commentedList[1], "test").address === "bob@example.net");
+  check("a nested comment and an escaped parenthesis inside one close where they should",
+    normalizeAddress("Alice (outer (inner) \\) still) <alice@example.com>", "test").address ===
+      "alice@example.com");
+
   // The comma is inside a quoted display name, so it separates nothing.
   // Splitting here would invent a recipient out of half of somebody's
   // name, and on the submission side it would invent an author.
@@ -206,6 +233,64 @@ async function run() {
     normalizeAddress(decoded[0], "test").address === "john@example.net");
   check("and the address after it is read on its own",
     normalizeAddress(decoded[1], "test").address === "carol@example.org");
+
+  // The two readings of a comma-separated piece that is an address on
+  // its own, and the option that picks between them.
+  //
+  // RFC 5322 §3.6.1 gives From a LIST of mailboxes and §3.4 writes a
+  // mailbox as a bare addr-spec or as an angle address, so
+  // `bob@example.net, Alice <alice@example.com>` names two authors and a
+  // receiver displays both. The same decoded string is what an encoded
+  // display name of `bob@example.net, Alice` arrives as, which names
+  // one. Nothing left in the value says which was sent, so the caller
+  // says which way it needs the ambiguity resolved.
+  var AUTHOR_READING = { bareAddressIsAMailbox: true };
+  var bareFirstRaw = "bob@example.net, Alice <alice@example.com>";
+
+  // The default, which the IMAP ENVELOPE and the addressees of a reply
+  // take: the mailboxes the sender CERTAINLY named. An address added to
+  // that list is one somebody replies to without meaning to.
+  check("by default a bare address before an angle address is display text",
+    splitAddressHeader(bareFirstRaw).length === 1);
+
+  // The author binding's reading: every mailbox a receiver MIGHT
+  // display. A mailbox missing from that list is one this server signs
+  // for without measuring.
+  var bareFirst = splitAddressHeader(bareFirstRaw, AUTHOR_READING);
+  check("and under the author reading it is a mailbox of its own",
+    bareFirst.length === 2);
+  check("and the bare one is read as the address it is",
+    normalizeAddress(bareFirst[0], "test").address === "bob@example.net" &&
+    normalizeAddress(bareFirst[1], "test").address === "alice@example.com");
+
+  // The same piece with an RFC 5322 §3.2.2 comment on it, which is
+  // where the shape hides from a reader that measures the piece whole.
+  var commentedBare = splitAddressHeader(
+    "bob@example.net (Bob), Alice <alice@example.com>", AUTHOR_READING);
+  check("a comment on a bare address does not turn it back into display text",
+    commentedBare.length === 2);
+
+  // A group label sits in front of its first member (§3.4), and the
+  // member is a mailbox whether or not the group names it.
+  var labeled = splitAddressHeader(
+    "Authors: bob@example.net, Alice <alice@example.com>;", AUTHOR_READING);
+  check("a bare address behind a group label is still a mailbox",
+    labeled.length === 2 &&
+    normalizeAddress(labeled[0], "test").address === "bob@example.net");
+
+  // The name fragments the author reading must still keep joined. Each
+  // one carries an at sign or a dot or both and is somebody's name
+  // rather than an address, which is what the dotted domain tells apart.
+  // Splitting these would refuse ordinary mail from a client that writes
+  // an unquoted display name.
+  check("a decoded name holding an at sign is still joined to the address after it",
+    splitAddressHeader("Doe, John@Home <j@example.net>", AUTHOR_READING).length === 1);
+  check("and a decoded name holding a dot is too",
+    splitAddressHeader("Doe, John Jr. <j@example.net>", AUTHOR_READING).length === 1);
+  check("and a one-word name beside an address it does not own",
+    splitAddressHeader("Smith, Alice <alice@example.com>", AUTHOR_READING).length === 1 &&
+    normalizeAddress(splitAddressHeader("Smith, Alice <alice@example.com>",
+      AUTHOR_READING)[0], "test").address === "alice@example.com");
 
   // An address planted in a display name must not become a second
   // address. On the submission side this is the shape that would let a
@@ -238,6 +323,120 @@ async function run() {
     normalizeAddress("alice@example.com", "test").address === "alice@example.com");
   check("and the display name beside one is read off the front",
     normalizeAddress("\"Alice Smith\" <alice@example.com>", "test").name === "Alice Smith");
+
+  // The addr-spec is cut at the LAST pair of angle brackets, and the
+  // pair does not have to end the entry. RFC 5322 §3.2.2 lets a comment
+  // follow the address, and §3.4 lets a quoted display name hold angle
+  // brackets of its own, so an entry that ends in something other than
+  // `>` and an entry whose first `<` is inside a quoted string are both
+  // ordinary mail rather than malformed input.
+  //
+  // These four are the shapes that separate this reading from an
+  // end-anchored one and from a first-match one. They are pinned
+  // because both readings are one line away: `b.codepointClass`
+  // offers `lastDelimited` and `firstDelimited`, and each answers a
+  // different question from this one.
+  var commented = normalizeAddress("Alice <alice@example.com> (work)", "test");
+  check("an address followed by a comment is still cut at its angle brackets",
+    commented.address === "alice@example.com" && commented.name === "Alice");
+
+  var quotedBrackets = normalizeAddress("\"A <b>\" <alice@example.com>", "test");
+  check("a quoted display name holding angle brackets does not become the address",
+    quotedBrackets.address === "alice@example.com");
+
+  var twoPairs = normalizeAddress("<a@example.com> <b@example.net>", "test");
+  check("the last pair of angle brackets wins when an entry carries two",
+    twoPairs.address === "b@example.net");
+
+  var nested = normalizeAddress("Name <<a@example.com>", "test");
+  check("a second opening bracket starts the address rather than joining it",
+    nested.address === "a@example.com");
+
+  // The cut is made at a PAIR, and the two readers of this entry have to
+  // agree about where the pairs are. A `<` inside a quoted display name
+  // is text in somebody's name and a `>` that closes nothing is stray
+  // punctuation, so `"A <b>" .com>` carries no angle address at all:
+  // `angleAddressCount` says 0, and cutting between those two hands back
+  // a span running from inside the name to past the end of the entry.
+  //
+  // An entry carrying none is an addr-spec on its own, so the address is
+  // the entry, which the guard on the way in then refuses. What must not
+  // happen is a third answer that is neither the entry nor a bracket
+  // pair's contents.
+  var STRAY = "\"A <b>\" .com>";
+  check("an entry whose only brackets are quoted or stray carries no angle address",
+    blamepost.mail.compose.angleAddressCount(STRAY) === 0);
+  var strayClose = normalizeAddress(STRAY, "test");
+  check("and nothing is cut out of it, so the address is the entry itself",
+    strayClose.address === STRAY);
+
+  // The same disagreement one bracket earlier: an opening bracket, then a
+  // quoted name holding a pair, then a stray close.
+  var NESTED_STRAY = "<shop\"A <b>\" .com>";
+  check("an opening bracket closed past a quoted pair is one angle address",
+    blamepost.mail.compose.angleAddressCount(NESTED_STRAY) === 1);
+  var quotedThenStray = normalizeAddress(NESTED_STRAY, "test");
+  check("and the address is what that one pair holds, cut at its own opening bracket",
+    quotedThenStray.address === "shop\"A <b>\" .com");
+
+  // The count beside that reading. `normalizeAddress` answers with one
+  // address whatever the entry holds, so an entry holding two is one it
+  // chose between, and the address it did not choose is the one a forged
+  // author is built on: a receiver that stops at the first angle address
+  // is shown a mailbox nothing here measured.
+  var angleAddressCount = blamepost.mail.compose.angleAddressCount;
+
+  check("an ordinary mailbox carries one angle address",
+    angleAddressCount("Alice <alice@example.com>") === 1);
+  check("a bare addr-spec carries none, and an empty entry carries none",
+    angleAddressCount("alice@example.com") === 0 && angleAddressCount("") === 0);
+
+  // The entry the submission listener refuses on. Both halves are
+  // syntactically addresses and no grammar says which one is the author.
+  check("two angle addresses in one entry are counted as two",
+    angleAddressCount("<a@example.com> <b@example.net>") === 2);
+
+  // Quoting is what separates a name from an address, and the counter
+  // reads it the same way the splitter does. Counting a bracket inside a
+  // display name would refuse `"A <b>" <alice@example.com>`, which is
+  // one mailbox and ordinary mail.
+  check("angle brackets inside a quoted display name are not counted",
+    angleAddressCount("\"A <b>\" <alice@example.com>") === 1);
+  check("and a display name ending in a backslash still ends at its closing quote",
+    angleAddressCount("\"Back\\\\\" <a@example.com>") === 1);
+
+  // A `>` that closes nothing is stray punctuation rather than a
+  // mailbox, so it is not counted as one.
+  check("a closing bracket with no address open is not an angle address",
+    angleAddressCount("a>b <alice@example.com>") === 1);
+
+  // An entry whose second bracket pair is inside an RFC 5322 §3.2.2
+  // comment counts two, so the listener refuses it: a receiver that does
+  // not parse comments can take that pair as the address. This server's
+  // own reading skips the comment and takes the mailbox in front of it.
+  check("a comment carrying an angle address counts two",
+    angleAddressCount("Alice <alice@example.net> (see <x>)") === 2);
+  check("and this server reads the mailbox outside the comment",
+    normalizeAddress("Alice <alice@example.net> (see <x>)", "test").address ===
+      "alice@example.net");
+
+  // A comment with no brackets in it is the documented shape and stays
+  // one mailbox.
+  check("a comment with no angle brackets leaves the count at one",
+    angleAddressCount("Alice <alice@example.com> (work)") === 1);
+
+  // The nested opening above opens one address and closes one, so it is
+  // not two.
+  check("a second opening bracket does not add an address",
+    angleAddressCount("Name <<a@example.com>") === 1);
+
+  // A comma is what RFC 5322 §3.4 separates two mailboxes with, and the
+  // splitter is what acts on it, so each entry it yields is counted on
+  // its own rather than as one entry carrying two.
+  var separated = splitAddressHeader("<a@example.com>, <b@example.net>");
+  check("a comma-separated pair yields two entries carrying one address each",
+    separated.length === 2 && angleAddressCount(separated[0]) === 1 &&
+    angleAddressCount(separated[1]) === 1);
 
   // ---- send, reply, forward ------------------------------------------------
 
@@ -274,6 +473,33 @@ async function run() {
   check("the reply goes to the original sender", /^To: Bob <bob@example\.net>$/m.test(reply));
   check("replyAll keeps the other recipients", reply.indexOf("carol@example.org") !== -1);
   check("the original is quoted", reply.indexOf("> Tuesday works.") !== -1);
+
+  // A recipient override naming one mailbox as an object. `build` takes
+  // `{ name, address }` wherever it takes an address, and the reply
+  // override is documented to keep the name a caller wrote, so one of
+  // them is the same value the array form carries as its only entry.
+  // Read through `String()` instead it becomes the six characters of a
+  // default object rendering, and the address reader then refuses a
+  // reply the caller spelled correctly.
+  sent.length = 0;
+  await compose.reply({
+    original: original.rfc822,
+    from:     "alice@example.com",
+    text:     "Just you.",
+    to:       { name: "Bob", address: "bob@example.net" },
+    cc:       { name: "Carol", address: "carol@example.org" },
+  });
+  check("a reply override naming one recipient as an object is sent rather than refused",
+    sent.length === 1);
+  var objectReply = sent.length === 1 ? sent[0].rfc822.toString("utf8") : "";
+  check("and it is addressed to that mailbox, keeping the name the caller wrote",
+    /^To: Bob <bob@example\.net>$/m.test(objectReply));
+  check("and the copy list reads the same way",
+    /^Cc: Carol <carol@example\.org>$/m.test(objectReply));
+  check("and the envelope names both mailboxes, because a copy is delivered like any other",
+    sent.length === 1 && sent[0].to.length === 2 &&
+    sent[0].to.indexOf("bob@example.net") !== -1 &&
+    sent[0].to.indexOf("carol@example.org") !== -1);
 
   sent.length = 0;
   await compose.forward({
@@ -528,6 +754,50 @@ async function run() {
       watch:    false,
     });
   });
+
+  // Whether the certificate files are watched decides whether a renewal
+  // written to them is ever served. The loader refuses a value that is
+  // not a boolean, and a caller narrowing one to `=== true` on the way in
+  // turns that refusal off: every truthy non-boolean then reads as a
+  // request for the watch and arrives as false, so the server presents
+  // the certificate it started with for as long as it runs while the
+  // renewal sits on disk. Nothing throws and nothing is logged.
+  //
+  // The refusal is read by its message rather than by its presence,
+  // because these paths do not exist either: a refusal naming the
+  // missing file would satisfy a check that only asked whether something
+  // was thrown, and that is the answer the coerced form gives.
+  ["true", 1, "yes", {}].forEach(function (value) {
+    var said = refusalFrom(function () {
+      blamepost.tlsContext({
+        certFile: helpers.path.join(dataDir, "absent", "fullchain.pem"),
+        keyFile:  helpers.path.join(dataDir, "absent", "privkey.pem"),
+        watch:    value,
+      });
+    });
+    check("blamepost.tlsContext refuses watch: " + JSON.stringify(value) +
+      " by name rather than turning the watch off",
+      said.indexOf("opts.watch") !== -1);
+  });
+
+  // The two values that are an answer still are, and neither is refused
+  // by the check above.
+  check("blamepost.tlsContext reads watch: false past the refusal",
+    refusalFrom(function () {
+      blamepost.tlsContext({
+        certFile: helpers.path.join(dataDir, "absent", "fullchain.pem"),
+        keyFile:  helpers.path.join(dataDir, "absent", "privkey.pem"),
+        watch:    false,
+      });
+    }).indexOf("opts.watch") === -1);
+  check("blamepost.tlsContext reads watch: true past the refusal",
+    refusalFrom(function () {
+      blamepost.tlsContext({
+        certFile: helpers.path.join(dataDir, "absent", "fullchain.pem"),
+        keyFile:  helpers.path.join(dataDir, "absent", "privkey.pem"),
+        watch:    true,
+      });
+    }).indexOf("opts.watch") === -1);
 
   helpers.removeTempDir(dataDir);
   return helpers.getChecks();

@@ -119,6 +119,70 @@ function testAnExpiredCertificateIsRefused(root, material) {
     report.expiresInDays < 0);
 }
 
+// The width of the notice window, held against the number the operator
+// guide prints for it.
+//
+// The case below reads three days of life left and is satisfied by any
+// window at least that wide, so on its own it holds the reader to a
+// floor of three while two shipped documents promise a fortnight. A
+// window narrowed to a few days would keep that case green and leave
+// `blamepost doctor` and both health probes silent through most of the
+// period the guide tells an operator they will be warned in, which is
+// the whole of the notice an unattended renewal failure produces.
+//
+// So the number is taken from the guide rather than written here or
+// read out of the module. The sentence an operator acts on is the
+// authority, and a change to either side without the other fails here.
+var SETTINGS_REFERENCE = "docs/operator-guide.md";
+var NOTICE_WINDOW_RE   = /inside (\d+) days of expiring/;
+
+function noticeWindowDaysFromTheGuide() {
+  var text    = nodeFs.readFileSync(
+    nodePath.join(helpers.REPO_ROOT, SETTINGS_REFERENCE), "utf8");
+  var matched = NOTICE_WINDOW_RE.exec(text);
+  return matched === null ? null : parseInt(matched[1], 10);
+}
+
+// Read at an exact number of days before the expiry the leaf carries, so
+// the floor the reader divides by lands on a whole number rather than on
+// whichever side of it the run happened to start.
+function readingDaysBeforeExpiry(certFile, keyFile, leafPem, days) {
+  var notAfter = Date.parse(new nodeCrypto.X509Certificate(leafPem).validTo);
+  return blamepost.certificateReport({
+    certFile: certFile, keyFile: keyFile, hostname: HOSTNAME,
+    now: notAfter - (days * 24 * 60 * 60 * 1000),
+  });
+}
+
+async function testTheNoticeWindowIsTheWidthTheGuidePrints(root) {
+  var days = noticeWindowDaysFromTheGuide();
+  check("the operator guide names the width of the certificate notice window, so this is " +
+    "comparing something", days !== null && days > 0);
+  if (days === null) return;
+
+  // Minted with a life comfortably past the window, because both edges
+  // are read against the leaf's own validity and a leaf shorter than the
+  // window would put the outer reading before it was valid at all.
+  var material = await certs.pair({
+    hostname: HOSTNAME, authorityName: "a longer lived authority", validityDays: days * 4 });
+  var dir = nodePath.join(root, "notice-window");
+  var certFile = writeInto(dir, "fullchain.pem", material.chain);
+  var keyFile  = writeInto(dir, "privkey.pem", material.key);
+
+  var inside = readingDaysBeforeExpiry(certFile, keyFile, material.cert, days);
+  var insideValidity = findingFor(inside, "certificate validity");
+  check("a certificate with exactly the days the guide names left is inside the window, so " +
+    "the notice an operator was promised is the notice they get",
+    inside.expiresInDays === days && insideValidity.severity === "advised");
+
+  var outside = readingDaysBeforeExpiry(certFile, keyFile, material.cert, days + 1);
+  var outsideValidity = findingFor(outside, "certificate validity");
+  check("and one day further out is outside it, so the window is the width the guide prints " +
+    "rather than merely at least that wide",
+    outside.expiresInDays === days + 1 &&
+    outsideValidity.ok === true && outsideValidity.severity === undefined);
+}
+
 function testAnExpiryComingUpIsSaidOutLoudWithoutFailing(root, material) {
   var dir = nodePath.join(root, "soon");
   var certFile = writeInto(dir, "fullchain.pem", material.chain);
@@ -462,6 +526,7 @@ async function run() {
     testAGoodPairReadsAsGood(root, material);
     testAnExpiredCertificateIsRefused(root, material);
     testAnExpiryComingUpIsSaidOutLoudWithoutFailing(root, material);
+    await testTheNoticeWindowIsTheWidthTheGuidePrints(root);
     await testAKeyFromADifferentIssuanceIsRefused(root, material);
     testTheTwoPathsPointingAtEachOtherIsRefused(root, material);
     testALeafWithNoIssuerIsRefused(root, material);

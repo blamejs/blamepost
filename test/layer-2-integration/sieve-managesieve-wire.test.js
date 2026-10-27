@@ -368,6 +368,181 @@ async function theScriptSurfaceAnswersOverTheWire(session) {
     /^NO/.test(noRoomFor), visible(noRoomFor));
 }
 
+// ---- the octets a script is stored and served as -----------------------------
+
+// Four scripts that differ only in how their last line ends. RFC 5804
+// section 4 carries a script as a length-counted literal, so unlike an
+// SMTP body nothing about where one ends is inferred from its content,
+// and the octets a client counted are the octets it should get back.
+//
+// The first is what a conforming client sends: ManageSieve literals
+// carry CRLF line endings, so a script ending with CRLF is the ordinary
+// case rather than an edge one. Every fixture already in this file ends
+// with a bare LF, which is the one shape the writer below handles the
+// same way in both branches.
+var TAIL_SCRIPTS = {
+  "tail-crlf":  "require [\"fileinto\"];\r\nkeep;\r\n",
+  "tail-lf":    "require [\"fileinto\"];\nkeep;\n",
+  "tail-none":  "require [\"fileinto\"];\r\nkeep;",
+  "tail-blank": "require [\"fileinto\"];\r\nkeep;\r\n\r\n",
+};
+
+// One upload and one read-back, measured as octets. The literal opener
+// and the payload are returned as a pair, because the pair is the
+// claim: a literal that announces one count and is followed by a
+// different number of octets desynchronizes a client's parser whatever
+// the payload says.
+// The payload is octets rather than text, because one of the callers
+// sends a byte no string would survive being turned back into.
+async function roundTripOneScript(session, name, payload) {
+  // `sendNonSyncLiteral` writes the CRLF that ends the command line
+  // after the counted payload, which is where RFC 5804 section 4 puts
+  // it and what the listener's reader consumes unconditionally. Sending
+  // a second one here would be an empty command line, and the refusal it
+  // draws would arrive between this reply and the next.
+  session.sendNonSyncLiteral("PUTSCRIPT \"" + name + "\"", payload, "<" + name + ">");
+  var stored = await session.read(ONE_REPLY, "PUTSCRIPT answered");
+  if (!/^OK/.test(lastReply(stored))) return { accepted: false, reply: lastReply(stored) };
+
+  session.send("GETSCRIPT \"" + name + "\"");
+  var raw = await session.readBytes(ONE_REPLY, "GETSCRIPT answered");
+  // A latin1 view is one character per octet, so an index into it is an
+  // offset into the buffer and the announced count applies directly.
+  var opener = /\{(\d+)\}\r\n/.exec(raw.toString("latin1"));
+  if (opener === null) return { accepted: true, framed: false, raw: raw };
+  var announced = parseInt(opener[1], 10);
+  var at = opener.index + opener[0].length;
+  var served = raw.subarray(at, at + announced);
+  var after  = raw.subarray(at + announced);
+  return {
+    accepted:    true,
+    framed:      true,
+    put:         payload,
+    announced:   announced,
+    served:      served,
+    identical:   served.equals(payload),
+    crlfFollows: after.length >= 2 && after.subarray(0, 2).toString("latin1") === "\r\n",
+    after:       visible(after.toString("latin1").slice(0, 40)),
+  };
+}
+
+async function theScriptStoredIsTheScriptServed(port, caPem, address) {
+  // Its own session, and a binary one, because the octets are the claim
+  // and the sessions above read the transcript as text.
+  var session = await Wire.managesieve(port, {
+    caPem:    caPem,
+    servername: HOSTNAME,
+    address:  address,
+    password: ALICE_PASSWORD,
+    label:    "managesieve-octets",
+    binary:   true,
+  });
+  try {
+    var names = Object.keys(TAIL_SCRIPTS);
+    var results = {};
+    for (var i = 0; i < names.length; i += 1) {
+      var name = names[i];
+      var r = await roundTripOneScript(session, name,
+        Buffer.from(TAIL_SCRIPTS[name], "utf8"));
+      results[name] = r;
+      count(name + ": the upload is accepted and the read-back is framed as the literal " +
+        "RFC 5804 section 2.9 asks for",
+        r.accepted === true && r.framed === true,
+        JSON.stringify({ accepted: r.accepted, framed: r.framed, reply: r.reply }));
+      if (r.framed !== true) continue;
+
+      count(name + ": the announced count is the number of octets the client uploaded",
+        r.announced === r.put.length,
+        "announced " + r.announced + ", uploaded " + r.put.length);
+      count(name + ": and those octets are the ones it uploaded, so a script is stored as " +
+        "what was counted rather than as what a normalizer made of it",
+        r.identical === true,
+        "served " + r.served.length + " octets ending " +
+          r.served.subarray(-6).toString("hex") + ", uploaded " + r.put.length +
+          " ending " + r.put.subarray(-6).toString("hex"));
+    }
+
+    // What follows the literal is the CRLF that ends the response line
+    // carrying it. RFC 5804 section 4 puts that terminator outside the
+    // declared octet count, and this listener's own reader agrees: a
+    // PUTSCRIPT literal is followed by a CRLF the listener consumes
+    // unconditionally, which is why `roundTripOneScript` sends one.
+    //
+    // The writer does not answer it the same way. `_handleGetScript` in
+    // the vendored ManageSieve listener announces the count and then
+    // decides whether to write the terminator by looking at the
+    // script's last two octets, so the framing of a response depends on
+    // the content of the script inside it. A script ending with CRLF
+    // gets no terminator, and a client that reads the announced count
+    // and then expects the end of the line reads the next reply instead.
+    //
+    // The two checks below hold that partition to its exact shape. It
+    // cannot be closed here: the writer is in the vendored tree, which
+    // is read-only, and the only lever this repository has is the script
+    // body the store hands back, so trading the framing defect for a
+    // content one by stripping the script's own last line is not a fix.
+    // When the writer terminates the line whatever the script ends with,
+    // the second check becomes the first and the two collapse into one.
+    var terminated   = ["tail-lf", "tail-none"];
+    var unterminated = ["tail-crlf", "tail-blank"];
+    count("a script whose last line ends in something other than CRLF is followed by the " +
+      "terminator that ends the response line carrying it",
+      terminated.every(function (n) {
+        return results[n].framed === true && results[n].crlfFollows === true;
+      }),
+      terminated.map(function (n) { return n + " " + results[n].after; }).join(", "));
+
+    count("and a script that ends with CRLF is not, because the writer reads the script's " +
+      "last two octets rather than the count it announced, so the next reply begins where " +
+      "the end of the line should be",
+      unterminated.every(function (n) {
+        return results[n].framed === true && results[n].crlfFollows === false;
+      }),
+      unterminated.map(function (n) { return n + " " + results[n].after; }).join(", "));
+
+    // A literal carrying an octet that cannot begin a UTF-8 sequence.
+    // RFC 5804 section 1.6 makes a script a UTF-8 string, so this is
+    // malformed input arriving on a wire protocol, and the answer owed
+    // to it is a refusal at the point of parse.
+    //
+    // A substituting decoder would turn the octet into U+FFFD, store a
+    // script the client did not send, and answer OK. The account
+    // holder's filtering rules would then not be the rules they wrote,
+    // and a client that read its own upload back would see a length it
+    // cannot account for: the substitution is three octets where the
+    // original was one. A Sieve script decides what is filed, forwarded
+    // and discarded, so an octet altered inside a string, a header name
+    // or an address changes what the rule does.
+    //
+    // The refusal is in the vendored listener, where the literal is
+    // still a buffer. By the time a body reaches this repository it is a
+    // string and the octet is already gone, so no composition here could
+    // tell a substituted script from one that genuinely contains the
+    // replacement character.
+    var malformed = Buffer.concat([
+      Buffer.from("require [\"fileinto\"];\r\n# ", "ascii"),
+      Buffer.from([0xff]),
+      Buffer.from("\r\nkeep;\r\n", "ascii"),
+    ]);
+    var notUtf8 = await roundTripOneScript(session, "tail-not-utf8", malformed);
+    count("a script literal carrying an octet that is not well-formed UTF-8 is refused " +
+      "rather than repaired, so nothing the client did not send reaches the store",
+      notUtf8.accepted === false,
+      JSON.stringify({ accepted: notUtf8.accepted, reply: notUtf8.reply }));
+    count("and the refusal names what was wrong with it, so an operator can tell this from " +
+      "a script that failed Sieve validation",
+      /not valid UTF-8/.test(String(notUtf8.reply)),
+      JSON.stringify({ reply: notUtf8.reply }));
+
+    for (var d = 0; d < names.length; d += 1) {
+      session.send("DELETESCRIPT \"" + names[d] + "\"");
+      await session.read(ONE_REPLY, "DELETESCRIPT answered");
+    }
+    session.send("LOGOUT");
+    await session.read(ONE_REPLY, "LOGOUT answered");
+  } finally { session.close(); }
+}
+
 // The wire grammar is a refusal surface, not a parsing convenience. A
 // PUTSCRIPT with no payload announcement, or a verb before
 // authentication, is refused at the point of parse.
@@ -729,6 +904,7 @@ async function run() {
     await onePutscriptDrawsOneReply(opened.session);
     await anUnrunnableScriptIsRefusedOnTheWire(opened.session);
     await theScriptSurfaceAnswersOverTheWire(opened.session);
+    await theScriptStoredIsTheScriptServed(ports.managesieve, leaf.ca, alice.address);
     await malformedCommandsAreRefused(ports.managesieve, leaf.ca);
     await aScriptUploadedOverTheWireFilesRealMail(ports, leaf.ca, alice.address);
     await aScriptThatOutrunsItsBudgetKeepsTheMessage(opened.session, ports, leaf.ca,

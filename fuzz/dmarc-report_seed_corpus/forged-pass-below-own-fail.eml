@@ -1,0 +1,33 @@
+Authentication-Results: mx.example.com; dmarc=fail header.from=reporter.example
+Authentication-Results: mx.example.com; dmarc=pass header.from=reporter.example
+Authentication-Results: other.example; dmarc=pass header.from=reporter.example
+From: dmarc-noreply@reporter.example
+To: dmarc-reports@example.com
+Subject: Report Domain: example.com Submitter: reporter.example
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="bnd-report"
+
+--bnd-report
+Content-Type: text/xml
+Content-Disposition: attachment; filename="forged.xml"
+
+<?xml version="1.0" encoding="UTF-8" ?>
+<feedback>
+  <report_metadata>
+    <org_name>reporter.example</org_name>
+    <email>dmarc-noreply@reporter.example</email>
+    <report_id>forged-0001</report_id>
+    <date_range><begin>1750000000</begin><end>1750086400</end></date_range>
+  </report_metadata>
+  <policy_published>
+    <domain>example.com</domain><p>reject</p>
+  </policy_published>
+  <record>
+    <row><source_ip>198.51.100.4</source_ip><count>900</count>
+      <policy_evaluated><disposition>none</disposition><dkim>pass</dkim><spf>pass</spf></policy_evaluated>
+    </row>
+    <identifiers><header_from>example.com</header_from></identifiers>
+  </record>
+</feedback>
+
+--bnd-report--

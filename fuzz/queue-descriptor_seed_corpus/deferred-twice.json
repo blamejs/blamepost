@@ -1,0 +1,36 @@
+{
+  "id": "0123456789abcdef0123456789abcdef",
+  "from": "alice@example.com",
+  "recipient": "bob@example.net",
+  "attempt": 2,
+  "nextAttemptAt": 1750003600000,
+  "reason": "451 4.3.2 the receiving system is not accepting messages",
+  "reasonCode": "4.3.2",
+  "requireTls": false,
+  "held": false,
+  "heldBecause": "",
+  "queuedAt": 1750000000000,
+  "attemptsRecorded": 2,
+  "history": [
+    {
+      "at": 1750000060000,
+      "outcome": "deferred",
+      "attempt": 1,
+      "mxHost": "mx1.example.net",
+      "reason": "451 4.7.1 greylisted, try again in 300 seconds",
+      "reasonCode": "4.7.1",
+      "requireTls": false,
+      "held": false
+    },
+    {
+      "at": 1750001800000,
+      "outcome": "deferred",
+      "attempt": 2,
+      "mxHost": "mx2.example.net",
+      "reason": "451 4.3.2 the receiving system is not accepting messages",
+      "reasonCode": "4.3.2",
+      "requireTls": false,
+      "held": false
+    }
+  ]
+}

@@ -46,7 +46,7 @@
   </div>
   {% endif %}
 
-  <form method="post" action="{{ pending.postTo }}" class="rowform">
+  <form method="post" action="/{{ pending.postHref }}" class="rowform">
     <input type="hidden" name="_csrf" value="{{ csrfToken }}">
     <input type="hidden" name="action" value="{{ pending.action }}">
     {% for f in pending.carry %}
@@ -76,7 +76,7 @@
 
     <div class="formbar">
       <button type="submit" class="btn btn-danger">{{ pending.verb }}</button>
-      <a class="btn btn-quiet" href="{{ pending.backHref }}">Leave it alone</a>
+      <a class="btn btn-quiet" href="/{{ pending.backHref }}">Leave it alone</a>
     </div>
   </form>
 

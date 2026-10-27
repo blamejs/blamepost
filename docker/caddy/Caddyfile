@@ -39,10 +39,25 @@
 	# says so as a warning on every start, which is how an operator
 	# learns to read past the warnings that do matter.
 	reverse_proxy blamepost:{$BLAMEPOST_HTTP_PORT:8080} {
-		# Fail fast rather than queueing behind a wedged upstream. The
-		# health path is the same readiness endpoint the container
-		# healthcheck uses, so a blamepost instance that booted without
-		# binding its listeners is taken out of rotation here too.
+		# Fail fast rather than queueing behind a wedged upstream.
+		# `/healthz` is the liveness endpoint, the same one the
+		# container health check polls, and it answers 503 on one
+		# condition: the store is not open. That is the condition under
+		# which no page here can be served at all.
+		#
+		# It answers 200 with a verdict of `degraded` for an instance
+		# that is serving but not fully fit, which includes a mail
+		# listener that failed to take its port. Such an instance keeps
+		# receiving traffic here, and that is the intended behavior
+		# rather than an oversight: this terminator carries the browser
+		# interface and no mail, so a port nothing holds on 25 does not
+		# make a page here unservable, and taking the upstream out would
+		# answer 502 to the operator opening the console to find out
+		# which port is held and by what.
+		#
+		# `/readyz` is the endpoint that refuses in that case. Point
+		# this at it when there is more than one instance to route
+		# between, where withdrawing one costs the operator nothing.
 		health_uri /healthz
 		health_interval 30s
 		health_timeout 5s

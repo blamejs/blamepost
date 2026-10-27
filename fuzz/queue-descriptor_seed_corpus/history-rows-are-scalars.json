@@ -1,0 +1,15 @@
+{
+  "id": "0123456789abcdef0123456789abcdef",
+  "from": "alice@example.com",
+  "recipient": "bob@example.net",
+  "attempt": 3,
+  "nextAttemptAt": 1750000300000,
+  "reason": "451 4.4.1 connection timed out",
+  "reasonCode": "4.4.1",
+  "requireTls": false,
+  "held": false,
+  "heldBecause": "",
+  "queuedAt": 1750000000000,
+  "attemptsRecorded": 3,
+  "history": ["deferred at mx1.example.net", 7, true]
+}

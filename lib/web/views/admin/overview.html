@@ -51,6 +51,28 @@
   </ul>
   {% endif %}
 
+  <h2 class="section-title">Public front page</h2>
+  <p class="hint">
+    {% if publicSiteOn %}
+    This server answers <code>/</code> with a public page describing blamepost,
+    and tells crawlers they may index it. A signed-in reader still lands in
+    their own mailbox. Sign out, or open a private window, to see what a
+    visitor sees.
+    {% else %}
+    This server answers <code>/</code> with the sign-in page, and tells crawlers
+    to index nothing. Turning the front page on publishes a page naming this
+    host and the software it runs to anyone who can reach the web port.
+    {% endif %}
+  </p>
+  <form method="post" action="/admin/site" class="inline-form">
+    <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+    {% if publicSiteOn %}
+    <button type="submit" name="action" value="hide" class="btn btn-danger">Stop publishing it</button>
+    {% else %}
+    <button type="submit" name="action" value="publish" class="btn">Publish the front page</button>
+    {% endif %}
+  </form>
+
   <h2 class="section-title">Records every hosted domain needs</h2>
   <dl class="reclist">
     <dt>MX</dt><dd>Points at this listener's hostname.</dd>

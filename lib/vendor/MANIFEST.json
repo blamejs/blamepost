@@ -1,20 +1,20 @@
 {
   "packages": {
     "blamejs": {
-      "version": "0.18.57",
+      "version": "0.18.61",
       "npm": "@blamejs/core",
       "license": "Apache-2.0",
-      "source": "https://registry.npmjs.org/@blamejs/core/-/core-0.18.57.tgz",
-      "integrity": "sha512-DoywmBtu09b8A3drHufAZlBCbj1LKaSDIG27YZ3zXiPhLaXkX6Px6+iO9vwGy2lAFm81n+9oQb3NXCJ+xNc65A==",
-      "bundledAt": "2026-08-29T00:00:00Z",
+      "source": "https://registry.npmjs.org/@blamejs/core/-/core-0.18.61.tgz",
+      "integrity": "sha512-ll9vCnwFj9FLmTMMwheznTByItCFdxeKbLLu/K9eFsn4jf5x4+njxDIQv77yZYj6akBgMTkw6UOM8NLdgJ7oog==",
+      "bundledAt": "2026-09-01T00:00:00Z",
       "bundler": "npm registry tarball, integrity-verified before extraction",
       "files": {
         "server": "lib/vendor/blamejs/"
       },
       "hashes": {
-        "server": "sha256-tree:dbbaf7a16fd5d3dfbd48d03ff0c87a9b17b71b17380e57d648a0d80de8e66f15"
+        "server": "sha256-tree:9e90302836a80da1734796fe09e12f52c7341118dd5376e3a4459fb81cf28832"
       },
-      "refreshedAt": "2026-08-30T03:51:58.837Z"
+      "refreshedAt": "2026-09-02T04:46:09.766Z"
     }
   }
 }

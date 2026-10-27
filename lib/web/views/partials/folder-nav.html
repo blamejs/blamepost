@@ -3,7 +3,7 @@
   <ul class="folder-list">
     {% for f in folders %}
     <li>
-      <a class="folder-link{% if f.current %} is-current{% endif %}" href="{{ f.href }}"
+      <a class="folder-link{% if f.current %} is-current{% endif %}" href="/{{ f.href }}"
          {% if f.current %}aria-current="page"{% endif %}>{{ f.label }}</a>
     </li>
     {% endfor %}

@@ -1,0 +1,58 @@
+# libFuzzer dictionary for the address header readers.
+#
+# RFC 5322 section 3.4 address and group syntax, the RFC 5322 section
+# 3.2.1 quoted-pair and section 3.2.2 comment, the RFC 2047 encoded word
+# the MIME reader decodes before the listener sees a header, the RFC 5233
+# subaddress separator, and the RFC 1035 absolute-domain dot. The line
+# prefixes at the end are the ones the harness reads its identity fixture
+# from.
+
+lt="<"
+gt=">"
+at="@"
+comma=","
+comma_space=", "
+dquote="\x22"
+backslash="\x5c"
+quoted_pair="\x5c\x22"
+colon=":"
+semicolon=";"
+group_end=":;"
+comment_open="("
+comment_close=")"
+plus="+"
+dot="."
+space=" "
+tab="\x09"
+lf="\x0a"
+crlf="\x0d\x0a"
+nul="\x00"
+
+angle_addr="<alice@example.com>"
+angle_other="<bob@example.com>"
+addr_spec="alice@example.com"
+addr_other="bob@example.net"
+display_name="\x22Alice Smith\x22 "
+display_comma="\x22Doe, John\x22 "
+display_angle="\x22A <b>\x22 "
+tagged="alice+receipts@example.com"
+absolute="bob@EXAMPLE.NET."
+ip_literal="a@[192.0.2.1]"
+punycode="xn--80ak6aa92e.com"
+group_label="undisclosed-recipients:"
+encoded_b="=?UTF-8?B?RG9lLCBKb2hu?="
+encoded_q="=?UTF-8?Q?Doe=2C_John?="
+domain="example.com"
+domain_upper="EXAMPLE.COM"
+postmaster="postmaster"
+
+catch_all="\x0a@example.com"
+operator="\x0a#postmaster@example.com"
+refused_local="\x0a!postmaster"
+
+kelvin="\xe2\x84\xaa"
+long_s="\xc5\xbf"
+dotted_capital_i="\xc4\xb0"
+fullwidth_at="\xef\xbc\xa0"
+rlo="\xe2\x80\xae"
+zwsp="\xe2\x80\x8b"

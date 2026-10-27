@@ -1,0 +1,57 @@
+# libFuzzer dictionary for the inbound delivery status report reader.
+#
+# The RFC 3462 multipart/report framing, the RFC 3464 per-message and
+# per-recipient fields with the five section 2.3.3 action tokens, the RFC
+# 3463 status classes, the RFC 6533 utf-8 address type, and the octets the
+# reader refuses: CR, a non-UTF-8 byte, and the bidi and line separators a
+# diagnostic is screened for. The seeds are LF text files, so the CRLF
+# framing arrives from here.
+
+crlf="\x0d\x0a"
+blank_line="\x0d\x0a\x0d\x0a"
+lf="\x0a"
+bare_cr="\x0d"
+fold="\x0d\x0a\x20"
+nul="\x00"
+invalid_utf8="\xff"
+truncated_utf8="\xc3"
+rlo="\xe2\x80\xae"
+line_separator="\xe2\x80\xa8"
+csi="\xc2\x9b"
+escape="\x1b["
+
+report_type="Content-Type: multipart/report; report-type=delivery-status; boundary="
+status_part="Content-Type: message/delivery-status"
+headers_part="Content-Type: text/rfc822-headers"
+rfc822_part="Content-Type: message/rfc822"
+text_part="Content-Type: text/plain; charset=us-ascii"
+boundary_open="--rpt-1"
+boundary_close="--rpt-1--"
+
+reporting_mta="Reporting-MTA: dns; "
+arrival_date="Arrival-Date: "
+envelope_id="Original-Envelope-Id: "
+received_from="Received-From-MTA: dns; "
+final_recipient="Final-Recipient: rfc822; "
+final_recipient_utf8="Final-Recipient: utf-8; "
+original_recipient="Original-Recipient: rfc822; "
+action="Action: "
+status="Status: "
+remote_mta="Remote-MTA: dns; "
+diagnostic="Diagnostic-Code: smtp; "
+last_attempt="Last-Attempt-Date: "
+will_retry="Will-Retry-Until: "
+
+action_failed="failed"
+action_delayed="delayed"
+action_delivered="delivered"
+action_relayed="relayed"
+action_expanded="expanded"
+
+status_permanent="5.1.1"
+status_transient="4.4.1"
+status_success="2.0.0"
+reply_550="550 5.1.1 "
+
+postmaster="postmaster@example.com"
+recipient="bob@example.net"

@@ -172,6 +172,19 @@ async function refusalFrom(read) {
   }
 }
 
+// The same refusal read for its sentence rather than its code. A code
+// says which branch answered and the sentence says what an operator is
+// being told, and one refusal that carries several causes is only worth
+// having if it names them.
+async function refusalTextFrom(read) {
+  try {
+    await read();
+    return null;
+  } catch (e) {
+    return (e && e.message) || String(e);
+  }
+}
+
 async function repairRowsFor(digest) {
   await b.audit.flush();
   var rows = await b.audit.query({ action: BODY_REPAIRED, order: "desc", limit: 50 });
@@ -238,11 +251,22 @@ async function aShortBodyIsRewrittenByTheNextIdenticalDelivery(handle, carol, da
   // still this layer's own: what the vault raises carries no code, and a
   // listener with no reading for it would tell the client to try again
   // at something that can never succeed.
+  //
+  // The code says which form the file was in rather than what went wrong
+  // inside it. A body is sealed under the message it belongs to, and an
+  // AEAD tag fails identically for bytes cut short, for a value sealed
+  // as something else, and for one written under another volume's vault
+  // key, so the refusal names all three and the operator reads which
+  // applies off the rest of the volume.
   count("the account that already had the message cannot read it, and is refused in " +
     "this layer's own words rather than in the vault's",
-    beforeImap === "mailbox/blob-seal-unopened", String(beforeImap));
+    beforeImap === "mailbox/blob-seal-foreign", String(beforeImap));
   count("and the same on POP3, which reads the same body through the same check",
-    beforePop3 === "mailbox/blob-seal-unopened", String(beforePop3));
+    beforePop3 === "mailbox/blob-seal-foreign", String(beforePop3));
+  var beforeText = await refusalTextFrom(function () { return imapBody(handle, carol); });
+  count("and the refusal names damage among the causes, because the seal cannot tell a " +
+    "body cut short from a value sealed as something else",
+    /cut short or altered/.test(String(beforeText)), String(beforeText));
 
   // The second account, handed octets that are byte for byte the ones
   // the file was supposed to hold.
@@ -316,9 +340,14 @@ async function aBodyChangedInPlaceIsRefusedRatherThanRepaired(handle, erin, fran
   var bodyPath = blobs.pathFor(blobDir, digest);
   var whole = nodeFs.statSync(bodyPath).size;
 
-  // Sealed by this server's own vault, so the seal opens and only the
-  // content is wrong. Nothing is forged and no key is needed.
-  nodeFs.writeFileSync(bodyPath, b.vault.seal(other.toString("base64")), { mode: 0o600 });
+  // Sealed by this server's own vault, under the name this file is
+  // filed as, so the seal opens and only the content is wrong. Nothing
+  // is forged and no key is needed. The context is the one the writer
+  // uses: a body planted under any other would be refused by the seal,
+  // which is a different shape from the one being driven here.
+  nodeFs.writeFileSync(bodyPath,
+    b.vault.aad.seal(other.toString("base64"), mailbox.bodySealContext(digest)),
+    { mode: 0o600 });
   ageFile(bodyPath);
   var swapped = nodeFs.statSync(bodyPath);
   count("the body on disk holds different octets and occupies the same bytes, which " +

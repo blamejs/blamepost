@@ -140,6 +140,18 @@ function allowedOffsets(line) {
 // control-byte test below, not this list, is what keeps binary out.
 var SKIP_EXT = /\.(png|jpe?g|gif|ico|pem|der|p12|pfx|crt|cer|key|woff2?|ttf|eot|zip|gz|tgz|pdf|bin)$/i;
 
+// A file this project WROTE, whatever bytes it holds. The control-byte test
+// below is a backstop for a binary whose extension is not on the list above,
+// and a source file is never that. Four `fuzz/*.fuzz.js` files hold a NUL in
+// their OWN SOURCE, in a literal they hand a wire reader as input, and for as
+// long as the backstop judged by bytes alone those four went unread while the
+// run still reported a whole tree. The seed corpora on disk are a separate set
+// and carry no NUL; it is the harness sources that do.
+// A NUL cannot hide a word from this gate, so a source file is read
+// with each NUL standing in for a line break, and only a file whose name
+// claims no source format can still be dropped as binary.
+var SOURCE_EXT = /\.(js|mjs|cjs|json|md|ya?ml|sh|html?|css|txt|dict)$/i;
+
 // A vendored package is upstream's prose, not this project's. It is committed,
 // so `git ls-files` reports every file in it, and it is refreshed wholesale by
 // scripts/vendor-update.sh. A finding there could only be fixed by editing a
@@ -160,7 +172,9 @@ function isDataPath(file) { return SKIP_EXT.test(file) || SKIP_PATH.test(file); 
 var SELF = "scripts/check-spelling-consistency.js";
 
 // A line may opt out, but only by naming the WORD and SAYING WHY:
-//   spelling-ok: <word> -- <reason>
+//   spelling-ok: <word> (<reason>)
+// The reason is in parentheses because the dash-punctuation detector refuses
+// a spaced double hyphen in a comment, and one marker form must pass both.
 // The case this exists for is a machine-readable value, such as a
 // discriminator a caller compares or a key a format pins, where the word is an
 // interface rather than prose and rewriting it for consistency breaks
@@ -174,7 +188,7 @@ var SELF = "scripts/check-spelling-consistency.js";
 // suppress anything, so a half-written opt-out fails loudly instead of quietly
 // widening. Suppressions are counted and printed on every run, pass or fail,
 // because an opt-out nobody sees is where the defect this gate hunts ends up.
-var SUPPRESS_RE = /spelling-ok:\s*([A-Za-z]+)\s*--\s*(\S.*?)\s*$/;
+var SUPPRESS_RE = /spelling-ok:\s*([A-Za-z]+)\s*\(\s*([^()]*?\S)\s*\)/;
 
 // Built at runtime rather than written as a literal. A raw control byte in the
 // source makes git classify this file as binary, which costs line diffs, blame
@@ -211,10 +225,27 @@ var WORD_RE = /[A-Za-z]+/g;
 // past both early returns on purpose: a file whose read threw and a file dropped
 // as binary were not examined, and counting either would report reach the run
 // does not have.
+//
+// Both early returns also NAME what they dropped, because a count alone answers
+// only for somebody comparing two runs. This gate read 425 files for as long as
+// two of them carried a stray control byte, and 425 looks exactly like a whole
+// tree to anyone reading one run: the skip bought those two files a pass, and
+// the one that mattered held a spelling the gate exists to catch. A skip is not
+// a pass, so it is reported by name and separately from the count.
 function scanFile(file, suppressed, tally) {
   var src;
-  try { src = fs.readFileSync(file, "utf8"); } catch (_e) { return []; }
-  if (src.indexOf(NUL) !== -1) return [];      // binary that slipped the extension list
+  try { src = fs.readFileSync(file, "utf8"); }
+  catch (_e) {
+    if (tally) tally.skipped.push(file + " (unreadable)");
+    return [];
+  }
+  if (src.indexOf(NUL) !== -1) {              // binary that slipped the extension list
+    if (!SOURCE_EXT.test(file)) {
+      if (tally) tally.skipped.push(file + " (control byte, read as binary)");
+      return [];
+    }
+    src = src.split(NUL).join("\n");
+  }
   if (tally) tally.scanned += 1;
   var findings = [];
   var lines = src.split("\n");
@@ -287,10 +318,43 @@ function canary() {
     if (scanFile(probe).length !== 0) {
       throw new Error("canary: `analyses` is the plural of `analysis` and must not be flagged");
     }
-    // A binary file must be skipped, not decoded into spurious findings.
-    fs.writeFileSync(probe, "behaviour" + NUL + "binary\n");
-    if (scanFile(probe).length !== 0) {
+    // A binary file must be skipped, not decoded into spurious findings. Its
+    // name has to claim no source format, because a source file is read
+    // whatever bytes it holds.
+    var opaque = path.join(dir, "probe.dat");
+    fs.writeFileSync(opaque, "behaviour" + NUL + "binary\n");
+    if (scanFile(opaque).length !== 0) {
       throw new Error("canary: a file containing a control byte should be skipped");
+    }
+    // And the skip has to be REPORTED, not merely performed. The probe above
+    // carries a non-preferred spelling on purpose: it is the shape that was
+    // live in this tree, where a stray control byte kept two files out of the
+    // scan and the run still said OK. A skip that nobody is told about is the
+    // gate answering for a file it never opened.
+    var skipProbe = { scanned: 0, skipped: [] };
+    scanFile(opaque, undefined, skipProbe);
+    if (skipProbe.scanned !== 0) {
+      throw new Error("canary: a skipped file must not be counted as scanned");
+    }
+    if (skipProbe.skipped.length !== 1 || skipProbe.skipped[0].indexOf("control byte") === -1) {
+      throw new Error("canary: a file skipped as binary must be named, with the reason, got " +
+        JSON.stringify(skipProbe.skipped));
+    }
+    // The other half, and the one that was wrong: a file this project wrote
+    // is read whatever bytes it holds, and a word on either side of the NUL
+    // is still a word. Four `fuzz/*.fuzz.js` files hold one in their own source,
+    // in a literal they hand a wire reader, and the skip bought all four a pass
+    // on every spelling.
+    fs.writeFileSync(probe, "behaviour" + NUL + "enrolment\n");
+    var sourceProbe = { scanned: 0, skipped: [] };
+    var throughNul = scanFile(probe, undefined, sourceProbe);
+    if (throughNul.length !== 2) {
+      throw new Error("canary: a source file holding a NUL must be read on both sides of it, " +
+        "got " + throughNul.length + " finding(s)");
+    }
+    if (sourceProbe.scanned !== 1 || sourceProbe.skipped.length !== 0) {
+      throw new Error("canary: a source file holding a NUL must be counted as scanned, got " +
+        JSON.stringify(sourceProbe));
     }
     // The vendored tree is upstream text, whatever its bytes look like. Plain
     // UTF-8 markdown is the case the control-byte test cannot catch, so the
@@ -323,7 +387,7 @@ function canary() {
     if (scanFile(probe).length !== 2) {
       throw new Error("canary: `spelling-ok:` naming a word but no reason must not suppress");
     }
-    fs.writeFileSync(probe, "var KIND = \"catalog\";   // spelling-ok: catalog -- machine value\n");
+    fs.writeFileSync(probe, "var KIND = \"catalog\";   // spelling-ok: catalog (machine value)\n");
     var kept = [];
     if (scanFile(probe, kept).length !== 0 || kept.length !== 2 ||
         kept[0].reason !== "machine value") {
@@ -332,7 +396,7 @@ function canary() {
     // ...and ONLY that word. An unrelated form joining the line is still a
     // finding, or the opt-out becomes a licence to regress the rest of the line.
     fs.writeFileSync(probe,
-      "var KIND = \"catalog\";   // spelling-ok: catalog -- machine value, behaviour aside\n");
+      "var KIND = \"catalog\";   // spelling-ok: catalog (machine value), behaviour aside\n");
     var mixed = scanFile(probe);
     if (mixed.length !== 1 || mixed[0].found !== "behaviour") {
       throw new Error("canary: the opt-out must excuse its word only, got " +
@@ -453,7 +517,7 @@ function main() {
 
   var findings = [];
   var suppressed = [];
-  var tally = { scanned: 0 };
+  var tally = { scanned: 0, skipped: [] };
   trackedFiles().forEach(function (f) {
     findings = findings.concat(scanFile(f, suppressed, tally));
   });
@@ -483,6 +547,13 @@ function main() {
   // far it reached: four findings out of the whole tree and four out of six
   // files are different reports, and they read identically without this line.
   function reportExamined() {
+    // Named before the count, so a reader meets the gap before the number
+    // that excludes it rather than after.
+    if (tally.skipped.length > 0) {
+      console.log("[check-spelling-consistency] " + tally.skipped.length +
+        " file(s) were NOT scanned and are not in the count below:");
+      tally.skipped.forEach(function (s) { console.log("  " + s); });
+    }
     console.log("EXAMINED " + tally.scanned + " scanned-files");
   }
 

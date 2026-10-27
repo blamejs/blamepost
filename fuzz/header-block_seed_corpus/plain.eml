@@ -1,0 +1,7 @@
+From: Alice <alice@example.com>
+To: bob@example.net
+Subject: the header block ends at the blank line below
+Date: Mon, 24 Aug 2026 09:00:00 +0000
+Message-ID: <plain-block@example.com>
+
+The body starts here.

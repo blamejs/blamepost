@@ -156,6 +156,33 @@ function anUntriedMessageSaysWhenItFirstMoves(volume) {
     /No attempt has been made yet/.test(result.stdout), result.stdout);
   count("and the budget it has not started spending is still reported",
     /of \d+ spent/.test(result.stdout) || /attempt/i.test(result.stdout), result.stdout);
+
+  // The size of the waiting message, which is what an operator reads
+  // before deciding whether a queue is stuck on one large message or on
+  // many small ones. The body is on the volume beside the descriptor, so
+  // the number is measured rather than taken from anything the
+  // descriptor claims about itself.
+  count("the size printed is the body's own byte count",
+    result.stdout.indexOf("size       " + Buffer.byteLength(MESSAGE, "utf8") + " byte(s)") !== -1,
+    result.stdout);
+}
+
+// A descriptor whose body is gone is the orphan half of a pair, and the
+// listing already has a word for it. The size line has to say that
+// rather than print a number it does not have: an operator reading
+// `undefined` cannot tell a missing body from a zero-length one.
+function aMessageWhoseBodyIsGoneSaysSoRatherThanPrintingNothing(volume) {
+  plant(volume.dataDir, WAITING_ID);
+  fs.unlinkSync(spoolPath(volume.dataDir, WAITING_ID + ".eml"));
+  var run = runnerOn(volume);
+  var result = run(["queue", "show", WAITING_ID]);
+
+  count("an entry whose body is missing is still reported",
+    result.status === 0, "exit " + result.status + ": " + result.both);
+  count("and the size line names the absence rather than a value",
+    /size\s+the message body is missing/.test(result.stdout) &&
+    result.stdout.indexOf("undefined") === -1,
+    result.stdout);
 }
 
 // The attempt record, which is the half a listing structurally cannot
@@ -281,6 +308,11 @@ async function run() {
       "queue show: every attempt and what the far side said is readable",
       function () {
         return everyAttemptAndWhatTheFarSideSaidIsReadable(fresh("queue-show-tried"));
+      });
+    await helpers.withTestTimeout(
+      "queue show: a message whose body is gone says so rather than printing nothing",
+      function () {
+        return aMessageWhoseBodyIsGoneSaysSoRatherThanPrintingNothing(fresh("queue-show-nobody"));
       });
     await helpers.withTestTimeout(
       "queue show: an id naming nothing is an answer rather than a fault",

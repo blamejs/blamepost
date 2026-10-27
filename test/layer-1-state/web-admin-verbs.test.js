@@ -317,6 +317,63 @@ async function testASelectorRefusalWrittenForAPersonReachesTheOperator(operator)
     answer.body.slice(0, 400));
 }
 
+// ---- the numbers on the overview -------------------------------------------
+
+// What the front page of the console tells an operator, checked against
+// the pages those numbers link to.
+//
+// A tile is one integer with a word beside it, which is the easiest thing
+// on this surface to render wrong and the hardest to notice: it is read at
+// a glance, it is believed, and nothing else on the page contradicts it.
+// The selector tile is the one that decides whether an operator thinks
+// this server can sign mail at all, so a zero there while four selectors
+// are live is an operator going to look for a signing problem that does
+// not exist, or not publishing records they already need.
+//
+// So each number is compared against the page it links to rather than
+// against a second copy of the query that produced it. A test that
+// recomputed the count the same way the route does would agree with the
+// route however wrong both were.
+async function testTheOverviewCountsAgreeWithThePagesTheyLinkTo(operator, identity) {
+  var overview = await operator.get("/admin");
+  count("the console's front page is served", overview.status === 200,
+    overview.status + " " + overview.body.slice(0, 160));
+
+  function tile(label) {
+    // The rendered pair, read off the page rather than off the scope the
+    // route handed the template: the template is the last place the
+    // number can be dropped, and a scope-level read would not see it.
+    var re = new RegExp("<[^>]*>\\s*(\\d+)\\s*<\\/[^>]*>\\s*<[^>]*>\\s*" + label + "\\s*<\\/");
+    var found = re.exec(overview.body);
+    return found === null ? null : Number(found[1]);
+  }
+
+  // What the selector page actually holds, counted through the same
+  // reader the console's own selector page renders from.
+  var live = _asRows(await identity.domains.listSelectors({}));
+  count("the run really does hold signing selectors, so the tile below " +
+    "answers for something", live.length > 0, String(live.length));
+
+  var shown = tile("Selectors");
+  count("the selector tile carries a number at all", shown !== null,
+    String(shown));
+  count("and it is the number of selectors this server holds rather than a " +
+    "constant zero", shown === live.length, shown + " shown, " + live.length + " held");
+
+  // The neighboring tiles, because a count read off the wrong property
+  // is a shape mistake and shape mistakes come in families. Two of the
+  // three were right, which is exactly why nobody looked at the third.
+  var domains = _asRows(await identity.domains.list({}));
+  count("the domain tile is the number of hosted domains",
+    tile("Domains") === domains.length,
+    tile("Domains") + " shown, " + domains.length + " held");
+
+  var accounts = _asRows(await identity.accounts.list({ includeArchived: true }));
+  count("the account tile is the number of accounts",
+    tile("Accounts") === accounts.length,
+    tile("Accounts") + " shown, " + accounts.length + " held");
+}
+
 // ---- the sweep, and the answer nothing had ever driven ---------------------
 
 // The sweep button has three answers and two of them were being taken on
@@ -662,14 +719,80 @@ async function testDisablingADomainWithNoAdministratorIsUntouched(operator, iden
 // administrator whose credential has been taken is archived from the
 // console while another administrator remains, with no server stopped and
 // no mail interrupted.
-async function testAnAdministratorIsStillContainedWhileAnotherRemains(operator, identity) {
+// The console creates an account and then grants the role on its row,
+// which asks for the reason every grant records.
+async function addAdministratorFromTheConsole(operator, identity, address, displayName) {
   var added = await operator.form("/admin/accounts", {
-    action: "add", address: SECOND_ADMIN, password: OTHER_PASSWORD,
-    displayName: "second operator", isAdmin: "on",
+    action: "add", address: address, password: OTHER_PASSWORD, displayName: displayName,
   });
-  count("the console grants the role to a second account",
+  count("the console creates " + address,
     added.status === 302 && noticeOf(added) === "account-added",
     added.status + " " + String(added.location));
+  var created = await identity.accounts.get(address);
+  var granted = await operator.form("/admin/accounts", {
+    action: "grant-role", id: created.id, reason: "a second operator for the rota",
+  });
+  count("and grants it the role on its row",
+    granted.status === 302 && noticeOf(granted) === "role-granted",
+    granted.status + " " + String(granted.location));
+  return granted;
+}
+
+// The one value on an account row that the person holding the account
+// wrote. It is rendered into outbound headers, into every admin view and
+// into the JMAP name of each address a client shows, so a control
+// character in one is read by five modules and repaired by whichever of
+// them remembered to. It is refused where it is written instead.
+//
+// U+009B is the single-byte control sequence introducer: a terminal
+// reading it acts on the rest of the line. The guard the store runs
+// beside this reports it as clean, because the C1 range is not what that
+// guard is about, and the tab and the line feed beside it are ordinary
+// in free text and are not ordinary in a name. Written from their code
+// points, because a C1 octet does not survive being typed into a source
+// file.
+var NAMED_WITH_CONTROL = "rafe@" + DOMAIN;
+var CONTROL_NAMES = [
+  ["the single-byte escape introducer", String.fromCharCode(0x9b)],
+  ["a tab",                             String.fromCharCode(0x09)],
+  ["a line feed",                       String.fromCharCode(0x0a)],
+  ["a null byte",                       String.fromCharCode(0x00)],
+  ["the delete code point",             String.fromCharCode(0x7f)],
+];
+
+async function testADisplayNameCarryingAControlCharacterIsRefused(operator, identity) {
+  for (var i = 0; i < CONTROL_NAMES.length; i += 1) {
+    var refused = await operator.form("/admin/accounts", {
+      action:      "add",
+      address:     NAMED_WITH_CONTROL,
+      password:    OTHER_PASSWORD,
+      displayName: "Dana" + CONTROL_NAMES[i][1] + "Reyes",
+    });
+    count("an account named with " + CONTROL_NAMES[i][0] + " is refused rather than created",
+      refused.status === 400, refused.status + " " + String(refused.location));
+    count("and nothing was created under that address",
+      (await identity.accounts.get(NAMED_WITH_CONTROL)) === null,
+      JSON.stringify(await identity.accounts.get(NAMED_WITH_CONTROL)));
+  }
+
+  // The other half of the claim. A screen that refused an ordinary name
+  // in somebody's own writing system would be worse than the problem it
+  // closes, so the same form with the same address goes through.
+  var made = await operator.form("/admin/accounts", {
+    action: "add", address: NAMED_WITH_CONTROL, password: OTHER_PASSWORD,
+    displayName: "Dana Reyes",
+  });
+  count("and the same account with an ordinary name is created",
+    made.status === 302 && noticeOf(made) === "account-added",
+    made.status + " " + String(made.location));
+  var held = await identity.accounts.get(NAMED_WITH_CONTROL);
+  count("holding the name as it was written",
+    held !== null && held.displayName === "Dana Reyes",
+    JSON.stringify(held && held.displayName));
+}
+
+async function testAnAdministratorIsStillContainedWhileAnotherRemains(operator, identity) {
+  await addAdministratorFromTheConsole(operator, identity, SECOND_ADMIN, "second operator");
 
   var second = await identity.accounts.get(SECOND_ADMIN);
   count("and the account it created administers this server",
@@ -712,13 +835,8 @@ async function testAnAdministratorIsStillContainedWhileAnotherRemains(operator, 
 async function testAnArchivedAdministratorsOpenSessionStopsAdministering(
   operator, identity, origin, caPem
 ) {
-  var added = await operator.form("/admin/accounts", {
-    action: "add", address: TAKEN_ADMIN, password: OTHER_PASSWORD,
-    displayName: "an operator whose credential was taken", isAdmin: "on",
-  });
-  count("the console grants the role to the account that is about to be contained",
-    added.status === 302 && noticeOf(added) === "account-added",
-    added.status + " " + String(added.location));
+  await addAdministratorFromTheConsole(operator, identity, TAKEN_ADMIN,
+    "an operator whose credential was taken");
 
   // The intruder's session, opened while the credential still works.
   var intruder = browser.browserAt(origin, { ca: caPem });
@@ -907,6 +1025,7 @@ async function run() {
     await testAnIdTheQueueDoesNotHoldIsNotReportedAsCancelled(operator);
     await testAnIdTheSpoolCouldNotHaveMintedIsRefusedAsAnAnswer(operator);
 
+    await testTheOverviewCountsAgreeWithThePagesTheyLinkTo(operator, identity);
     await testASelectorRefusalWrittenForAPersonReachesTheOperator(operator);
     await testTheAbsoluteFormReachesTheDomainRatherThanTheFramework(operator, server);
     await testAFrameworkCodeThisServerNeverRaisesStaysOffThePage(server, operator);
@@ -919,6 +1038,7 @@ async function run() {
     await testTheRefusalIsOnTheAuditChain(operatorAccount);
     await testSuspendingAMailboxOwnerIsUntouched(operator, identity);
     await testDisablingADomainWithNoAdministratorIsUntouched(operator, identity);
+    await testADisplayNameCarryingAControlCharacterIsRefused(operator, identity);
     await testAnAdministratorIsStillContainedWhileAnotherRemains(operator, identity);
 
     await testADestructiveVerbIsNotReachableByGet(operator, identity);

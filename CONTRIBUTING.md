@@ -11,7 +11,7 @@ through them cleanly.
   [SECURITY.md](SECURITY.md).
 - **Have a feature idea?** Open a feature-request issue first so the design gets
   discussed before code is written. See "Ship complete" below for why, and check
-  [ROADMAP.md](ROADMAP.md) for what is already planned.
+  [ROADMAP.md](ROADMAP.md) for what is already targeted or accepted.
 - **Ready to write a fix?** Read [Development setup](#development-setup),
   [House rules](#house-rules) and [The PR loop](#the-pr-loop).
 - **Just want a working server?** [README.md](README.md) for the container,
@@ -68,8 +68,8 @@ node scripts/check-operator-prose.js
 SMOKE_REQUIRE_CONTAINER=1 node test/smoke.js
 ```
 
-**Requirements:** Node.js 24.19.0 or newer, which is what `engines.node`,
-`.nvmrc` and every workflow pin. Nothing is transpiled, so the source
+**Requirements:** Node.js 24.22.1 or newer, which is the version `engines.node`,
+`.nvmrc` and every workflow pin state. Nothing is transpiled, so the source
 in the repository is the code the runtime executes. Binding ports below 1024
 locally needs root or `CAP_NET_BIND_SERVICE`; the test suite uses ephemeral
 ports and does not.
@@ -99,15 +99,17 @@ your files, and a checker can pass its own self-test while reading none
 of the tree.
 
 **Writing a gate over the `@primitive` blocks?** Take the list from
-`scripts/source-primitives.js`, which reads each block once and carries
-every tag any gate needs. Do not add a second pattern that finds them
-again. A gate governs exactly the set it found, so two lists built by two
-walks agree only until one of them cannot see a block, and that
-disagreement is silent in the direction that costs: a primitive your
-pattern misses is one your gate reports nothing about, and it still exits
-clean. The api snapshot, the lifecycle schedule and the block validator
-all read that one module, and a pattern matching the tag anywhere else
-fails the detector suite.
+`scripts/source-primitives.js`. It binds the documentation block reader
+in `lib/web/wiki/blocks.js` to this repository and carries every tag any
+gate needs. The wiki at `/wiki` is built by the same reader. Do not add a
+second pattern that finds the blocks again. A gate governs exactly the
+set it found, so two lists built by two walks agree only until one of
+them cannot see a block, and that disagreement is silent in the direction
+that costs: a primitive your pattern misses is one your gate reports
+nothing about, and it still exits clean. The api snapshot, the lifecycle
+schedule, the block validator and the wiki all read that one reader, and
+a pattern matching a documentation tag anywhere else fails the detector
+suite.
 
 ## What lands where
 
@@ -316,6 +318,8 @@ Sign off with `git commit -s`; the sign-off must match the commit author.
      structural detectors are clean.
    - `node scripts/check-operator-prose.js` exits 0, so nothing operator-facing
      carries internal narrative.
+   - `node scripts/check-forbidden-vocabulary.js` exits 0, so no file uses the
+     commercial product terms listed in that script.
    - `bash scripts/vendor-update.sh --check` exits 0, so the vendored tree
      matches its pin.
    - `shellcheck $(git ls-files '*.sh')` exits 0.

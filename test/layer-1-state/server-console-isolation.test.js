@@ -263,7 +263,7 @@ function testTheSessionCookieStaysOffACleartextTransport(landing) {
 
 async function testTheReaderReachesTheirOwnMail(reader, landing) {
   count("signing in redirects the reader to a mailbox rather than back to the form",
-    landing.status === 302 && String(landing.location).indexOf("/mail/") === 0,
+    landing.status === 302 && String(landing.location).indexOf("/mail?") === 0,
     landing.status + " " + landing.location);
 
   var inbox = await reader.get(landing.location);
@@ -281,20 +281,21 @@ async function testAnotherAccountsMailIsUnreachableOverHttp(reader, own, victim)
   // identifier would pass every refusal below and would also be a
   // mailbox nobody can read, so the reader's own message has to open
   // through exactly the shape the refusals use.
-  var mine = await reader.get("/mail/INBOX/" + encodeURIComponent(own.objectId));
+  var mine = await reader.get("/mail/" + encodeURIComponent(own.objectId) + "?folder=INBOX");
   count("the reader's own message opens through its identifier", mine.status === 200,
     mine.status);
   count("and the page is the message rather than a folder listing",
     mine.body.indexOf(ALICE_SUBJECT) !== -1, mine.status + " " + mine.body.length);
 
-  var byFolder = await reader.get("/mail/" + encodeURIComponent(victim.storeFolder));
+  var byFolder = await reader.get("/mail?folder=" + encodeURIComponent(victim.storeFolder));
   count("the other account's physical folder name resolves to nothing",
     byFolder.status === 404, byFolder.status);
   count("and the refusal carries none of that account's mail",
     byFolder.body.indexOf(BOB_BODY) === -1 && byFolder.body.indexOf(BOB_SUBJECT) === -1,
     byFolder.status + " " + byFolder.body.length);
 
-  var byWireName = await reader.get("/mail/INBOX/" + encodeURIComponent(victim.objectId));
+  var byWireName = await reader.get("/mail/" + encodeURIComponent(victim.objectId) +
+    "?folder=INBOX");
   count("the other account's message identifier, asked for through a folder this " +
     "reader does own, resolves to nothing", byWireName.status === 404, byWireName.status);
   count("and that refusal carries none of it either",
@@ -307,13 +308,13 @@ async function testAnotherAccountsMailIsUnreachableOverHttp(reader, own, victim)
   // writer does not get to assume they agree. The message store's flag
   // write takes an identifier and ignores the folder it was handed, so
   // an unresolved identifier here reaches every message on the server.
-  var ownFlagged = await reader.form("/mail/INBOX/actions",
+  var ownFlagged = await reader.form("/mail/actions?folder=INBOX",
     { action: "flag", objectId: own.objectId });
   count("flagging the reader's own message reports the flags updated",
     String(ownFlagged.location || "").indexOf("notice=flagged") !== -1,
     ownFlagged.status + " " + String(ownFlagged.location));
 
-  var foreignFlagged = await reader.form("/mail/INBOX/actions",
+  var foreignFlagged = await reader.form("/mail/actions?folder=INBOX",
     { action: "flag", objectId: victim.objectId });
   count("the same action naming the other account's message reports nothing updated",
     String(foreignFlagged.location || "").indexOf("notice=flagged") === -1,
@@ -544,6 +545,16 @@ async function testTheOperatorIsServed(origin, caPem, operatorAddress) {
   count("the console the operator is served links to its own sections",
     overview.body.indexOf("/admin/domains") !== -1 &&
     overview.body.indexOf("/admin/accounts") !== -1, overview.status);
+
+  // The other side of the withheld link. A mailbox page that renders the
+  // way into the console for nobody would satisfy the reader's half of
+  // this gate exactly as a working one does, so the same page is asked of
+  // the account that may use it.
+  var operatorInbox = await operator.get(landed.location);
+  count("and the operator's own mailbox page carries the way in, so withholding it from " +
+    "the reader is the gate rather than a link nothing renders",
+    operatorInbox.status === 200 && operatorInbox.body.indexOf("href=\"/admin\"") !== -1,
+    operatorInbox.status + " " + String(operatorInbox.location));
   return operator;
 }
 
@@ -566,7 +577,7 @@ async function testSigningOutDestroysTheSessionOnTheServer(reader) {
   // client stopped sending it. Those are different guarantees and only
   // one of them survives a stolen cookie, so the token goes back.
   reader.cookies.set(SESSION_COOKIE, held);
-  var replayed = await reader.get("/mail/INBOX");
+  var replayed = await reader.get("/mail?folder=INBOX");
   count("replaying the token the reader was holding reaches no mail",
     replayed.status === 302 && String(replayed.location).indexOf("/sign-in") === 0,
     replayed.status + " " + String(replayed.location));

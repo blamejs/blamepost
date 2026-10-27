@@ -5,8 +5,9 @@ name: ClusterFuzzLite batch fuzzing
 # budget cannot reach. Findings upload as crash artifacts.
 #
 # See cflite_pr.yml for why jazzer.js is invoked directly instead of
-# through the ClusterFuzzLite v1 action wrapper, and for how the harness
-# set is discovered.
+# through the ClusterFuzzLite v1 action wrapper, how the harness set is
+# discovered, which harnesses run under --sync, what the per-target
+# dictionary carries, and what a finding looks like.
 
 on:
   schedule:
@@ -43,9 +44,19 @@ jobs:
         id: harnesses
         run: |
           set -euo pipefail
+          # The harness set is discovered rather than listed, so a new
+          # fuzz/<name>.fuzz.js runs with no workflow edit. Finding none is a
+          # refusal rather than a pass whenever .clusterfuzzlite/ is present,
+          # since that directory is what configures fuzzing. The count is
+          # published on every run, passing or failing.
           if [ ! -d fuzz ]; then
             echo "targets=[]" >> "$GITHUB_OUTPUT"
             echo "any=false" >> "$GITHUB_OUTPUT"
+            echo "EXAMINED 0 fuzz-harnesses"
+            if [ -d .clusterfuzzlite ]; then
+              echo "REFUSED: .clusterfuzzlite/ configures fuzzing and fuzz/ is absent."
+              exit 1
+            fi
             echo "No fuzz/ directory, so there is nothing to fuzz."
             exit 0
           fi
@@ -53,9 +64,21 @@ jobs:
             | sed 's/\.fuzz\.js$//' \
             | sort \
             | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          COUNT=$(printf '%s' "$TARGETS" | jq 'length')
+          case "$COUNT" in
+            ''|*[!0-9]*)
+              echo "REFUSED: the harness count could not be read."
+              exit 1
+              ;;
+          esac
           echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
-          if [ "$TARGETS" = "[]" ]; then
+          echo "EXAMINED $COUNT fuzz-harnesses"
+          if [ "$COUNT" -eq 0 ]; then
             echo "any=false" >> "$GITHUB_OUTPUT"
+            if [ -d .clusterfuzzlite ]; then
+              echo "REFUSED: .clusterfuzzlite/ configures fuzzing and fuzz/ carries no *.fuzz.js harness."
+              exit 1
+            fi
             echo "fuzz/ carries no *.fuzz.js harness yet."
           else
             echo "any=true" >> "$GITHUB_OUTPUT"
@@ -78,10 +101,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Node 24.19.0 LTS
+      - name: Set up Node 24.22.1 LTS
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: '24.19.0'
+          node-version: '24.22.1'
 
       - name: Install jazzer.js
         run: npm ci --prefix fuzz
@@ -94,14 +117,25 @@ jobs:
           set -euo pipefail
           harness="fuzz/${TARGET}.fuzz.js"
           corpus="fuzz/${TARGET}_seed_corpus"
-          echo "::group::jazzer fuzz $harness ($FUZZ_TIME s)"
-          if [ -d "$corpus" ]; then
-            npx --prefix fuzz jazzer "$harness" "$corpus" -- \
-              -max_total_time="$FUZZ_TIME" -error_exitcode=1 -timeout=30
-          else
-            npx --prefix fuzz jazzer "$harness" -- \
-              -max_total_time="$FUZZ_TIME" -error_exitcode=1 -timeout=30
-          fi
+          dict="fuzz/${TARGET}.dict"
+          corpus_args=()
+          if [ -d "$corpus" ]; then corpus_args+=("$corpus"); fi
+          libfuzzer_args=(-max_total_time="$FUZZ_TIME" -error_exitcode=1 -timeout=30)
+          if [ -f "$dict" ]; then libfuzzer_args+=(-dict="$dict"); fi
+          # cflite_pr.yml says what the mode is and why it is asked per
+          # harness.
+          mode="$(node fuzz/run-once.js --mode "$TARGET")"
+          case "$mode" in
+            sync)  mode_args=(--sync) ;;
+            async) mode_args=() ;;
+            *)
+              echo "REFUSED: run-once.js --mode $TARGET printed '$mode', not sync or async."
+              exit 1
+              ;;
+          esac
+          echo "::group::jazzer fuzz $harness ($FUZZ_TIME s, $mode)"
+          npx --prefix fuzz jazzer "${mode_args[@]}" "$harness" "${corpus_args[@]}" -- \
+            "${libfuzzer_args[@]}"
           echo "::endgroup::"
 
       - name: Upload crash artifact

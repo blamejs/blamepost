@@ -1,0 +1,11 @@
+From: alice@example.com
+To: bob@example.net
+Subject: Fwd: the quarterly order
+
+Forwarding the message below.
+
+From: mallory@example.com
+Sender: mallory@example.com
+Subject: a header line written into the body
+
+The forwarded body.

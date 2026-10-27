@@ -1,0 +1,20 @@
+From: MAILER-DAEMON@relay.example.net
+To: postmaster@example.com
+Subject: Delivery Status Notification
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=delivery-status; boundary="rpt-5"
+
+--rpt-5
+Content-Type: text/plain; charset=us-ascii
+
+The recipient group names no recipient.
+
+--rpt-5
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns; relay.example.net
+
+Action: failed
+Status: 5.1.1
+
+--rpt-5--

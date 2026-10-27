@@ -3,7 +3,7 @@
   <ul>
     {% for item in nav %}
     <li>
-      <a class="adminnav-link{% if item.current %} is-current{% endif %}" href="{{ item.href }}"
+      <a class="adminnav-link{% if item.current %} is-current{% endif %}" href="/{{ item.href }}"
          {% if item.current %}aria-current="page"{% endif %}>{{ item.label }}</a>
     </li>
     {% endfor %}

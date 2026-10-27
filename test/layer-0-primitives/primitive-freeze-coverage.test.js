@@ -599,6 +599,11 @@ function _fixtureTree(opts) {
     nodeFs.copyFileSync(nodePath.join(REPO_ROOT, "scripts", name),
       nodePath.join(root, "scripts", name));
   });
+  // `source-primitives.js` requires the documentation block reader. It is
+  // carried through a `lib/web` link the walk does not descend into, so the
+  // fixture documents the one primitive `_fixtureLib` writes and none of the
+  // reader's own.
+  helpers.carryDocumentationReader(root);
   nodeFs.writeFileSync(nodePath.join(root, "package.json"),
     JSON.stringify({ name: "@blamejs/blamepost", version: "0.1.0" }, null, 2) + "\n");
   nodeFs.writeFileSync(nodePath.join(root, "lib", "index.js"), _fixtureLib(opts));

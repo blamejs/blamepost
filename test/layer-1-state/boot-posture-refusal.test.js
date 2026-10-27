@@ -36,6 +36,19 @@
  *     that the floor the posture carries is the floor `package.json`
  *     declares, which is the drift that would otherwise be invisible.
  *
+ * The fixture substrate is measured before those cases run. Every case
+ * points the data directory at one a fixture created, and the permission
+ * predicate reads the mode that is on disk at boot. Under the usual 0022
+ * umask a bare recursive mkdir yields 0755, which is looser than the
+ * predicate accepts, so the fixtures would hand every boot in this file
+ * the refusal the datadir case provokes on purpose. `test/helpers` sets a
+ * 0077 umask so they do not. The measurement runs against the framework's
+ * own assertion rather than a repeat of the mode it enforces, so it
+ * cannot drift away from the number the boot reads. Left to the `clean`
+ * case alone, that failure names a posture nobody was measuring and sends
+ * the reader to the server instead of to the fixture that built the
+ * directory.
+ *
  * The DNS acknowledgement gate is this server's own rather than the
  * framework's, and it is asserted here too: composing a production
  * posture assertion must not quietly replace the gate that keeps the MX
@@ -219,6 +232,32 @@ async function runChild(caseName, root) {
 
 // ---- the parent ------------------------------------------------------------
 
+// Whether the framework's production assertion accepts a directory's
+// permissions. Every other predicate is switched off, so the verdict it
+// returns is the data directory's mode and nothing else.
+//
+// A refusal carrying any other code is re-thrown rather than reported as
+// a mode verdict: answering "the mode is wrong" to a question the
+// assertion refused for some other reason is the shape that turns a
+// broken harness into a finding about the tree.
+async function permissionsAccepted(dir) {
+  try {
+    await b.security.assertProduction({
+      vault:         false, dbAtRest:     false, auditSigning:  false,
+      ntpStrict:     false, minNodeMajor: false, minTlsVersion: false,
+      forbidNodeEnv: false, audit:        false, dataDir:       dir,
+    });
+    return true;
+  } catch (err) {
+    var failures = (err && err.failures) || [];
+    var ours = failures.filter(function (f) {
+      return f && f.code === "security/datadir-permissions";
+    });
+    if (ours.length === 0) throw err;
+    return false;
+  }
+}
+
 function spawnCase(caseName, root) {
   var result = nodeProc.spawnSync(process.execPath,
     [__filename, "--posture-child", caseName, root], {
@@ -311,6 +350,45 @@ async function run() {
     count("the Node floor is the one package.json declares",
       posture.minNodeMajor === declared,
       posture.minNodeMajor + " against " + declared);
+
+    // ---- the directory the fixtures hand every boot below ----
+
+    if (process.platform === "win32") {
+      skip("the fixture data directory mode assertion reads a POSIX file mode and is " +
+        "skipped on this platform, so what test/helpers hands a boot could not be " +
+        "measured here");
+    } else {
+      var fixtureRoot = helpers.tempDir("boot-posture-mode");
+      try {
+        // The ordinary shape: a fixture creating its own data directory
+        // with no mode argument, which is what most of this suite does.
+        var bare = nodePath.join(fixtureRoot, "data");
+        nodeFs.mkdirSync(bare, { recursive: true });
+        count("a data directory a fixture creates the ordinary way is one the boot " +
+          "assertion accepts, which is what the umask test/helpers sets buys",
+          await permissionsAccepted(bare),
+          "0" + (nodeFs.statSync(bare).mode & 0o777).toString(8));
+
+        // The named helper, which sets the mode with chmod so a caller
+        // cannot be handed something looser than it asked for.
+        var named = helpers.dataDir(fixtureRoot, "named");
+        count("and so is one helpers.dataDir hands back",
+          await permissionsAccepted(named),
+          "0" + (nodeFs.statSync(named).mode & 0o777).toString(8));
+
+        // The other direction, so a run cannot report both of the above
+        // green because the assertion stopped reading modes at all.
+        var loose = nodePath.join(fixtureRoot, "loose");
+        nodeFs.mkdirSync(loose, { recursive: true });
+        nodeFs.chmodSync(loose, 0o755);
+        count("and a directory at the mode an unset umask would have produced is refused, " +
+          "so the two verdicts above are readings rather than a check that stopped looking",
+          (await permissionsAccepted(loose)) === false,
+          "0" + (nodeFs.statSync(loose).mode & 0o777).toString(8));
+      } finally {
+        helpers.removeTempDir(fixtureRoot);
+      }
+    }
 
     // ---- each predicate, on its own, against a real boot ----
 

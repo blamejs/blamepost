@@ -22,6 +22,10 @@
  *     POP3 and ManageSieve included. Those two refuse at construction
  *     when the mailbox adapter is absent, so a greeting from either one
  *     proves the adapter arrived.
+ *   - An adapter that arrives without the two methods the POP3 maildrop
+ *     lease is carried on refuses the boot, naming both of them. The
+ *     greeting above answers the direction where the adapter is
+ *     complete; this answers the direction where it is not.
  *   - `/healthz` answers ok on the running process, which is the
  *     question a container asks it.
  *   - Stopping releases every socket, so a supervisor restart finds the
@@ -304,27 +308,143 @@ async function testAnUnacknowledgedDomainRefusesTheBoot(runtimeConfig, identity)
     httpAddress: "127.0.0.1",
   });
   var thrown = null;
-  try { await refused.start(); }
-  catch (e) { thrown = e; }
+  // The teardown runs whether the assertions hold or not. The case where
+  // the first of them fails is the case where the boot SUCCEEDED, and a
+  // started server left unstopped holds the process open past the
+  // report, so the run hangs instead of naming the check that broke.
+  try {
+    try { await refused.start(); }
+    catch (e) { thrown = e; }
 
-  count("a domain with no acknowledged posture refuses the boot",
-    thrown !== null, thrown === null ? "the boot completed" : thrown.message);
-  count("the refusal names the domain it is waiting on",
-    thrown !== null && String(thrown.message).indexOf(DOMAIN) !== -1,
-    thrown === null ? "" : thrown.message);
-  count("the refusal points at the command that clears it",
-    thrown !== null && String(thrown.message).indexOf("domain acknowledge") !== -1,
-    thrown === null ? "" : thrown.message);
-  count("a failed boot leaves no listener bound",
-    Object.keys(refused.mail.listeners.bound()).length === 0,
-    JSON.stringify(refused.mail.listeners.bound()));
-  count("a failed boot disarms the outbound sweep timer",
-    refused.mail.delivery.describe().sweeping === false,
-    JSON.stringify(refused.mail.delivery.describe()));
+    count("a domain with no acknowledged posture refuses the boot",
+      thrown !== null, thrown === null ? "the boot completed" : thrown.message);
+    count("the refusal names the domain it is waiting on",
+      thrown !== null && String(thrown.message).indexOf(DOMAIN) !== -1,
+      thrown === null ? "" : thrown.message);
+    count("the refusal points at the command that clears it",
+      thrown !== null && String(thrown.message).indexOf("domain acknowledge") !== -1,
+      thrown === null ? "" : thrown.message);
+    count("a failed boot leaves no listener bound",
+      Object.keys(refused.mail.listeners.bound()).length === 0,
+      JSON.stringify(refused.mail.listeners.bound()));
+    count("a failed boot disarms the outbound sweep timer",
+      refused.mail.delivery.describe().sweeping === false,
+      JSON.stringify(refused.mail.delivery.describe()));
+  } finally {
+    // Releases the certificate watcher this server built at create time,
+    // and any listener a boot that was meant to refuse actually bound.
+    await refused.stop({ timeoutMs: WIRE_TIMEOUT_MS });
+  }
+}
 
-  // Releases the certificate watcher this server built at create time.
-  // Nothing bound, so there is nothing else to drain.
-  await refused.stop({ timeoutMs: WIRE_TIMEOUT_MS });
+// One mailbox adapter with named methods taken off it, and nothing else
+// changed. The methods are closures over the adapter's own state rather
+// than reads through `this`, so carrying the references across keeps
+// every one that stays behaving exactly as it does on the real handle.
+function aMailStoreWithout(mailbox, absent) {
+  var partial = {};
+  Object.keys(mailbox).forEach(function (key) {
+    if (absent.indexOf(key) !== -1) return;
+    partial[key] = mailbox[key];
+  });
+  return partial;
+}
+
+// The POP3 listener is composed with two consumer hooks, and RFC 1939
+// section 3's one-session-at-a-time lease is what they carry:
+// `onSessionActivity` reports the keepalive the listener answers on its
+// own, and `onSessionEnd` is the release. Both are options handed to a
+// framework primitive, and a mail listener accepts an option name it
+// does not recognize, so a hook whose method was renamed or misspelled
+// would be taken, never called, and leave every maildrop held until the
+// store's own idle window ran out. An account holder would wait that
+// window out to open their own mailbox.
+//
+// This refusal is what stands between that and the operator, and it is
+// the half nothing drove: the file already reads a POP3 greeting off a
+// bound port, which says the adapter arrived and says nothing about what
+// happens when it has not.
+//
+// POP3 is the only listener enabled, so a refusal here is this one
+// rather than another gate, and nothing takes a port before it. Each
+// half is removed on its own as well as together, because a guard that
+// reads one of the two names would pass the vector that removes both.
+async function testAMailStoreWithoutTheLeaseHooksRefusesTheBoot(runtimeConfig, identity) {
+  var pop3Only = {};
+  Object.keys(runtimeConfig.listeners).forEach(function (name) {
+    pop3Only[name] = Object.assign({}, runtimeConfig.listeners[name],
+      { enabled: name === "pop3" });
+  });
+  var pop3Config = Object.assign({}, runtimeConfig, { listeners: pop3Only });
+
+  var vectors = [
+    ["the keepalive hook", ["touchPop3Drop"]],
+    ["the release hook",   ["releasePop3Drop"]],
+    ["both of them",       ["touchPop3Drop", "releasePop3Drop"]],
+  ];
+
+  for (var i = 0; i < vectors.length; i += 1) {
+    var refused = blamepost.create({
+      config:       pop3Config,
+      store:        identity,
+      mailStore:    aMailStoreWithout(identity.mailbox, vectors[i][1]),
+      messageStore: identity.messageStore,
+      httpAddress:  "127.0.0.1",
+    });
+    var thrown = null;
+    // The teardown runs whether the assertions hold or not. A vector
+    // that fails is one where the boot SUCCEEDED, which means a listener
+    // took a port, and a failing assertion that skipped the stop would
+    // leave that socket open and hold the process past the report: the
+    // run would hang rather than name the check that broke.
+    try {
+      try { await refused.start(); }
+      catch (e) { thrown = e; }
+      var message = thrown === null ? "" : String(thrown.message);
+
+      count("a mail store missing " + vectors[i][0] + " refuses the boot rather than " +
+        "composing a POP3 listener that leases a maildrop and never hands it back",
+        thrown !== null, thrown === null ? "the boot completed" : message);
+      count("the refusal for " + vectors[i][0] + " names both methods, so the operator can " +
+        "check the half that is there as well as the half that is not",
+        message.indexOf("touchPop3Drop") !== -1 && message.indexOf("releasePop3Drop") !== -1,
+        message);
+      count("and it names the primitive that refused, so the report points at the " +
+        "composition rather than at the framework underneath it",
+        message.indexOf("blamepost.mail.listeners") !== -1, message);
+      count("and says what to pass instead of only saying no",
+        message.indexOf("blamepost.mail.mailbox.create") !== -1, message);
+      count("nothing bound while " + vectors[i][0] + " was missing",
+        Object.keys(refused.mail.listeners.bound()).length === 0,
+        JSON.stringify(refused.mail.listeners.bound()));
+    } finally {
+      await refused.stop({ timeoutMs: WIRE_TIMEOUT_MS });
+    }
+  }
+
+  // The control. Without it every assertion above would hold against a
+  // composition that refuses whatever it is handed, which is a different
+  // server and proves nothing about these two methods.
+  var accepted = blamepost.create({
+    config:       pop3Config,
+    store:        identity,
+    mailStore:    identity.mailbox,
+    messageStore: identity.messageStore,
+    httpAddress:  "127.0.0.1",
+  });
+  var control = null;
+  try {
+    try { await accepted.start(); }
+    catch (e) { control = e; }
+    count("the same composition over the adapter that carries both methods starts",
+      control === null, control === null ? "" : control.message);
+    count("and takes the POP3 port, so the refusals above are about the two methods rather " +
+      "than about a listener that cannot be built at all",
+      accepted.mail.listeners.bound().pop3 === pop3Only.pop3.port,
+      JSON.stringify(accepted.mail.listeners.bound()));
+  } finally {
+    await accepted.stop({ timeoutMs: WIRE_TIMEOUT_MS });
+  }
 }
 
 function testEveryListenerIsConfigured(server) {
@@ -871,6 +991,11 @@ async function run() {
     await identity.domains.acknowledgeDns({
       domain: DOMAIN, acknowledgedBy: "operator@" + DOMAIN,
     });
+
+    // After the acknowledgement, so the MX gate is not the reason a boot
+    // refuses, and before the boot that is expected to reach every
+    // listener.
+    await testAMailStoreWithoutTheLeaseHooksRefusesTheBoot(runtimeConfig, identity);
 
     server = testCreateAssemblesTheServer(runtimeConfig, identity);
     testEveryListenerIsConfigured(server);

@@ -1,0 +1,403 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (c) blamejs contributors */
+
+/*
+ * The public pages: the front page and the reference pages beside it.
+ *
+ * This sheet loads after blamepost.css and adds nothing to the token
+ * layer. Every color, size, radius and shadow below is one of the custom
+ * properties that sheet defines on :root, so the three-step theme
+ * resolution there decides light and dark for these pages too, and a
+ * palette change lands on both surfaces at once.
+ *
+ * It is a second sheet rather than a section of the first because the
+ * public pages and the application share a palette and share no layout.
+ * The application is a fixed shell with rails and panes sized to a
+ * mailbox; these pages are a single measured column. Loading both is
+ * what lets a second public page carry this file and nothing else.
+ */
+
+/* ------------------------------------------------------------------ */
+/* Page shell                                                          */
+/* ------------------------------------------------------------------ */
+
+.site {
+  background: var(--bg);
+}
+
+.sitemain {
+  width: 100%;
+  max-width: var(--page);
+  margin: 0 auto;
+  padding: 0 var(--s5);
+  box-sizing: border-box;
+  /* The body is a column flex container, so this is a flex item, and a
+     flex item will not shrink below the widest thing inside it unless it
+     is told it may. Without this the table and the code block set the
+     width of the whole page on a phone and the text is cut off at the
+     right edge rather than wrapping. Each of those scrolls inside its own
+     box instead. */
+  min-width: 0;
+}
+
+.sitenav {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  margin-left: var(--s5);
+}
+
+/* The account cluster keeps its place at the end of the bar when a site
+   nav sits beside it. */
+.site .topnav {
+  margin-left: auto;
+}
+
+/* ------------------------------------------------------------------ */
+/* Hero                                                                */
+/* ------------------------------------------------------------------ */
+
+.hero {
+  padding: var(--s8) 0 var(--s7);
+  border-bottom: 1px solid var(--line);
+}
+
+.hero-in {
+  max-width: 46rem;
+}
+
+.eyebrow {
+  margin: 0 0 var(--s3);
+  font-size: var(--t-sm);
+  font-weight: 550;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.hero-title {
+  margin: 0 0 var(--s4);
+  font-size: var(--t-2xl);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.02em;
+  font-weight: 620;
+  color: var(--ink);
+}
+
+.hero-lead {
+  margin: 0 0 var(--s5);
+  font-size: var(--t-md);
+  line-height: var(--lh-body);
+  color: var(--ink-2);
+}
+
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  margin: 0 0 var(--s5);
+}
+
+.btn-lg {
+  padding: var(--s3) var(--s5);
+  font-size: var(--t-base);
+}
+
+/* ------------------------------------------------------------------ */
+/* Fact chips                                                          */
+/* ------------------------------------------------------------------ */
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chip {
+  padding: var(--s1) var(--s3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-1);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: var(--t-xs);
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* Bands                                                               */
+/* ------------------------------------------------------------------ */
+
+.band {
+  padding: var(--s7) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.band:last-child {
+  border-bottom: 0;
+}
+
+.band-quiet {
+  background: var(--surface-2);
+  margin: 0 calc(var(--s5) * -1);
+  padding-left: var(--s5);
+  padding-right: var(--s5);
+}
+
+.band-title {
+  margin: 0 0 var(--s3);
+  font-size: var(--t-xl);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.015em;
+  font-weight: 620;
+  color: var(--ink);
+}
+
+.band-lead {
+  max-width: 44rem;
+  margin: 0 0 var(--s5);
+  font-size: var(--t-base);
+  line-height: var(--lh-body);
+  color: var(--ink-2);
+}
+
+.band-note {
+  max-width: 44rem;
+  margin: var(--s5) 0 0;
+  font-size: var(--t-sm);
+  line-height: var(--lh-body);
+  color: var(--ink-3);
+}
+
+/* ------------------------------------------------------------------ */
+/* Capability cards                                                    */
+/* ------------------------------------------------------------------ */
+
+.cardgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: var(--s4);
+}
+
+.sitecard {
+  min-width: 0;
+  padding: var(--s5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-3);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+}
+
+.sitecard h3 {
+  margin: 0 0 var(--s3);
+  font-size: var(--t-md);
+  line-height: var(--lh-snug);
+  font-weight: 620;
+  color: var(--ink);
+}
+
+.sitecard p {
+  margin: 0;
+  font-size: var(--t-sm);
+  line-height: var(--lh-body);
+  color: var(--ink-2);
+}
+
+/* ------------------------------------------------------------------ */
+/* Screenshots                                                         */
+/* ------------------------------------------------------------------ */
+
+.shotgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(28rem, 1fr));
+  gap: var(--s5);
+  margin: var(--s5) 0 0;
+}
+
+.shot {
+  margin: 0;
+}
+
+.shot-wide {
+  margin: 0 0 var(--s5);
+}
+
+.shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-2);
+  box-shadow: var(--shadow-2);
+  background: var(--surface);
+}
+
+.shot figcaption {
+  margin: var(--s3) 0 0;
+  font-size: var(--t-sm);
+  line-height: var(--lh-snug);
+  color: var(--ink-3);
+}
+
+/* ------------------------------------------------------------------ */
+/* Tables                                                              */
+/* ------------------------------------------------------------------ */
+
+.sitetable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-sm);
+}
+
+.sitetable th,
+.sitetable td {
+  padding: var(--s3);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+.sitetable th {
+  font-weight: 620;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.sitetable td {
+  color: var(--ink-2);
+}
+
+.sitetable tbody tr:last-child th,
+.sitetable tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Limits list                                                         */
+/* ------------------------------------------------------------------ */
+
+.limitlist {
+  max-width: 48rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.limitlist li {
+  padding: var(--s3) 0 var(--s3) var(--s5);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--t-sm);
+  line-height: var(--lh-body);
+  color: var(--ink-2);
+  position: relative;
+}
+
+.limitlist li::before {
+  content: "";
+  position: absolute;
+  left: var(--s2);
+  top: 1.35em;
+  width: 6px;
+  height: 1px;
+  background: var(--ink-3);
+}
+
+.limitlist li:last-child {
+  border-bottom: 0;
+}
+
+.limitlist strong {
+  color: var(--ink);
+  font-weight: 620;
+}
+
+/* ------------------------------------------------------------------ */
+/* Code                                                                */
+/* ------------------------------------------------------------------ */
+
+.codeblock {
+  margin: 0;
+  padding: var(--s4);
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-2);
+  background: var(--surface-3);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  line-height: var(--lh-body);
+  color: var(--ink);
+}
+
+.codeblock code {
+  font-family: inherit;
+  font-size: inherit;
+  background: none;
+  padding: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Narrow viewports                                                    */
+/* ------------------------------------------------------------------ */
+
+@media (max-width: 52rem) {
+  .sitemain {
+    padding: 0 var(--s4);
+  }
+
+  .band-quiet {
+    margin: 0 calc(var(--s4) * -1);
+    padding-left: var(--s4);
+    padding-right: var(--s4);
+  }
+
+  .hero {
+    padding: var(--s6) 0 var(--s5);
+  }
+
+  .hero-title {
+    font-size: var(--t-xl);
+  }
+
+  .band {
+    padding: var(--s6) 0;
+  }
+
+  .sitenav {
+    margin-left: var(--s3);
+    gap: var(--s3);
+  }
+
+  .shotgrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 34rem) {
+  /* The bar wraps rather than dropping the site links, which are the only
+     route to the other public pages on a phone. */
+  .site .topbar-in {
+    flex-wrap: wrap;
+    row-gap: var(--s2);
+  }
+
+  .sitenav {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+    overflow-x: auto;
+  }
+
+  .hero-actions .btn {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shot img {
+    box-shadow: var(--shadow-1);
+  }
+}

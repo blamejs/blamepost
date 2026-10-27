@@ -28,8 +28,28 @@ var auditActor = require("../lib/store/actor");
 // typed at the command line and the same name typed into the browser
 // console reach the same row.
 var address = require("../lib/store/address");
+// The screen between text somebody else wrote and a person reading it.
+// A terminal acts on bytes a browser renders inertly, so the values this
+// binary prints go through the same reader the browser surface uses.
+var displayText = require("../lib/text");
 var configModule = require("../lib/config");
 var storeModule = require("../lib/store");
+// The sending credential registry. It is composed against the handles a
+// store open already hands out rather than being reached through one, so
+// the verbs below take it the same way `blamepost.mail.dkim.create` is
+// taken: built from the open this run made, and given back with it.
+var credentialsModule = require("../lib/store/credentials");
+// The table names the report verbs read rows back through. The store
+// module owns every write to those three tables; what is taken here is
+// the framework's query builder over the names it declares, so there is
+// one schema and one place that changes it.
+var storeTables = require("../lib/store/tables");
+// How the store renders the reasons a name was refused. The argument
+// readers below quote a name back to the operator, and taking the
+// rendering from the same place the store's own refusals take it is what
+// keeps one bad address from reading two ways depending on which verb
+// caught it.
+var storeErrors = require("../lib/store/errors");
 
 var TIME  = b.constants.TIME;
 var BYTES = b.constants.BYTES;
@@ -65,9 +85,10 @@ var AUDIT_READ_MAX_ROWS     = 5000;
 // is what a quiet trail looks like.
 var AUDIT_OUTCOMES = ["success", "failure", "denied"];
 
-// A file holding a bundle passphrase is one line. The cap is here so a
-// mistyped path pointing at a mailbox or a database cannot be read into
-// memory before it is rejected.
+// A file holding a secret this server reads off disk is one line: a
+// bundle passphrase, or the provider API token `zone token set` seals.
+// The cap is here so a mistyped path pointing at a mailbox or a database
+// cannot be read into memory before it is rejected.
 var PASSPHRASE_FILE_MAX_BYTES = BYTES.kib(4);
 
 // The floor a bundle passphrase has to clear. A bundle leaves this
@@ -126,14 +147,166 @@ var USAGE_DOMAIN =
 var USAGE_DKIM =
   "Usage: blamepost dkim <verb>\n" +
   "\n" +
-  "  list [<domain>]                       selectors and their states\n" +
-  "  records <domain>                      every record that must be in the zone right now\n" +
+  "  list [--domain <domain>]              selectors and their states\n" +
+  "  records --domain <domain>             every record that must be in the zone right now\n" +
   "  generate --domain <domain>            first keys for a domain that has none\n" +
+  "           [--selector <name>]          name the pair rather than taking the dated default\n" +
   "  rotate --domain <domain> [--selector <name>]  mint a replacement pair; both pairs sign\n" +
   "                                        meanwhile. The default name carries the month, so\n" +
   "                                        rotating twice in one month needs --selector\n" +
   "  retire --domain <domain> --selector <name>   stop signing with the outgoing pair\n" +
-  "  sweep [--domain <domain>] [--immediate]   report retired selectors whose records can now be removed";
+  "  sweep [--domain <domain>] [--immediate]   report retired selectors whose records can now be removed\n" +
+  "  reseal [--domain <domain>]            seal the private keys already on this volume to the\n" +
+  "                                        selectors they belong to. Run it once after upgrading\n" +
+  "                                        from a version that sealed them to the volume alone.\n" +
+  "                                        Safe to run again; keys already sealed that way are\n" +
+  "                                        left alone\n" +
+  "\n" +
+  "list, records, generate, rotate and retire take the domain as the argument as well, so\n" +
+  "`blamepost dkim records example.com` is the same line. sweep and reseal read --domain\n" +
+  "only, and refuse an argument.";
+
+var USAGE_ZONE =
+  "Usage: blamepost zone <verb>\n" +
+  "\n" +
+  "  preview <domain> --reason <text>      what would change at the DNS provider to publish\n" +
+  "                                        this domain's DKIM records. Nothing is written\n" +
+  "  verify <domain> --reason <text>       read those records back twice, from the provider\n" +
+  "                                        and through a resolver, and report where the two\n" +
+  "                                        disagree\n" +
+  "  verify-token --reason <text>          ask the provider whether the sealed token is live.\n" +
+  "                                        It takes no domain: the answer is about the account\n" +
+  "                                        the token belongs to, and a token that is live is\n" +
+  "                                        not the same as one scoped to a zone\n" +
+  "  allowlist <domain>                    exactly what this server will write in one domain's\n" +
+  "                                        zone: the record types, the addresses each type is\n" +
+  "                                        permitted at, and the ceiling on one change set\n" +
+  "  token set --token-file <path>         seal the provider API token onto this volume. The\n" +
+  "            --reason <text>             file holds the token and nothing else\n" +
+  "  token clear --reason <text> --confirm erase the sealed token from this volume\n" +
+  "\n" +
+  "preview, verify, verify-token and allowlist write nothing and answer while the server runs.\n" +
+  "allowlist opens no data volume at all: it reports the gate's own reach, so it answers after\n" +
+  "the server has stopped and when the database will not open. token set and token clear change\n" +
+  "a credential on the data volume, so they need the server stopped.\n" +
+  "\n" +
+  "The records this server offers to publish are the DKIM selector records, which are the\n" +
+  "ones it holds the only authoritative value for. The sender policy, the DMARC policy and\n" +
+  "the reporting addresses name senders and mailboxes outside this server, so they stay\n" +
+  "yours to publish. Nothing here removes a record: a retired selector's record is pulled\n" +
+  "by hand once `blamepost dkim sweep` says its window has closed.";
+
+var USAGE_CREDENTIAL =
+  "Usage: blamepost credential <verb>\n" +
+  "\n" +
+  "  list <domain>                         the sending credentials one hosted domain holds,\n" +
+  "       [--include-revoked]              newest first, with the state of each one's return\n" +
+  "       [--include-expired]              path. Revoked and expired ones are left out unless\n" +
+  "                                        you ask for them\n" +
+  "  show <id>                             one credential: the domain it speaks for, the\n" +
+  "                                        mailbox its bounces go to, what it may not send as,\n" +
+  "                                        its ceilings, and whether its bounces are still\n" +
+  "                                        arriving where it named. Ids come from list\n" +
+  "  bounces <domain>                      the domain's return path, and every live credential\n" +
+  "                                        whose bounces have stopped reaching their mailbox\n" +
+  "  ceiling <id>                          one credential's two ceilings, the window this\n" +
+  "          [--limit <n>]                 volume reads, and what the trail recorded when a\n" +
+  "                                        ceiling was crossed or a window given back\n" +
+  "  add <domain> --bounce-to <address>    issue a credential for one hosted domain. The token\n" +
+  "      --reason <text>                   is printed once and nothing can read it back\n" +
+  "      [--expires <when>]                a moment, or never; one year from now by default\n" +
+  "      [--max-messages <n>]              messages it may send in one window\n" +
+  "      [--max-recipients <n>]            recipients it may address in one window\n" +
+  "      [--window-minutes <n>]            the window both of those are measured over\n" +
+  "  rotate <id> --reason <text>           replace the secret and print the new token once.\n" +
+  "         [--grace-hours <n>]            The old one stops at once unless you name a window\n" +
+  "  revoke <id> --reason <text>           stop the credential working, keeping its row so the\n" +
+  "                                        identifier on earlier audit rows still resolves\n" +
+  "  remove <id> --destroy --reason <text>  take the row off the volume as well. revoke is the\n" +
+  "                                        answer almost every time\n" +
+  "  refusals <id> --reason <text>         replace the local parts this credential may not\n" +
+  "           --local-part <name>          send as. Repeat --local-part, or give one\n" +
+  "           [--clear --confirm]          comma-separated list. --clear leaves it able to\n" +
+  "                                        send as every address in its domain\n" +
+  "\n" +
+  "list, show and bounces write nothing and answer while the server runs. The rest need the\n" +
+  "server stopped: five of them change the data volume, and ceiling reads the audit trail,\n" +
+  "which files a row for every read of it.\n" +
+  "\n" +
+  "The counters the two ceilings are measured against live in the process that is sending, so\n" +
+  "the window ceiling prints is the one the next start begins from rather than the one that\n" +
+  "refused a message. What the server counted while it was running is on the trail, which is\n" +
+  "the half of that verb's answer that covers a running server.\n" +
+  "\n" +
+  "A credential speaks for every local part in one hosted domain, so it is not an account and\n" +
+  "holds no mailbox. Its bounces come back to bounces+<id>@<domain>, and the domain carries one\n" +
+  "alias at bounces@<domain> pointing at the mailbox you named; leave that address free for it.\n" +
+  "A bounce mailbox archived after the credential was created leaves the credential working and\n" +
+  "every bounce refused at the door, which is what show and bounces report.\n" +
+  "\n" +
+  "The token is printed to this terminal and nowhere else. It is not written to a file and not\n" +
+  "recorded in the audit trail, so this terminal and its scrollback are where it is exposed:\n" +
+  "copy it into wherever the application keeps its secrets, then clear the scrollback. A token\n" +
+  "that has been lost is replaced with rotate rather than read back.";
+
+var USAGE_REPORTS =
+  "Usage: blamepost reports <verb>\n" +
+  "\n" +
+  "  list [--domain <domain>]              what receivers have reported about your domains: how\n" +
+  "       [--from <when>] [--to <when>]    much mail they counted, how much of that aligned, the\n" +
+  "       [--limit <n>]                    sending addresses that failed both alignments, and\n" +
+  "       [--include-unauthenticated]      which organizations reported at all. The window is\n" +
+  "                                        the last 30 days unless --from or --to moves it, and\n" +
+  "                                        it is matched against the period each report covers\n" +
+  "                                        rather than the moment it arrived\n" +
+  "  show <id> [--limit <n>]               one aggregate report: the policy it was judged\n" +
+  "                                        against, who sent it, what this server concluded\n" +
+  "                                        about the message that carried it, and the sending\n" +
+  "                                        addresses it counted. Ids come from list\n" +
+  "  forget <address> --reason <text>      destroy every stored report row naming one address,\n" +
+  "         --confirm                      answering an erasure request from somebody who has\n" +
+  "                                        no account here. There is no copy afterwards\n" +
+  "\n" +
+  "list and show write nothing and answer while the server runs. forget destroys rows on the\n" +
+  "data volume, so it needs the server stopped.\n" +
+  "\n" +
+  "A report counts toward the reading only when this server authenticated the message that\n" +
+  "carried it, because anybody who can send mail to a published reporting address can write\n" +
+  "one. What is left out is counted beside every total rather than dropped, and list folds it\n" +
+  "back into the arithmetic when asked.\n" +
+  "\n" +
+  "A date is ISO 8601 or milliseconds since the epoch. This reads the reports peers send\n" +
+  "here; it publishes no DNS record and changes no policy.";
+
+var USAGE_DMARC =
+  "Usage: blamepost dmarc <verb>\n" +
+  "\n" +
+  "  status <domain>                       whether the reports carry the next policy step:\n" +
+  "                                        every rule with what it asks for beside what the\n" +
+  "                                        domain has, and the record text for all three\n" +
+  "                                        levels whichever way the answer goes\n" +
+  "  preview <domain>                      the record text on its own, built from what the\n" +
+  "          [--level <level>]             domain publishes today. It opens no data volume,\n" +
+  "                                        so it answers while the server runs, after it has\n" +
+  "                                        stopped, and when the database will not open\n" +
+  "  mark <domain> --source <address>      write down what one failing sending address is, so\n" +
+  "       --disposition <what>             a step stops waiting on it. <what> is ours-and-fixed\n" +
+  "       --reason <text>                  for a sending path of yours whose alignment is\n" +
+  "                                        corrected, or not-ours for one that is not yours\n" +
+  "  markings <domain>                     every marking in force for one domain, newest first\n" +
+  "\n" +
+  "Nothing here publishes a record. status and mark write to the audit trail, so they need the\n" +
+  "server stopped; preview reads DNS and nothing else.\n" +
+  "\n" +
+  "Stepping up is refused until every rule is met, and a domain still accumulating evidence is\n" +
+  "the ordinary state rather than a fault, so status exits zero whichever way it answers.\n" +
+  "Stepping down is not gated at all: an operator whose mail is being discarded needs the\n" +
+  "shortest way back, so every reading prints the weaker record beside the verdict, including\n" +
+  "the readings that refuse to step up.\n" +
+  "\n" +
+  "A step rests on the reports whose carrier this server authenticated and on nothing else,\n" +
+  "because anybody who can send mail to a published reporting address can write one. The\n" +
+  "sending addresses a marking names are the ones `blamepost reports list` prints.";
 
 var USAGE_QUEUE =
   "Usage: blamepost queue <verb>\n" +
@@ -157,13 +330,45 @@ var USAGE_BLOBS =
   "                                        referenced body and hashes it back, which is the\n" +
   "                                        only way to see one that has been altered in place\n" +
   "  reclaim --confirm --reason <text>     delete the bodies no message references\n" +
+  "  repair --confirm --reason <text>      destroy the mail the message store holds that\n" +
+  "                                        no mailbox row names, so the quota counter it\n" +
+  "                                        is charged against falls by what went\n" +
   "\n" +
   "A message body is written to disk and then a row is written naming it, and nothing\n" +
   "spans the pair. report answers either way, falling back to a read-only open whose\n" +
   "rows stop at the server's last write to disk. reclaim deletes files, so it needs the\n" +
   "server stopped and is refused while another process holds the volume. A body is\n" +
   "removed only once it has been on disk for a day, and inside that window one that is\n" +
-  "arriving looks exactly like one that was stranded.";
+  "arriving looks exactly like one that was stranded.\n" +
+  "\n" +
+  "repair destroys mail and needs the server stopped for the same reason. It removes\n" +
+  "only messages the store holds that no mailbox row names, which no protocol lists and\n" +
+  "no client can delete; report names how many there are and how many bytes they hold\n" +
+  "before you run it. A preservation order and the retention floor keep one exactly as\n" +
+  "they keep any other message, and a mailbox holding one they kept goes on being\n" +
+  "charged for it. The bodies those messages named are freed by reclaim afterwards.";
+
+var USAGE_ATTACHMENTS =
+  "Usage: blamepost attachments <verb>\n" +
+  "\n" +
+  "  report                                how many stored messages record whether they\n" +
+  "                                        carry files, and how many do not\n" +
+  "  backfill [--limit <n>]                read the octets of the messages that do not and\n" +
+  "                                        record the answer\n" +
+  "\n" +
+  "A message records whether it carries files when it is filed, as the IMAP keyword\n" +
+  "$HasAttachment or $HasNoAttachment. An IMAP client shows the keyword and a JMAP\n" +
+  "client reads hasAttachment from it. Mail filed before this server derived it carries\n" +
+  "neither, and until backfill has run, the folder listing says the answer is unknown\n" +
+  "for those messages and JMAP answers hasAttachment true rather than hiding a file.\n" +
+  "\n" +
+  "backfill writes to the volume, so it needs the server stopped and is refused while\n" +
+  "another process holds it. report opens the volume the same way. Each message is\n" +
+  "marked on its own, so a run that stops partway has done everything it reached and\n" +
+  "running it again reaches the rest; --limit caps how many messages one run opens and\n" +
+  "the answer says how many it left. A message above the 8 MiB read bound, and one\n" +
+  "whose stored body cannot be read back, stay unmarked and are counted separately,\n" +
+  "because what those carry is not known rather than nothing.";
 
 var USAGE_AUDIT =
   "Usage: blamepost audit <verb>\n" +
@@ -205,15 +410,15 @@ var USAGE_RESTORE =
   "Usage: blamepost restore <verb>\n" +
   "\n" +
   "  apply --storage <dir> --bundle <id>   replace this data volume with a bundle, keeping\n" +
-  "        --passphrase-file <path>        the directory it replaced as a rollback point.\n" +
-  "        --confirm --reason <text>       The restored volume is opened and its audit chain\n" +
-  "        [--fingerprint <hex>]           verified before the restore reports success\n" +
-  "  rollback --confirm --reason <text>    put the most recent rollback point back\n" +
-  "           [--point <path>]             or a named one\n" +
+  "        --passphrase-file <path>        what it replaced as a rollback point under\n" +
+  "        --confirm --reason <text>       .restore on the volume. The restored volume is\n" +
+  "        [--fingerprint <hex>]           opened, its audit chain verified and its signing\n" +
+  "                                        key held against the manifest's before success\n" +
+  "  rollback --confirm --reason <text>    put the most recent rollback point back, or undo\n" +
+  "           [--point <path>]             a restore that stopped partway; or a named point\n" +
   "  list-rollbacks                        every rollback point this volume still holds\n" +
   "\n" +
-  "Stop the server first. A restore renames the data directory, and a running process\n" +
-  "keeps reading the directory it opened.";
+  "Stop the server first. Both verbs refuse while another process holds the data volume.";
 
 // The three flags every command declares. They change where the server
 // reads its state from and how the answer is printed, so every verb
@@ -259,6 +464,84 @@ var VERB_SURFACE = {
     rotate:   { args: 1, flags: ["domain", "selector"] },
     retire:   { args: 1, flags: ["domain", "selector"] },
     sweep:    { args: 0, flags: ["domain", "immediate"] },
+    // No confirmation and no reason. It changes which seal a key is
+    // written under and nothing about which keys exist, which domains
+    // sign, or what any zone publishes, so there is nothing for a
+    // confirmation to describe. It is absent from
+    // `lib/store/SNAPSHOT_VERBS` because it writes to the volume, and a
+    // read-only copy cannot take the write.
+    reseal:   { args: 0, flags: ["domain"] },
+  },
+  zone: {
+    preview: { args: 1, flags: ["reason"] },
+    verify:  { args: 1, flags: ["reason"] },
+    // No confirmation, and no argument. It asks the provider whether the
+    // sealed credential is live and changes nothing at the provider, on
+    // the volume or in the zone, so there is no reach past the command
+    // line for a confirmation to describe. It takes no domain because
+    // the endpoint answers about the account the token belongs to rather
+    // than about a zone, and a domain on the line would read as a scope
+    // check this answer does not make.
+    "verify-token": { args: 0, flags: ["reason"] },
+    // No confirmation and no reason. It asks the gate what it will write
+    // and asks nothing of the provider, so no request leaves this
+    // process and there is no zone read for a row to answer for. A
+    // reason here would record that somebody looked at a constant.
+    //
+    // It is absent from `lib/store/SNAPSHOT_VERBS` because it never
+    // reaches that layer: the answer is the gate's own reach, which is
+    // settled by the configuration, so this verb opens no volume and has
+    // no read-only path to fall back to.
+    allowlist: { args: 1, flags: [] },
+    // One row for both halves of the credential verb. `set` and `clear`
+    // arrive as the argument rather than as verbs of their own, so the
+    // group offers three verbs and the gate covers three, and a reader
+    // never meets a `set` that means nothing on its own.
+    token:   { args: 1, flags: ["token-file", "reason", "confirm"] },
+  },
+  credential: {
+    list:     { args: 1, flags: ["include-revoked", "include-expired"] },
+    show:     { args: 1, flags: [] },
+    bounces:  { args: 1, flags: [] },
+    // No confirmation and no reason. It changes no credential, writes
+    // nothing to the volume and names one identifier on the command
+    // line, so there is no reach past that line for a confirmation to
+    // describe: the line `dmarc mark` is on rather than the one
+    // `reports forget` is on. The row `b.audit.query` files for the read
+    // carries the operator, which is the account of it that matters, and
+    // a reason on a read that changes nothing would be a reason for
+    // looking rather than for doing.
+    //
+    // It is deliberately absent from `lib/store/SNAPSHOT_VERBS` beside
+    // list, show and bounces. Reading the trail files a row before the
+    // answer comes back, a read-only handle cannot write that row, and a
+    // read that claims to be recorded and is not is worse than one that
+    // refuses. `audit read` and `dmarc markings` are excluded for the
+    // same reason.
+    ceiling:  { args: 1, flags: ["limit"] },
+    add:      { args: 1, flags: ["bounce-to", "reason", "expires", "max-messages",
+      "max-recipients", "window-minutes"] },
+    rotate:   { args: 1, flags: ["reason", "grace-hours"] },
+    revoke:   { args: 1, flags: ["reason"] },
+    remove:   { args: 1, flags: ["destroy", "reason"] },
+    refusals: { args: 1, flags: ["local-part", "clear", "confirm", "reason"] },
+  },
+  reports: {
+    list:   { args: 0, flags: ["domain", "from", "to", "limit", "include-unauthenticated"] },
+    show:   { args: 1, flags: ["limit"] },
+    forget: { args: 1, flags: ["reason", "confirm"] },
+  },
+  dmarc: {
+    status:   { args: 1, flags: [] },
+    preview:  { args: 1, flags: ["level"] },
+    // No confirmation. A marking names one domain and one sending
+    // address, both on the command line, so what it reaches is what an
+    // operator can read back before pressing return. The line is drawn
+    // by whether the reach is visible rather than by whether the verb
+    // writes: `reports forget` takes one address and destroys the rows
+    // of every reporter that named it, which is why that one asks.
+    mark:     { args: 1, flags: ["source", "disposition", "reason"] },
+    markings: { args: 1, flags: [] },
   },
   queue: {
     list:   { args: 0, flags: ["account", "destination"] },
@@ -270,6 +553,16 @@ var VERB_SURFACE = {
   blobs: {
     report:  { args: 0, flags: ["verify"] },
     reclaim: { args: 0, flags: ["confirm", "reason"] },
+    repair:  { args: 0, flags: ["confirm", "reason"] },
+  },
+  attachments: {
+    report: { args: 0, flags: [] },
+    // No confirmation and no reason. It writes a mark this server derives
+    // from the message itself, destroys nothing and changes nothing a
+    // reader can see except the answer to a question nothing had
+    // answered, so there is nothing for a confirmation to describe. The
+    // run files one audit row carrying its counts.
+    backfill: { args: 0, flags: ["limit"] },
   },
   audit: {
     "verify-chain":  { args: 0, flags: [] },
@@ -294,8 +587,67 @@ var VERB_SURFACE = {
   },
 };
 
+// Text on its way to this operator's terminal, screened a line at a
+// time.
+//
+// The screen is `blamepost.text.forDisplay` and what it removes is
+// written where it is defined. What is added here is the split, and the
+// split is the whole reason this exists rather than a bare call: the
+// screen's contract is one line, because folding a line feed to a space
+// is what keeps two words from running together where a break was. A
+// caller holding several lines has to split them and screen each one, and
+// the two values this file hands to a stream in more than one piece are a
+// stack trace and a pretty-printed JSON answer. Screening either whole
+// would put both onto one line.
+//
+// `_headerText` below stays what it is and is not replaced by this. It
+// screens a single value before `_column` measures it, and a width
+// computed from the codepoints a screen is about to remove pads the
+// column to the wrong place, so a table's screen has to run at the value
+// rather than at the line.
+function _linesForDisplay(value) {
+  if (value === null || value === undefined) return "";
+  return String(value).split("\n").map(function (line) {
+    return displayText.forDisplay(line);
+  }).join("\n");
+}
+
+// One reporter, with the screen above on everything it prints.
+//
+// It is here rather than at each of the places a message is built
+// because this is the boundary all of them cross. A refusal quoting a
+// path, an argument the parser could not read, a receiver's own words
+// and a record a third party published all reach an operator through
+// these six verbs, and a screen written at the sites instead is a screen
+// a verb added later arrives without.
+//
+// Every verb answers what the framework's own reporter answers, because
+// the answer is an exit code the caller returns and nothing here has an
+// opinion about it.
+//
+// A message that is absent is carried across as absent rather than as
+// the empty string. The framework writes no line at all for one and
+// writes a blank line for the other, and `ok` is called with nothing by
+// the verbs whose whole answer is the exit code.
+function _screened(value) {
+  return value === null || value === undefined ? value : _linesForDisplay(value);
+}
+
+function _screenedReporter(inner) {
+  return {
+    ok:         function (message) { return inner.ok(_screened(message)); },
+    error:      function (message, exitCode) {
+      return inner.error(_screened(message), exitCode);
+    },
+    usage:      function (usageText) { return inner.usage(_screened(usageText)); },
+    helpStdout: function (usageText) { return inner.helpStdout(_screened(usageText)); },
+    write:      function (line) { return inner.write(_screened(line)); },
+    writeErr:   function (line) { return inner.writeErr(_screened(line)); },
+  };
+}
+
 function _reporter(verb) {
-  return b.cliHelpers.makeReporter(ctx, "blamepost " + verb);
+  return _screenedReporter(b.cliHelpers.makeReporter(ctx, "blamepost " + verb));
 }
 
 // Refuse anything the verb will not act on, before a store is opened or
@@ -329,21 +681,62 @@ function _refuseUnread(report, group, verb, flags, positionals) {
   return 0;
 }
 
-// A domain given as a scoping argument, checked for shape before it is
-// used to narrow anything. A mistyped name refused here is an argument
-// problem the operator sees immediately; the same name carried further
-// comes back as a resolver failure, or as a clean report about a zone
-// nobody asked about. Answers either `{ domain }` or `{ code }`, and the
-// code is the one the caller returns.
+// Why one of the two readers below refused, in the spelling the store's
+// own refusals use. The list is deduplicated there, and a name carrying
+// the same fault in two labels reads back as one reason rather than as
+// the same word twice.
+function _whyRefused(detail) {
+  var kinds = storeErrors.issueKinds(detail);
+  return kinds === "" ? "" : " (" + kinds + ")";
+}
+
+// A domain given as an argument or as a scoping flag, checked for shape
+// before it is looked up and before it narrows a report. A mistyped name
+// refused here is an argument problem the operator sees immediately; the
+// same name carried further comes back as a resolver failure, as a clean
+// report about a zone nobody asked about, or as a lookup that found
+// nothing. Answers either `{ domain }` or `{ code }`, and the code is the
+// one the caller returns.
 function _readDomainArg(report, raw) {
   var verdict = address.parseDomain(raw);
   if (!verdict.ok) {
     return {
-      code: report.error(JSON.stringify(String(raw)) + " is not a usable domain name (" +
-        (verdict.detail || []).map(function (i) { return i.kind; }).join(", ") + ").", 2),
+      code: report.error(JSON.stringify(String(raw)) + " is not a usable domain name" +
+        _whyRefused(verdict.detail) + ".", 2),
     };
   }
   return { domain: verdict.domain };
+}
+
+// A mailbox named as the argument to a verb, checked the same way.
+//
+// `store.accounts.get` and `store.domains.get` both answer null for a row
+// that is not on this volume AND for a string that could never name one.
+// That is what a lookup owes a wire listener holding an untrusted peer's
+// input: a verdict rather than a throw. Deciding which of the two
+// happened belongs here instead, because this is the layer the operator
+// typed at. One is answered by creating the account and the other by
+// retyping the line, and a run that prints "no account" over a string
+// that is not an address says the first about the second, at the exit
+// code that means this server tried and failed.
+//
+// A token carrying no at sign is handed back untouched. The lookup reads
+// one of those as an account id, which is what `--json` prints beside
+// every row, so measuring it against the shape of an address would
+// refuse an identifier this server handed out.
+//
+// Answers either `{ address }` or `{ code }`, and the code is the one the
+// caller returns.
+function _readAddressArg(report, raw) {
+  if (typeof raw !== "string" || raw.indexOf("@") === -1) return { address: raw };
+  var verdict = address.parse(raw);
+  if (!verdict.ok) {
+    return {
+      code: report.error("address " + JSON.stringify(raw) +
+        " is not a usable mailbox address" + _whyRefused(verdict.detail) + ".", 2),
+    };
+  }
+  return { address: verdict.address };
 }
 
 function _parser() {
@@ -431,11 +824,128 @@ function _parser() {
         flags: [
           { name: "domain", type: "string", description: "Domain the verb applies to." },
           { name: "selector", type: "string",
-            description: "Selector name. Required by retire, optional elsewhere." },
+            description: "Selector name. Required by retire; generate and rotate take one " +
+              "instead of the dated default. The other verbs here refuse it." },
           { name: "immediate", type: "boolean",
             description: "Withdraw a retiring selector before its overlap elapses. " +
               "Right when a key is exposed, wrong otherwise: mail signed with it and " +
               "still being retried starts failing DKIM." },
+        ] },
+      { name: "zone",
+        description: "Read a hosted DNS provider's zone against the records this server " +
+          "expects, and hold the credential that lets it. Nothing here publishes a record.",
+        flags: [
+          { name: "token-file", type: "string",
+            description: "File holding the provider API token, read once and sealed onto " +
+              "this volume. It is read from a file rather than the command line, because a " +
+              "command line is in the shell history and in the process list." },
+          { name: "reason", type: "string",
+            description: "Why the zone is being read or the credential changed. Recorded in " +
+              "the audit trail, and required by every verb here." },
+          { name: "confirm", type: "boolean",
+            description: "Confirm that clear erases the sealed token. This server stops " +
+              "being able to edit any zone, and the token is not revoked at the provider by " +
+              "erasing it here." },
+        ] },
+      { name: "credential",
+        description: "Issue, inspect and withdraw the sending credentials an application " +
+          "presents to send mail as a hosted domain.",
+        flags: [
+          { name: "bounce-to", type: "string",
+            description: "Mailbox on this server that the credential's bounces are delivered " +
+              "to. It has to exist and be in service before the credential is written, " +
+              "because a credential pointing at nothing discards every bounce at the door " +
+              "while the application goes on sending." },
+          { name: "reason", type: "string",
+            description: "Why a credential is being issued, rotated, withdrawn or narrowed. " +
+              "Recorded in the audit trail, and required by each: a credential can send as " +
+              "every address in a hosted domain." },
+          { name: "expires", type: "string",
+            description: "When the credential stops working. ISO 8601 or milliseconds since " +
+              "the epoch, or never for one with no end date. One year from now by default." },
+          { name: "max-messages", type: "number",
+            description: "Messages the credential may send in one window." },
+          { name: "max-recipients", type: "number",
+            description: "Recipients the credential may address in one window. It is counted " +
+              "separately from the messages because a hundred messages of one recipient and " +
+              "one message of a hundred thousand are different events, and the second is the " +
+              "one a stolen credential produces." },
+          { name: "window-minutes", type: "number",
+            description: "The rolling window both ceilings are measured over, in minutes." },
+          { name: "grace-hours", type: "number",
+            description: "How long the previous secret keeps working after a rotation, in " +
+              "hours. There is none unless you name one: the reason to rotate is usually " +
+              "that the old secret is in somebody else's hands." },
+          { name: "local-part", type: "list",
+            description: "A local part this credential may not send as. Repeat it, or give " +
+              "one comma-separated list, to name several. The list replaces whatever the " +
+              "credential held rather than adding to it." },
+          { name: "clear", type: "boolean",
+            description: "Leave the refusal list empty, so the credential may send as every " +
+              "address in its domain, postmaster and abuse included." },
+          { name: "confirm", type: "boolean",
+            description: "Confirm that clearing the refusal list opens up every address in " +
+              "the domain. What it opens up is not on the command line, which is why it is " +
+              "asked for." },
+          { name: "destroy", type: "boolean",
+            description: "Take the credential's row off the volume rather than only stopping " +
+              "the credential. The identifier on every audit row it produced stops resolving." },
+          { name: "include-revoked", type: "boolean",
+            description: "Keep revoked credentials in the listing." },
+          { name: "include-expired", type: "boolean",
+            description: "Keep expired credentials in the listing. Both are left out by " +
+              "default because the common question is which credentials can still send." },
+          { name: "limit", type: "number",
+            description: "How many trail rows of each kind ceiling reads. The answer says " +
+              "when a read came back full, because a window that has been crossed many " +
+              "times is one whose oldest crossings fall off the end." },
+        ] },
+      { name: "reports",
+        description: "Read what receivers report about mail claiming your domains, and " +
+          "answer an erasure request about one of those reports.",
+        flags: [
+          { name: "domain", type: "string",
+            description: "Read one domain instead of every one this server hosts." },
+          { name: "from", type: "string",
+            description: "Earliest moment a report's period may end, inclusive. ISO 8601 " +
+              "or milliseconds since the epoch. Thirty days before the other end by default." },
+          { name: "to", type: "string",
+            description: "Latest moment a report's period may begin, inclusive. Now by default." },
+          { name: "limit", type: "number",
+            description: "How many rows each list inside the answer prints. The rest are " +
+              "counted rather than dropped, so the answer says what it did not show." },
+          { name: "include-unauthenticated", type: "boolean",
+            description: "Count the reports whose carrier this server could not authenticate " +
+              "as well. They are left out by default because anybody who can send mail to a " +
+              "published reporting address can write one, and a policy moved on one is a " +
+              "policy moved by whoever wanted it moved." },
+          { name: "reason", type: "string",
+            description: "Why the report rows are being destroyed. Recorded in the audit " +
+              "trail, and required by forget: the row is the only record they were here." },
+          { name: "confirm", type: "boolean",
+            description: "Confirm that forget destroys report rows. It reaches a reporting " +
+              "organization's contact mailbox as well as a stranger's envelope, so an " +
+              "address belonging to a reporter takes that reporter's counting with it." },
+        ] },
+      { name: "dmarc",
+        description: "Read whether a hosted domain's reports carry the next DMARC policy " +
+          "step, print the record text for each policy level, and record what a failing " +
+          "sending address is. Nothing here publishes a record.",
+        flags: [
+          { name: "level", type: "string",
+            description: "Print the record for one policy level rather than all three: " +
+              "none, quarantine or reject." },
+          { name: "source", type: "string",
+            description: "The sending address a reporter named, as an IPv4 or IPv6 address. " +
+              "`blamepost reports list` prints the ones failing both alignments." },
+          { name: "disposition", type: "string",
+            description: "What that address is: ours-and-fixed for a sending path of yours " +
+              "whose alignment has been corrected, or not-ours for one that is not yours. " +
+              "The two are read differently, because continued failure contradicts the " +
+              "first and is expected of the second." },
+          { name: "reason", type: "string",
+            description: "What you found out about the address and how. Recorded in the " +
+              "audit trail as the marking itself, and required by mark." },
         ] },
       { name: "queue",
         description: "Inspect and drive the outbound queue.",
@@ -472,6 +982,14 @@ function _parser() {
           { name: "reason", type: "string",
             description: "Why the bodies are being deleted. Recorded in the audit trail, " +
               "and required by reclaim: the row is the only record they were here." },
+        ] },
+      { name: "attachments",
+        description: "Record whether each stored message carries files, for mail filed " +
+          "before this server derived it.",
+        flags: [
+          { name: "limit", type: "number",
+            description: "How many unmarked messages one run opens. The answer says how " +
+              "many it left, and running it again reaches those." },
         ] },
       { name: "audit",
         description: "Prove the audit trail, and hand a range of it to an auditor.",
@@ -553,61 +1071,51 @@ function _parser() {
 // command line goes through exactly the same validation as one given
 // through the environment. A path accepted from a flag but never
 // checked is how a typo becomes a data directory in the wrong place.
+// The log level is applied here rather than in `serve` alone, because
+// every verb below runs framework code that reports what it recovered
+// from at debug, and an operator debugging `doctor` or `queue list`
+// wants those lines as much as one debugging the server. Applying it at
+// the single point the configuration is built also means the level a
+// file sets reaches the logger, which a reader of the environment
+// variable alone never sees.
 function _configFrom(flags) {
   var env = Object.assign({}, process.env);
   if (flags.config) env.BLAMEPOST_CONFIG = flags.config;
   if (flags["data-dir"]) env.BLAMEPOST_DATA_DIR = flags["data-dir"];
   if (flags.hostname) env.BLAMEPOST_HOSTNAME = flags.hostname;
-  return configModule.load({ env: env });
+  var config = configModule.load({ env: env });
+  configModule.applyLogLevel(config);
+  // Which file the run read and which volume it settled on, written
+  // before anything acts on either. It is the first question behind a
+  // command that behaved as though it had read something else, and the
+  // answer is otherwise only visible by reconstructing the search from
+  // the environment. Written at debug because it says nothing an
+  // ordinary run needs.
+  b.log.boot("config").debug("configuration resolved", {
+    configPath: config.configPath,
+    dataDir:    config.dataDir,
+    hostname:   config.hostname,
+  });
+  return config;
 }
 
-// The verbs that may answer from a read-only open of the data volume
+// Whether a verb may answer from a read-only open of the data volume
 // while the server writes it, rather than being refused until it is
 // stopped.
 //
-// The test is not whether a verb changes anything. What disqualifies a
-// read is needing to WRITE on the way to its answer, and there are two
-// shapes of that.
-//
-// A read whose own record has to outlive the process. `audit read` is
-// documented as itself being recorded and `account sieve` records that
-// an administrator opened somebody's filter. A read-only handle cannot
-// write that row, and a read that claims to be recorded and is not is
-// worse than a read that refuses.
-//
-// A verb that writes before it reads. `backup run` anchors the chain so
-// the bundle carries a signature over its own last row, and requires the
-// volume flushed so the bundle is not older than the database it claims
-// to be. `audit archive`, `audit export` and `audit purge` are the same.
-// None of that is available to a handle that will not write.
-//
-// `blobs report` is here rather than among those. Its answer holds the
-// rows against a blob directory that keeps moving. The rows carry the
-// moment they were frozen and `blobs.reconcile` separates a body newer
-// than that from a body nothing references, so what it reports is
-// bounded by what it read.
-//
-// `audit verify-chain` is here because a read-only open verifies the
-// checkpoint signatures rather than skipping them, which is what it
-// could not get from a copy opened with the signing key left sealed. The
-// chain is append-only, so what it walks is a verified prefix.
-//
-// `doctor` has no verb of its own, so it is listed against the empty
-// one. It is the verb this exists for: an operator reaches for it
-// exactly when the server is up and behaving oddly.
+// The set lives in `lib/store`, beside the open it describes and beside
+// the refusal that names it to an operator. Reading it from there rather
+// than restating it here is what keeps the two in step: a verb added to
+// the set is a verb the refusal names, in the same edit, with nothing to
+// remember. `doctor` is a whole command rather than a group and a verb,
+// so the set lists it against the empty string and this matches it the
+// same way.
 var NO_VERB = "";
-var SNAPSHOT_ELIGIBLE = {
-  account: ["list", "show"],
-  domain:  ["list", "show"],
-  dkim:    ["list", "records"],
-  blobs:   ["report"],
-  audit:   ["verify-chain"],
-  doctor:  [NO_VERB],
-};
 
 function _mayReadASnapshot(group, verb) {
-  if (!Object.prototype.hasOwnProperty.call(SNAPSHOT_ELIGIBLE, group)) return false;
-  return SNAPSHOT_ELIGIBLE[group].indexOf(String(verb === undefined ? NO_VERB : verb)) !== -1;
+  var eligible = storeModule.SNAPSHOT_VERBS;
+  if (!Object.prototype.hasOwnProperty.call(eligible, group)) return false;
+  return eligible[group].indexOf(String(verb === undefined ? NO_VERB : verb)) !== -1;
 }
 
 // Open the data volume for a verb that reports, preferring a writable
@@ -883,20 +1391,26 @@ function _messageIds(raw) {
   return out;
 }
 
-// Untrusted header text on its way to a terminal. A subject and a From
-// line are written by whoever sent the message, and this prints them to
-// an operator who is deciding which records an order covers. The same
-// screen the browser surface puts in front of them goes here: the
-// balanced profile strips bidirectional overrides, zero-width and
-// control characters and leaves every script alone, so a subject
-// decoding to `Invoice <RLO>gpj.exe` cannot render as `Invoice exe.jpg`
-// on the line somebody reads before naming that message in a court
-// filing. It is the display that is corrected, never the stored value.
-var HEADER_TEXT_GUARD = Object.freeze({ profile: "balanced" });
-
+// Untrusted text on its way to a terminal. A subject and a From line are
+// written by whoever sent the message, a reporting organization's name
+// and its report identifier are written by whoever sent the report, and
+// an audit row's reason quotes whichever of those caused it. This prints
+// all of them to an operator who is deciding which records an order
+// covers, or reading back what the server did.
+//
+// It is the one screen the browser surface, the zone diff and the doctor
+// report also run, so a value that reads as one line in a browser reads
+// as one line in this table. It is the display that is corrected, never
+// the stored value.
+//
+// A terminal acts on what a browser renders inertly, which is why this
+// column matters more here than there: an escape introducer on this
+// table can clear the row above or repaint the `HELD` marker onto a
+// message that does not carry one, and a tab moves the value out from
+// under the heading that names it.
 function _headerText(value, fallback) {
   if (typeof value !== "string" || value.length === 0) return fallback;
-  return b.guardText.sanitize(value, HEADER_TEXT_GUARD);
+  return displayText.forDisplay(value);
 }
 
 // One millisecond reading as the day it falls on, in UTC. An operator
@@ -1124,6 +1638,14 @@ async function cmdAccount(flags, positionals) {
   if (!verb) return report.usage(USAGE_ACCOUNT);
   var unread = _refuseUnread(report, "account", verb, flags, positionals);
   if (unread !== 0) return unread;
+  // Every verb here but `list` names one mailbox in the same place, so
+  // the name is read once rather than at each of the ten lookups below.
+  // Doing it before the volume is opened is what makes the refusal an
+  // answer about the line the operator typed: nothing has been decrypted,
+  // no row has been searched for, and the exit code says the line is what
+  // needs changing.
+  var named = _readAddressArg(report, positionals[1]);
+  if (named.code !== undefined) return named.code;
   var config = _configFrom(flags);
   var store = await _openForReporting(config, "account", verb);
   try {
@@ -1629,6 +2151,15 @@ async function cmdDomain(flags, positionals) {
   if (!verb) return report.usage(USAGE_DOMAIN);
   var unread = _refuseUnread(report, "domain", verb, flags, positionals);
   if (unread !== 0) return unread;
+  // Every verb here but `list` names one domain in the same place. Five
+  // of them carried the name into a write that refused it and one, `show`,
+  // carried it into a lookup that answers null for a name it could not
+  // read, so the same string was an argument fault on five verbs and a
+  // missing domain on the sixth.
+  if (positionals[1] !== undefined) {
+    var wantedDomain = _readDomainArg(report, positionals[1]);
+    if (wantedDomain.code !== undefined) return wantedDomain.code;
+  }
   var config = _configFrom(flags);
   var store = await _openForReporting(config, "domain", verb);
   try {
@@ -1748,8 +2279,9 @@ async function cmdDomain(flags, positionals) {
         "Erased " + removedDomain.domain +
           " along with " + removedDomain.selectorsRemoved + " DKIM selector(s)" +
           " and " + removedDomain.keysErased + " sealed private key(s)",
-        "  Remove the DKIM records for " + removedDomain.domain + " from its zone: this",
-        "  server never edits DNS, so they stay published until you pull them.",
+        "  Remove the DKIM records for " + removedDomain.domain + " from its zone: nothing",
+        "  here removes a DNS record on any setting, so they stay published until you",
+        "  pull them.",
       ].concat(removedDomain.keysLeftAside.length === 0 ? [] : [
         // The one outcome of a removal that leaves work on the volume.
         // A key that could not be destroyed once the rows had gone is
@@ -1885,10 +2417,2006 @@ async function cmdDkim(flags, positionals) {
           .concat(swept.withdrawn.map(function (s) { return "  " + s.dnsName; }))
           .concat(sweptAside));
     }
+    if (verb === "reseal") {
+      var moved = await handle.reseal({ domain: domain });
+      // The counts are what an operator reads to decide whether the run
+      // is still owed. A key already sealed to its selector is named as
+      // such rather than left out, because a run reporting nothing at all
+      // reads the same as a run that found nothing to look at.
+      var resealLines = moved.resealed.length === 0
+        ? ["Every signing key on this volume is already sealed to the selector it belongs to."]
+        : [moved.resealed.length + " signing key(s) are now sealed to the selector they " +
+            "belong to:"]
+          .concat(moved.resealed.map(function (s) {
+            return "  " + s.domain + "  " + s.selector + "  " + s.algorithm;
+          }));
+      if (moved.alreadyBound.length > 0) {
+        resealLines.push(moved.alreadyBound.length + " were already sealed that way and " +
+          "were not rewritten.");
+      }
+      if (moved.absent.length > 0) {
+        resealLines.push(moved.absent.length + " retired selector(s) have no private key " +
+          "left on this volume, which is what retiring one does.");
+      }
+      return _emit(report, flags, moved, resealLines);
+    }
     return report.usage(USAGE_DKIM);
   } finally {
     await store.close();
   }
+}
+
+// ---- zone -------------------------------------------------------------------
+
+// A raw provider token, read from a file rather than from the command
+// line. A value on a command line is in the shell history and in the
+// process list of every other user on the host, and a credential that
+// has been in either is a credential to reissue rather than to seal.
+//
+// The read is bounded and the file has to be a regular file. A path
+// pointing at a mailbox or a device is a typo, and reading one into
+// memory before rejecting it is the part worth not doing.
+function _tokenFrom(report, flags) {
+  var path = nodePath.resolve(flags["token-file"]);
+  var stat;
+  try { stat = nodeFs.statSync(path); }
+  catch (e) {
+    return { code: report.error("--token-file names " + path + ", which cannot be read: " +
+      ((e && e.message) || String(e)) + ".", 2) };
+  }
+  if (!stat.isFile()) {
+    return { code: report.error("--token-file names " + path + ", which is not a regular " +
+      "file. It holds the provider API token and nothing else.", 2) };
+  }
+  var text;
+  try {
+    text = b.atomicFile.fdSafeReadSync(path,
+      { maxBytes: PASSPHRASE_FILE_MAX_BYTES, encoding: "utf8" });
+  } catch (e2) {
+    return { code: report.error("--token-file at " + path + " could not be read: " +
+      ((e2 && e2.message) || String(e2)) + ".", 2) };
+  }
+  var token = String(text).trim();
+  if (token.length === 0) {
+    return { code: report.error("--token-file at " + path + " is empty. It holds the " +
+      "provider API token on one line.", 2) };
+  }
+  return { token: token, path: path };
+}
+
+// The records this server holds the only authoritative value for, in the
+// shape the write gate takes.
+//
+// The DKIM selector records and nothing else. Every other record in the
+// mail posture names something outside this server: the sender policy
+// lists whoever else sends for the domain, the DMARC and TLS reporting
+// records name mailboxes an operator chose, and the MTA-STS policy is
+// served rather than published. This server cannot state any of those
+// without inventing the operator's half of them, so it offers the ones
+// it computes and leaves the rest alone.
+//
+// `dnsRecords` already drops a retired selector, so what comes back is
+// what has to be in the zone right now: the active pairs, and any pair
+// still inside its retirement overlap.
+function _zoneRecordsFor(handle, domain) {
+  return handle.dnsRecords(domain).map(function (record) {
+    return { type: "TXT", name: record.dnsName, content: record.dnsTxtValue };
+  });
+}
+
+async function cmdZone(flags, positionals) {
+  var report = _reporter("zone");
+  var verb = positionals[0];
+  if (!verb) return report.usage(USAGE_ZONE);
+  var unread = _refuseUnread(report, "zone", verb, flags, positionals);
+  if (unread !== 0) return unread;
+  var config = _configFrom(flags);
+
+  if (verb === "token") {
+    return await _cmdZoneToken(report, config, flags, positionals);
+  }
+
+  if (verb === "verify-token") {
+    return await _cmdZoneVerifyToken(report, config, flags);
+  }
+
+  if (verb === "allowlist") {
+    return _cmdZoneAllowlist(report, config, flags, positionals);
+  }
+
+  if (verb !== "preview" && verb !== "verify") return report.usage(USAGE_ZONE);
+  if (!positionals[1]) return report.usage(USAGE_ZONE);
+  if (!flags.reason) {
+    return report.error("give --reason. Reading a zone at the provider is recorded in the " +
+      "audit trail beside the writes made to it, and a row with no reason answers nothing " +
+      "later about why the zone was being looked at.", 2);
+  }
+  // The provider is checked before the volume is opened, so an operator
+  // who has not turned the zone writer on is told that rather than being
+  // told about a domain.
+  var noProvider = _zoneProviderRefusal(report, config);
+  if (noProvider !== null) return noProvider;
+  var shape = _readDomainArg(report, positionals[1]);
+  if (shape.code !== undefined) return shape.code;
+
+  var store = await _openForReporting(config, "zone", verb);
+  // The writer is closed by name in the finally below rather than the
+  // gate it built. It owns every gate it hands out, so closing it
+  // removes the outbound scanner each one installed; closing a gate here
+  // as well would be a second answer to the same question.
+  var zone = null;
+  try {
+    var hosted = store.domains.get(shape.domain);
+    if (!hosted) {
+      return report.error("this server does not host " + shape.domain +
+        ", so it has no records to publish for it.", 2);
+    }
+    var dkimHandle = blamepost.mail.dkim.create({ dataDir: config.dataDir, store: store });
+    var desired = _zoneRecordsFor(dkimHandle, hosted.domain);
+    if (desired.length === 0) {
+      return report.error("no DKIM selector for " + hosted.domain + " is publishable, so " +
+        "there is nothing to compare against the zone. Mint a pair with `blamepost dkim " +
+        "generate --domain " + hosted.domain + "`.");
+    }
+
+    zone = blamepost.dns.fromConfig(config);
+    var gate = zone.forDomain(hosted.domain);
+    var previewed = await gate.preview({ desired: desired, reason: flags.reason });
+
+    if (verb === "preview") {
+      return _emit(report, flags, previewed, [
+        "Against " + hosted.domain + " at the " + zone.provider + " zone:",
+        previewed.diff,
+        "",
+        "Nothing was written. This server does not apply a zone change from the command",
+        "line, because applying one needs the data volume and the server holds it while it",
+        "runs; the administration console is where a change is applied.",
+      ]);
+    }
+
+    // What `verify` reads twice. The entries are the records that have to
+    // be in the zone, offered to the gate as though they had just been
+    // written, because "is this record at the provider and can the world
+    // see it" is the same question either way and the gate already asks
+    // it in both directions at once.
+    var expected = desired.map(function (record) {
+      return { action: "publish", record: record };
+    });
+    var verdict = await gate.verify(
+      { applyId: null, zone: previewed.zone, written: expected },
+      { reason: flags.reason });
+    var lines = [hosted.domain + ": " + (verdict.ok
+      ? "every record this server publishes is at the provider and visible to a resolver."
+      : "one or more records disagree.")];
+    verdict.checks.forEach(function (entry) {
+      lines.push("  " + entry.verdict + "  " + entry.type + " " + entry.name);
+    });
+    if (!verdict.ok) {
+      lines.push("");
+      lines.push("  pending is a resolver that has no answer yet, which time fixes.");
+      lines.push("  conflict is a resolver answering with something else, which it does not:");
+      lines.push("  mail is being judged against a record this server did not publish.");
+    }
+    return _emit(report, flags, verdict, lines);
+  } finally {
+    if (zone !== null) zone.close();
+    await store.close();
+  }
+}
+
+// The refusal every zone verb meets before a volume is opened, when the
+// operator has not turned the zone writer on. It is one function because
+// three verbs give it and an operator who reads a different sentence
+// from `preview` than from `verify-token` has two settings to look for
+// and one to find. Returns the exit code, or null when a provider is
+// named.
+function _zoneProviderRefusal(report, config) {
+  if (config.zoneProvider !== configModule.ZONE_PROVIDER_NONE) return null;
+  return report.error("BLAMEPOST_ZONE_PROVIDER names no provider, so this server edits no " +
+    "zone and reads none. Set it to one of " +
+    configModule.ZONE_PROVIDERS.filter(function (name) {
+      return name !== configModule.ZONE_PROVIDER_NONE;
+    }).join(", ") + " and seal a token with `blamepost zone token set --token-file <path> " +
+    "--reason <text>`. Left alone, the records stay yours to publish; " +
+    "`blamepost dkim records <domain>` prints them.", 2);
+}
+
+// What the write gate will write in one domain's zone, asked of the gate
+// rather than read off the source.
+//
+// An operator deciding what to trust a provider token with is asking how
+// far this server can reach with it, and the answer is a property of the
+// gate every write goes through. It opens no data volume and sends
+// nothing to the provider: the reach is settled by the configuration, so
+// this answers while the server runs, after it has stopped, and when the
+// database will not open. The gate is closed on the way out because
+// building one installs an outbound scanner on the transport, and a gate
+// discarded without closing leaves the framework counting an interceptor
+// nothing will use again.
+function _cmdZoneAllowlist(report, config, flags, positionals) {
+  if (!positionals[1]) return report.usage(USAGE_ZONE);
+  var refused = _zoneProviderRefusal(report, config);
+  if (refused !== null) return refused;
+  var shape = _readDomainArg(report, positionals[1]);
+  if (shape.code !== undefined) return shape.code;
+
+  var zone;
+  try {
+    zone = blamepost.dns.fromConfig(config);
+  } catch (buildErr) {
+    return report.error((buildErr && buildErr.message) || String(buildErr));
+  }
+  try {
+    var reach = zone.forDomain(shape.domain).allowlist();
+    return _emit(report, flags, reach, [
+      "In the " + zone.provider + " zone for " + reach.domain + ", this server writes:",
+    ].concat(reach.addresses.map(function (entry) {
+      return "  " + _column(entry.type, 8) + entry.describes;
+    })).concat([
+      "",
+      "  record types:    " + reach.types.join(", "),
+      "  MX writes:       " + (reach.allowMxWrites
+        ? "on, so the mail exchanger at the apex is one it may replace"
+        : "off, so the mail exchanger at the apex is yours to publish"),
+      "  one change set:  at most " + reach.maxChanges + " change(s)",
+      "",
+      "  An address this list does not name is refused before a request is built, whatever",
+      "  the token at the provider is scoped to. The two bounds are separate: this is what",
+      "  the server will ask for, and the token's scope is what the provider will allow.",
+      "  `blamepost zone preview " + reach.domain + " --reason <text>` reads the zone with",
+      "  the token and reports what it found.",
+    ]));
+  } finally {
+    zone.close();
+  }
+}
+
+// Ask the provider whether the sealed credential is live.
+//
+// It reads and writes nothing at the provider, nothing in the zone and
+// nothing on the volume, so it answers from a read-only open the way
+// `preview` and `verify` do. The volume is opened for the audit row
+// rather than for the answer: the credential comes off the sealed file
+// through the configuration, and the question is about the account at
+// the provider, which is not on this volume at all.
+//
+// The three endings are kept apart because an operator does different
+// things about each. A live token is the answer they wanted. A token the
+// provider refuses is the credential to replace. A provider that could
+// not be reached leaves the token unjudged, and reporting that as a bad
+// credential would send an operator to reissue one that was never the
+// problem.
+async function _cmdZoneVerifyToken(report, config, flags) {
+  if (!flags.reason) {
+    return report.error("give --reason. Reading the provider credential is recorded in the " +
+      "audit trail beside the writes it authorizes, and a row with no reason answers nothing " +
+      "later about why the credential was being looked at.", 2);
+  }
+  var refused = _zoneProviderRefusal(report, config);
+  if (refused !== null) return refused;
+
+  var store = await _openForReporting(config, "zone", "verify-token");
+  var zone = null;
+  try {
+    b.audit.registerNamespace(AUDIT_NAMESPACE);
+    // Building the handle opens no seal and reaches nothing. What it
+    // refuses here is a credential that is missing, sealed twice over or
+    // not sealed at all, and each of those carries the sentence saying
+    // what to do about it, so they are reported as themselves rather
+    // than folded into the verdict below.
+    try {
+      zone = blamepost.dns.fromConfig(config);
+    } catch (buildErr) {
+      return report.error((buildErr && buildErr.message) || String(buildErr));
+    }
+
+    var verdict;
+    try {
+      verdict = await zone.verifyToken();
+    } catch (askErr) {
+      var code = (askErr && askErr.code) || "";
+      var said = (askErr && askErr.message) || String(askErr);
+      // A sealed token that does not open is a verdict on the credential
+      // this volume holds, the same as one the provider refuses, and it
+      // is reported the same way.
+      if (code === blamepost.dns.cloudflare.CODES.tokenUnverified ||
+          code === blamepost.dns.CODES.tokenSealUnopened) {
+        await auditActor.record({
+          action:   "blamepost.dns.credential_verified",
+          outcome:  "denied",
+          actor:    auditActor.current(),
+          reason:   flags.reason,
+          resource: { kind: "volume", id: config.dataDir },
+          metadata: { provider: zone.provider, code: code },
+        });
+        return report.error(said);
+      }
+      // Everything else leaves the credential unjudged: a throttled
+      // provider, a reply this client could not read, a name that did
+      // not resolve. The token is not reported as bad, because nothing
+      // here has heard the provider say so.
+      await auditActor.record({
+        action:   "blamepost.dns.credential_verified",
+        outcome:  "failure",
+        actor:    auditActor.current(),
+        reason:   flags.reason,
+        resource: { kind: "volume", id: config.dataDir },
+        metadata: { provider: zone.provider, code: code || null },
+      });
+      return report.error("the " + zone.provider + " API did not answer whether this token " +
+        "is live: " + said + " The token has not been shown to be bad; nothing here reached " +
+        "the provider to ask. Run this again once the provider answers.");
+    }
+
+    var noted = await auditActor.record({
+      action:   "blamepost.dns.credential_verified",
+      outcome:  "success",
+      actor:    auditActor.current(),
+      reason:   flags.reason,
+      resource: { kind: "volume", id: config.dataDir },
+      metadata: { provider: zone.provider, tokenId: verdict.id },
+    });
+    return _emit(report, flags, verdict, [
+      "The " + zone.provider + " API reports this server's sealed token is active" +
+        (verdict.id === null ? "." : " (" + verdict.id + ")."),
+      "  A token that is active is not a token that may write. The provider does not report",
+      "  scope here, so whether it can edit a particular zone is answered by",
+      "  `blamepost zone preview <domain> --reason <text>`, which reads that zone with it.",
+    ].concat(noted ? [] : [
+      "  The audit trail has no row for this. The answer above stands either way.",
+    ]));
+  } finally {
+    if (zone !== null) zone.close();
+    await store.close();
+  }
+}
+
+// The credential half. It writes the data volume, so it runs with the
+// server stopped and never falls back to a read-only copy: a token
+// sealed into a copy nothing keeps is a token the operator believes they
+// installed.
+async function _cmdZoneToken(report, config, flags, positionals) {
+  var action = positionals[1];
+  if (action !== "set" && action !== "clear") return report.usage(USAGE_ZONE);
+  if (!flags.reason) {
+    return report.error("give --reason. Installing or erasing the credential that edits " +
+      "this server's DNS is recorded in the audit trail, and a row with no reason answers " +
+      "nothing later about who changed it or why.", 2);
+  }
+
+  var read = null;
+  if (action === "set") {
+    if (!flags["token-file"]) {
+      return report.error("give --token-file. The token is read from a file rather than " +
+        "from the command line, because a command line is in the shell history and in the " +
+        "process list.", 2);
+    }
+    read = _tokenFrom(report, flags);
+    if (read.code !== undefined) return read.code;
+  } else if (flags.confirm !== true) {
+    return report.error("give --confirm. Erasing the sealed token stops this server from " +
+      "editing any zone, and it does not revoke the token at the provider: whoever holds a " +
+      "copy, including one inside a backup bundle taken while it was here, can still edit " +
+      "the zone. Revoke it at the provider as well.", 2);
+  }
+
+  // Opened writable, and never as a snapshot: sealing needs the volume's
+  // vault open and the row has to outlive this process.
+  var store = await storeModule.open(config);
+  try {
+    // The namespace the rows below are written under. An action under a
+    // namespace nothing registered is refused by the audit layer and
+    // dropped without a word, so it is registered here rather than
+    // relied on from whichever other subsystem happened to run first.
+    b.audit.registerNamespace(AUDIT_NAMESPACE);
+    if (action === "set") {
+      var stored = await blamepost.dns.storeToken(config, read.token);
+      var noted = await auditActor.record({
+        action:   "blamepost.dns.credential_set",
+        outcome:  "success",
+        actor:    auditActor.current(),
+        reason:   flags.reason,
+        resource: { kind: "volume", id: config.dataDir },
+        metadata: { path: stored.path, from: read.path },
+      });
+      return _emit(report, flags, { path: stored.path, recorded: noted }, [
+        "Sealed the provider token onto this volume at " + stored.path + ".",
+        "  It opens only on this volume: a copy taken to another one will not unseal, and",
+        "  a backup bundle taken from now on carries it.",
+        "  Delete " + read.path + ", which still holds the token in the clear.",
+      ].concat(config.zoneProvider === configModule.ZONE_PROVIDER_NONE ? [
+        "  BLAMEPOST_ZONE_PROVIDER still names no provider, so nothing reads this yet.",
+      ] : []).concat(noted ? [] : [
+        "  The audit trail has no row for this. The credential is installed either way.",
+      ]));
+    }
+
+    var cleared = blamepost.dns.clearToken(config);
+    // A clear over a volume that held nothing is a success and not a
+    // failure: what was asked for is true afterwards either way, and
+    // whether there was something to erase is a fact about the volume
+    // that the row carries as `held`. Filing it as a failure would put a
+    // failure row on the trail for a correct no-op, which is noise for
+    // whoever is alerting on failures.
+    var clearNoted = await auditActor.record({
+      action:   "blamepost.dns.credential_cleared",
+      outcome:  "success",
+      actor:    auditActor.current(),
+      reason:   flags.reason,
+      resource: { kind: "volume", id: config.dataDir },
+      metadata: { path: cleared.path, held: cleared.removed },
+    });
+    return _emit(report, flags, cleared, (cleared.removed
+      ? ["Erased the sealed provider token at " + cleared.path + ".",
+        "  This server can no longer edit a zone.",
+        "  Erasing it here revokes nothing. Revoke the token at the provider as well:",
+        "  every backup bundle taken while it was on this volume still carries it."]
+      : ["This volume held no sealed provider token at " + cleared.path + ".",
+        "  Nothing was erased. A token supplied as BLAMEPOST_ZONE_API_TOKEN is not on the",
+        "  volume and is not what this verb reaches; unset the variable instead."])
+      .concat(clearNoted ? [] : [
+        "  The audit trail has no row for this.",
+      ]));
+  } finally {
+    await store.close();
+  }
+}
+
+// ---- credential -------------------------------------------------------------
+
+// The two windows an operator writes in a unit the registry does not
+// hold, derived from the registry's own bounds rather than written out
+// again. A refusal computed from these names the number the operator
+// typed; one computed from the milliseconds underneath names a number
+// they never wrote.
+var MAX_GRACE_HOURS   = credentialsModule.MAX_GRACE_MS  / TIME.hours(1);
+var MIN_WINDOW_MINUTES = credentialsModule.MIN_WINDOW_MS / TIME.minutes(1);
+var MAX_WINDOW_MINUTES = credentialsModule.MAX_WINDOW_MS / TIME.minutes(1);
+
+// The two trail actions that say what became of a credential's ceiling.
+// The first is filed by the submission listener when a message was
+// refused for crossing one; the second by the registry when an operator
+// gave a window back. Spelled here as the strings they are so a reader
+// can grep for either in `blamepost audit read --action`.
+var CEILING_REACHED_ACTION  = "blamepost.mail.listeners.sending_credential_ceiling_reached";
+var CEILING_RELEASED_ACTION = "domain.sending_credential_ceiling_released";
+
+// How many rows of each kind one reading takes, and the most an operator
+// may ask for. Both actions are narrow, so a default this size covers a
+// credential that has been crossing its ceiling all morning, and the
+// answer says when a read came back full rather than presenting a
+// truncated list as the whole of it.
+var CEILING_TRAIL_DEFAULT_ROWS = 20;
+var CEILING_TRAIL_MAX_ROWS     = 500;
+
+// A whole number of one unit, converted into the milliseconds the
+// registry takes. The bounds are stated in the unit the operator wrote,
+// because a refusal quoting milliseconds is a refusal about a number
+// nobody typed.
+function _durationFrom(report, raw, name, low, high, perUnit) {
+  if (raw === undefined || raw === null) return { ms: undefined };
+  if (typeof raw !== "number" || !isFinite(raw) || Math.floor(raw) !== raw ||
+      raw < low || raw > high) {
+    return { code: report.error("--" + name + " takes a whole number between " + low +
+      " and " + high + ", and was given " + JSON.stringify(raw) + ".", 2) };
+  }
+  return { ms: perUnit(raw) };
+}
+
+// When a credential stops working. Absent means the registry's own
+// default, the word `never` means the operator has decided to watch this
+// one by hand, and anything else is a moment.
+function _expiresFrom(report, raw) {
+  if (raw === undefined || raw === null) return { value: undefined };
+  if (String(raw).trim().toLowerCase() === "never") return { value: null };
+  var moment = _momentFrom(report, raw, "expires");
+  if (moment.code !== undefined) return { code: moment.code };
+  return { value: moment.ms };
+}
+
+// What state a credential is in, in one word, read off the row rather
+// than off any flag. A record whose keyed binding no longer holds is its
+// own state and not a variety of live: the policy an operator would read
+// off it is gone, and `verify` refuses it.
+function _credentialState(record, nowMs) {
+  if (!record.bindingHolds) return "unreadable";
+  if (typeof record.revokedAt === "number") return "revoked";
+  if (typeof record.expiresAt === "number" && record.expiresAt <= nowMs) return "expired";
+  return "live";
+}
+
+// Where a credential's bounces are going, in one clause. The reading is
+// resolved on every read rather than stored, so this is the only place an
+// archived bounce mailbox shows up at all.
+function _returnPathClause(record) {
+  if (record.returnPathDeliverable === true) {
+    return "reaching " + record.bounceMailbox;
+  }
+  var lands = (record.returnPathDeliversTo || []).join(", ");
+  return "NOT reaching " + (record.bounceMailbox || "its mailbox") + ": " +
+    (record.returnPathReason || "unknown") +
+    (lands.length > 0 ? ", it lands at " + lands : ", it reaches no mailbox");
+}
+
+// The exposure the token has, said where the token is printed. It is the
+// mirror of the token file `zone token set` reads: there the risk is the
+// shell history and the process list, and here it is the terminal the
+// value was written to.
+function _tokenLines(token, id) {
+  return [
+    "  token: " + token,
+    "  That is the only time this token is printed. It cannot be recovered: the volume",
+    "  holds a digest of it and nothing here returns it again.",
+    "  It is not written to a file and not recorded in the audit trail, so this terminal",
+    "  and its scrollback are where it is exposed. Copy it into wherever the application",
+    "  keeps its secrets, then clear the scrollback.",
+    "  A token that has been lost is replaced with `blamepost credential rotate " + id +
+      " --reason <text>`.",
+  ];
+}
+
+function _credentialLines(record) {
+  var state = _credentialState(record, Date.now());
+  if (!record.bindingHolds) {
+    return [
+      record.id + "  " + state,
+      "  domain claimed: " + (record.storedDomain || "none recorded"),
+      "  This credential's stored policy does not match the keyed digest beside it, so this",
+      "  server cannot say which domain it speaks for or what it may send as, and `verify`",
+      "  refuses it. The row was edited on the volume, or written by something other than",
+      "  this server. Remove it with `blamepost credential remove " + record.id +
+        " --destroy --reason <text>`.",
+    ];
+  }
+  return [
+    record.id + "  " + state,
+    "  domain:          " + record.domain,
+    "  created:         " + _day(record.createdAt),
+    "  expires:         " + (record.expiresAt === null ? "never" : _day(record.expiresAt)),
+    "  last used:       " + (record.lastUsedAt === null ? "never" : _day(record.lastUsedAt)),
+    "  revoked:         " + (record.revokedAt === null ? "no" : _day(record.revokedAt)),
+    "  bounce mailbox:  " + record.bounceMailbox,
+    "  return path:     " + record.returnPath,
+    "                   " + _returnPathClause(record),
+    "  may not send as: " + (record.refusedLocalParts.length === 0
+      ? "nothing, so it may send as every address in " + record.domain
+      : record.refusedLocalParts.join(", ")),
+    "  ceilings:        " + record.maxMessages + " message(s) and " +
+      record.maxRecipients + " recipient(s) every " +
+      (record.windowMs / TIME.minutes(1)) + " minute(s)",
+    "  The counters those ceilings are measured against live in the process that is",
+    "  sending, so they are not readable from here and this command does not print them.",
+    "  `blamepost credential ceiling " + record.id + "` reads what the server recorded on",
+    "  the trail each time one of them was crossed.",
+  ];
+}
+
+// What the trail holds about one credential's ceiling, read as two narrow
+// queries rather than one wide one.
+//
+// Each query names an action, which is what keeps a busy trail from
+// pushing these rows off the end of a wider read: a credential's
+// crossings are rare beside its verifies, and a read of everything its
+// identifier appears on would return the verifies. The credential is
+// matched on the metadata each row carries rather than on the actor,
+// because the two actions disagree about the actor by design. A crossing
+// is filed against the credential that was refused; a release is filed
+// against the operator who lifted it, over the domain.
+//
+// `b.audit.query` files a row for every read of the trail, so this is
+// two rows per invocation and not one per action per credential. That is
+// the reason the whole answer is taken in one pass here instead of a
+// query behind each line that prints.
+async function _ceilingTrail(id, limit) {
+  async function rowsFor(action) {
+    var rows = await b.audit.query({ action: action, order: "desc", limit: limit });
+    return {
+      // Whether the read came back full. A truncated list of crossings is
+      // missing the OLDEST ones, which is where a credential that has
+      // been climbing all morning started, so the answer says so rather
+      // than reading as the complete account.
+      truncated: rows.length >= limit,
+      rows: rows.filter(function (row) {
+        var detail = _auditMetadata(row);
+        return detail.credentialId === id;
+      }),
+    };
+  }
+  return {
+    reached:  await rowsFor(CEILING_REACHED_ACTION),
+    released: await rowsFor(CEILING_RELEASED_ACTION),
+  };
+}
+
+// The metadata an audit row carries, as an object. A row whose metadata
+// is absent or is not an object answers as an empty one: this reads the
+// trail to print it, and a malformed row is a row that names no
+// credential rather than a reason to abandon the whole reading.
+function _auditMetadata(row) {
+  if (!row || typeof row.metadata !== "string" || row.metadata.length === 0) return {};
+  var parsed;
+  try { parsed = JSON.parse(row.metadata); }
+  catch (_e) { return {}; }
+  return (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed))
+    ? parsed : {};
+}
+
+// A count off an audit row, or a named absence. The numbers on these rows
+// are written by the layer that files them and read here, which is two
+// places for a field name to be spelled, so a row that carries the name
+// this reader does not expect prints as a count nobody recorded rather
+// than as the word `undefined` beside a real moment.
+function _recordedCount(value) {
+  return typeof value === "number" && isFinite(value) ? String(value) : "an unrecorded number of";
+}
+
+// One recorded crossing, in the line an operator reads. Which of the two
+// ceilings was crossed is named, because they are set for different
+// reasons and raising the wrong one changes nothing.
+function _ceilingReachedLine(row) {
+  var detail = _auditMetadata(row);
+  return "  " + _moment(Number(row.recordedAt)) + "  " +
+    (detail.recipientsExceeded === true ? "recipient" : "message") + " ceiling  " +
+    "sent " + _recordedCount(detail.messages) + " message(s) to " +
+    _recordedCount(detail.recipients) + " recipient(s) against ceilings of " +
+    _recordedCount(detail.maxMessages) + " and " + _recordedCount(detail.maxRecipients);
+}
+
+function _ceilingReleasedLine(row) {
+  var detail = _auditMetadata(row);
+  return "  " + _moment(Number(row.recordedAt)) + "  window given back  " +
+    "held " + _recordedCount(detail.messages) + " message(s) and " +
+    _recordedCount(detail.recipients) + " recipient(s)" +
+    (row.reason ? "  reason: " + _headerText(row.reason, "") : "");
+}
+
+async function cmdCredential(flags, positionals) {
+  var report = _reporter("credential");
+  var verb = positionals[0];
+  if (!verb) return report.usage(USAGE_CREDENTIAL);
+  var unread = _refuseUnread(report, "credential", verb, flags, positionals);
+  if (unread !== 0) return unread;
+  if (!Object.prototype.hasOwnProperty.call(VERB_SURFACE.credential, verb)) {
+    return report.usage(USAGE_CREDENTIAL);
+  }
+  if (!positionals[1]) return report.usage(USAGE_CREDENTIAL);
+
+  // Every verb that changes a credential wants a reason, and the refusal
+  // arrives before a volume is opened so an operator who forgot one is
+  // not told about a server that is running instead.
+  var changes = ["add", "rotate", "revoke", "remove", "refusals"];
+  if (changes.indexOf(verb) !== -1 && !flags.reason) {
+    return report.error("give --reason. A sending credential can send as every address in a " +
+      "hosted domain, so issuing, rotating, withdrawing or widening one is an operator " +
+      "action, and a row with no reason answers nothing later about why it happened.", 2);
+  }
+
+  var domain = null;
+  if (verb === "list" || verb === "bounces" || verb === "add") {
+    var shape = _readDomainArg(report, positionals[1]);
+    if (shape.code !== undefined) return shape.code;
+    domain = shape.domain;
+  }
+
+  var expires = { value: undefined };
+  var window = { ms: undefined };
+  var grace = { ms: undefined };
+  var localParts = _messageIds(flags["local-part"]);
+
+  if (verb === "add") {
+    if (!flags["bounce-to"]) {
+      return report.error("give --bounce-to. A credential has to name a mailbox on this " +
+        "server for its bounces, and it has to exist and be in service before the credential " +
+        "is written: one pointing at nothing discards every bounce at the door while the " +
+        "application goes on sending, and nobody is told.", 2);
+    }
+    expires = _expiresFrom(report, flags.expires);
+    if (expires.code !== undefined) return expires.code;
+    window = _durationFrom(report, flags["window-minutes"], "window-minutes",
+      MIN_WINDOW_MINUTES, MAX_WINDOW_MINUTES, TIME.minutes);
+    if (window.code !== undefined) return window.code;
+  }
+
+  if (verb === "rotate") {
+    grace = _durationFrom(report, flags["grace-hours"], "grace-hours",
+      0, MAX_GRACE_HOURS, TIME.hours);
+    if (grace.code !== undefined) return grace.code;
+  }
+
+  // Refused at the argument rather than carried into the query, so a
+  // number the trail reader cannot use is a refusal naming the bounds an
+  // operator typed against instead of a reading over a row count nobody
+  // asked for.
+  var trailRows = CEILING_TRAIL_DEFAULT_ROWS;
+  if (verb === "ceiling" && flags.limit !== undefined) {
+    if (typeof flags.limit !== "number" || !isFinite(flags.limit) ||
+        Math.floor(flags.limit) !== flags.limit ||
+        flags.limit < 1 || flags.limit > CEILING_TRAIL_MAX_ROWS) {
+      return report.error("--limit takes a whole number of rows between 1 and " +
+        CEILING_TRAIL_MAX_ROWS + ".", 2);
+    }
+    trailRows = flags.limit;
+  }
+
+  if (verb === "remove" && flags.destroy !== true) {
+    return report.error("give --destroy. Removing a credential takes its row off the volume, " +
+      "and the identifier on every audit row it produced stops resolving to anything. To " +
+      "stop the credential working and keep the row, run `blamepost credential revoke " +
+      positionals[1] + " --reason <text>` instead.", 2);
+  }
+
+  // A refusal list is replaced whole, so a call that names none is
+  // ambiguous between "leave it alone" and "refuse nobody", and the
+  // second is a widening to every address in the domain. The two are
+  // separated rather than guessed at, and the widening is the one that
+  // takes a confirmation: what it opens up is not on the command line.
+  if (verb === "refusals") {
+    if (flags.clear === true && localParts.length > 0) {
+      return report.error("--clear and --local-part ask for different lists. --clear leaves " +
+        "the credential refusing nothing; --local-part names the complete list it refuses. " +
+        "Give one or the other.", 2);
+    }
+    if (flags.clear !== true && localParts.length === 0) {
+      return report.error("give --local-part, naming the complete list this credential may " +
+        "not send as, or --clear to leave it refusing nothing. The list is replaced rather " +
+        "than added to, so a call naming none of it would be a widening nobody wrote down.",
+      2);
+    }
+    if (flags.clear === true && flags.confirm !== true) {
+      return report.error("give --confirm. Clearing the list leaves this credential able to " +
+        "send as every address in its domain, postmaster and abuse among them, and that set " +
+        "is not on the command line. Name the addresses to keep refusing with --local-part " +
+        "instead, or confirm the widening.", 2);
+    }
+  }
+
+  var config = _configFrom(flags);
+  var store = await _openForReporting(config, "credential", verb);
+  // The registry the open already built, rather than a second one
+  // composed here. The ceiling counters live in the instance, so two of
+  // them in one process count a credential's traffic separately and
+  // neither reaches the ceiling the operator set.
+  var registry = store.credentials;
+  try {
+    if (verb === "list") {
+      var rows = await registry.list({
+        domain:         domain,
+        includeRevoked: flags["include-revoked"] === true,
+        includeExpired: flags["include-expired"] === true,
+      });
+      var listedAt = Date.now();
+      return _emit(report, flags, rows, rows.length === 0
+        ? ["No sending credentials for " + domain + "." +
+          (flags["include-revoked"] || flags["include-expired"] ? "" :
+            " Revoked and expired ones are left out; --include-revoked and --include-expired" +
+            " add them.")]
+        : [_column("id", 20) + _column("state", 12) + _column("created", 12) +
+            _column("expires", 12) + "bounces"]
+          .concat(rows.map(function (row) {
+            return _column(row.id, 20) +
+              _column(_credentialState(row, listedAt), 12) +
+              _column(_day(row.createdAt), 12) +
+              _column(row.expiresAt === null ? "never" : _day(row.expiresAt), 12) +
+              _returnPathClause(row);
+          })));
+    }
+
+    if (verb === "show") {
+      var one = await registry.show(positionals[1]);
+      if (!one) {
+        return report.error("no sending credential with id " +
+          JSON.stringify(positionals[1]) + " is on this volume. `blamepost credential list " +
+          "<domain>` prints the ids one domain holds.");
+      }
+      return _emit(report, flags, one, _credentialLines(one));
+    }
+
+    if (verb === "bounces") {
+      var reported = await registry.returnPathReport({ domain: domain });
+      return _emit(report, flags, reported, [
+        domain + " returns its bounces to " + reported.returnPathAddress + ".",
+        "  " + _plural(reported.credentials, "live credential", "live credentials") +
+          " use it, each with a tag of its own so the mailbox can tell whose bounce it is.",
+      ].concat(reported.unreachable.length === 0
+        ? ["  Every one of them is receiving its bounces."]
+        : reported.unreachable.map(function (entry) {
+          return "  " + entry.credentialId + " named " + entry.bounceMailbox +
+            "; " + entry.returnPath + " " +
+            (entry.returnPathDeliversTo.length === 0
+              ? "reaches no mailbox"
+              : "lands at " + entry.returnPathDeliversTo.join(", ")) +
+            " (" + entry.returnPathReason + ")";
+        }).concat([
+          "  Each of those credentials is still sending, and every bounce it earns is",
+          "  refused at the door. Put the mailbox back in service, or issue a replacement",
+          "  credential naming one that is.",
+        ])));
+    }
+
+    if (verb === "ceiling") {
+      // The reading refuses a credential this server cannot read rather
+      // than answering about ceilings taken off a row somebody edited, so
+      // the refusal is carried across as itself and the trail is not read
+      // for an identifier that names nothing.
+      var reading;
+      try {
+        reading = await registry.counters.read(positionals[1]);
+      } catch (readErr) {
+        return report.error((readErr && readErr.message) || String(readErr));
+      }
+      b.audit.registerNamespace(AUDIT_NAMESPACE);
+      // The trail is flushed first for the reason `audit read` flushes
+      // it: a crossing recorded moments ago is still in the buffer, and
+      // an answer taken without this reports the incident an operator is
+      // looking at as one that never happened.
+      await b.audit.flush();
+      var trail = await _ceilingTrail(positionals[1], trailRows);
+      var answer = {
+        reading:  reading,
+        reached:  trail.reached.rows,
+        released: trail.released.rows,
+      };
+      return _emit(report, flags, answer, [
+        reading.credentialId + "  " + reading.domain,
+        "  ceilings:    " + reading.maxMessages + " message(s) and " +
+          reading.maxRecipients + " recipient(s) every " +
+          (reading.windowMs / TIME.minutes(1)) + " minute(s)",
+        "  window now:  " + reading.messages + " message(s) and " +
+          reading.recipients + " recipient(s)" +
+          (reading.exceeded ? ", which is at or past a ceiling" : ", which is inside both"),
+        "  This command counted nothing against that window. The counters a running server",
+        "  measures against live in the process that is sending, and this command cannot",
+        "  open the volume while the server holds it, so the numbers above are the ones the",
+        "  next start begins from rather than the ones that refused a message. The rows",
+        "  below are what the server recorded while it was running.",
+        "",
+      ].concat(trail.reached.rows.length === 0
+        ? ["No message has been refused for crossing a ceiling on this credential."]
+        : [_plural(trail.reached.rows.length, "crossing", "crossings") + ", newest first" +
+            (trail.reached.truncated ? " (the read came back full, so the oldest are " +
+              "missing; --limit takes more)" : "")]
+          .concat(trail.reached.rows.map(_ceilingReachedLine)))
+        .concat(trail.released.rows.length === 0
+          ? []
+          : [""].concat([_plural(trail.released.rows.length,
+            "window given back", "windows given back") + ", newest first" +
+            (trail.released.truncated ? " (the read came back full)" : "")])
+            .concat(trail.released.rows.map(_ceilingReleasedLine)))
+        .concat(trail.reached.rows.length === 0 ? [] : [
+          "",
+          "  A crossing defers the message rather than losing it. The refusal is 452 4.5.3",
+          "  on submission and 429 over the browser port, and the window is rolling, so it",
+          "  drains without anything being done to it. A credential crossing a ceiling it",
+          "  never used to reach is the shape a stolen one makes. Replace its secret with",
+          "  `blamepost credential rotate " + reading.credentialId + " --reason <text>`.",
+        ]));
+    }
+
+    if (verb === "add") {
+      var made = await registry.create({
+        domain:        domain,
+        bounceMailbox: flags["bounce-to"],
+        reason:        flags.reason,
+        expiresAt:     expires.value,
+        maxMessages:   flags["max-messages"],
+        maxRecipients: flags["max-recipients"],
+        windowMs:      window.ms,
+      });
+      return _emit(report, flags, made, [
+        "Issued " + made.id + " for " + made.domain + ".",
+      ].concat(_tokenLines(made.token, made.id)).concat([
+        "",
+        "  return path: " + made.returnPath,
+        "  Put that in the envelope sender of everything this credential sends, so its",
+        "  bounces come back to " + made.bounceMailbox + " rather than to an address in " +
+          made.domain + " that holds no mailbox.",
+        "  expires: " + (made.expiresAt === null ? "never" : _day(made.expiresAt)),
+        "  may not send as: " + (made.refusedLocalParts.length === 0
+          ? "nothing"
+          : made.refusedLocalParts.join(", ")),
+        "  ceilings: " + made.maxMessages + " message(s) and " + made.maxRecipients +
+          " recipient(s) every " + (made.windowMs / TIME.minutes(1)) + " minute(s)",
+      ]));
+    }
+
+    if (verb === "rotate") {
+      var rotated = await registry.rotate({
+        id:      positionals[1],
+        reason:  flags.reason,
+        graceMs: grace.ms,
+      });
+      return _emit(report, flags, rotated, [
+        "Rotated " + rotated.id + " for " + (rotated.domain || "an unreadable domain") + ".",
+      ].concat(_tokenLines(rotated.token, rotated.id)).concat([
+        "",
+        rotated.priorSecretUntil === null
+          ? "  The previous secret stopped working now. Nothing named a window, which is the" +
+            " right answer when the reason to rotate is that somebody else holds the old one."
+          : "  The previous secret keeps working until " +
+            new Date(rotated.priorSecretUntil).toISOString() + ". A verdict produced by it" +
+            " says so, so you can see whether the application has finished migrating.",
+        "  The ceilings are not reset. Volume already sent is volume already sent.",
+      ]));
+    }
+
+    if (verb === "revoke") {
+      var stopped = await registry.revoke({ id: positionals[1], reason: flags.reason });
+      return _emit(report, flags, stopped, [
+        (stopped.revoked
+          ? "Revoked " + stopped.id
+          : "Credential " + stopped.id + " was already revoked") +
+          " for " + (stopped.domain || "an unreadable domain") + ".",
+        "  Its row is kept, so the identifier on every audit row it produced still resolves.",
+        stopped.returnPathAliasRemoved
+          ? "  The domain's return path alias went with it: this was the last credential using" +
+            " the one this server wrote."
+          : "  The domain's return path alias is left in place, because it is shared with the" +
+            " domain's other credentials or was not written by this server.",
+        "  `blamepost credential remove " + stopped.id + " --destroy --reason <text>` takes" +
+          " the row as well, which is rarely what you want.",
+      ]);
+    }
+
+    if (verb === "remove") {
+      var erased = await registry.remove({
+        id: positionals[1], destroy: true, reason: flags.reason,
+      });
+      return _emit(report, flags, erased, [
+        "Erased " + erased.id + " for " + (erased.domain || "an unreadable domain") + ".",
+        "  Every audit row naming that identifier now names something nothing can look up.",
+        erased.returnPathAliasRemoved
+          ? "  The domain's return path alias went with it: this was the last credential using" +
+            " the one this server wrote."
+          : "  The domain's return path alias is left in place, because it is shared with the" +
+            " domain's other credentials or was not written by this server.",
+      ]);
+    }
+
+    // refusals
+    var narrowed = await registry.setRefusedLocalParts({
+      id:         positionals[1],
+      localParts: flags.clear === true ? [] : localParts,
+      reason:     flags.reason,
+    });
+    return _emit(report, flags, narrowed, narrowed.refusedLocalParts.length === 0
+      ? [narrowed.id + " may now send as every address in " + narrowed.domain + ".",
+        "  Nothing on this credential refuses postmaster or abuse any more."]
+      : [narrowed.id + " may not send as: " + narrowed.refusedLocalParts.join(", ") + ".",
+        "  Every other local part in " + narrowed.domain + " is one it may write as."]);
+  } finally {
+    // Closing the store is what gives the registry's counter cache back,
+    // because the store is what built it. A timer left armed holds the
+    // event loop and the command never exits.
+    await store.close();
+  }
+}
+
+// ---- reports ----------------------------------------------------------------
+
+// The period a reporting verb reads when the operator names neither end.
+// A DMARC record asks receivers for a report a day, so thirty of them is
+// a month of counting.
+var REPORTS_WINDOW_MS = TIME.days(30);
+
+// How many rows each list inside one answer prints when the operator
+// asks for no number.
+var REPORTS_DEFAULT_LIMIT = 10;
+
+// How many rows one answer reads before it stops and says that it
+// stopped. A period holds a few reports per reporter per day and one
+// record per sending address inside each, so both sit far above an
+// ordinary volume, and what they bound is a peer deciding how much
+// memory a listing costs.
+var REPORTS_MAX_REPORT_ROWS = 5000;
+var REPORTS_MAX_RECORD_ROWS = 20000;
+
+// The longest report id this carries to the database. An id is a row
+// identifier this server minted, so a longer one is a mistyped line
+// rather than a row that exists.
+var REPORT_ID_MAX_CHARS = 200;
+
+// The range a `Date` holds. A moment outside it prints as the number it
+// is rather than throwing on the way to the screen: it arrived on a
+// command line, and a listing that dies on it says less than one that
+// shows it.
+var MAX_MOMENT_MS = 8640000000000000;
+
+function _moment(ms) {
+  if (typeof ms !== "number" || !isFinite(ms) || Math.abs(ms) > MAX_MOMENT_MS) {
+    return String(ms);
+  }
+  return new Date(ms).toISOString();
+}
+
+// The range a reporting verb reads over. Either end may be given and the
+// other is derived, so `--from` alone reads from that moment to now and
+// `--to` alone reads the thirty days before it. A range whose start is
+// after its end is refused rather than answered, because the answer is
+// an empty reading and an empty reading is what a domain nobody reports
+// on looks like.
+function _reportsWindow(report, flags) {
+  var until = Date.now();
+  if (flags.to !== undefined) {
+    var end = _momentFrom(report, flags.to, "to");
+    if (end.code !== undefined) return { code: end.code };
+    until = end.ms;
+  }
+  var since = until - REPORTS_WINDOW_MS;
+  if (flags.from !== undefined) {
+    var start = _momentFrom(report, flags.from, "from");
+    if (start.code !== undefined) return { code: start.code };
+    since = start.ms;
+  }
+  if (since > until) {
+    return { code: report.error("--from is " + _moment(since) + " and --to is " +
+      _moment(until) + ", so the range covers no time at all and every domain would " +
+      "answer as one nobody reports on.", 2) };
+  }
+  return { since: since, until: until };
+}
+
+// How many rows each list prints. The shape is checked here and the
+// ceiling is not: the two listings this verb reads hold their own bound
+// and refuse above it in their own words, so a number written here would
+// be a second copy of theirs that stops agreeing the day one of them
+// moves. A number that is not a whole one above zero never reaches them
+// as a bound at all, which is why that half is checked.
+function _reportsLimit(report, flags) {
+  if (flags.limit === undefined) return { limit: REPORTS_DEFAULT_LIMIT };
+  if (typeof flags.limit !== "number" || !Number.isInteger(flags.limit) || flags.limit < 1) {
+    return { code: report.error("--limit is " + JSON.stringify(String(flags.limit)) +
+      ", and it has to be a whole number of rows above zero.", 2) };
+  }
+  return { limit: flags.limit };
+}
+
+// The stored aggregate reports whose reporting period overlaps a range.
+// The two comparisons are the pair the store's own reading uses, so a
+// report is in this answer exactly when its records are in that one.
+function _reportRowQuery(domain, since, until) {
+  var query = b.db.from(storeTables.DMARC_REPORTS)
+    .where("windowEnd", ">=", since)
+    .where("windowBegin", "<=", until);
+  return domain === null ? query : query.where("policyDomain", "=", domain);
+}
+
+// One stored report as an answer carries it. `counted` is published
+// beside the verdict rather than left for a reader to derive, because
+// deriving it means knowing which of the recorded verdicts is the one
+// that counts, and a reader that guesses wrong reads an excluded report
+// as evidence.
+//
+// `organization` is the registered domain the carrier passed DMARC for,
+// and null on a report that counts toward no organization. `orgName` is
+// the name the report gave itself, which whoever sent the report wrote.
+function _reportRow(row) {
+  return {
+    id:             row._id,
+    organization:   _recordedOrganization(row),
+    orgName:        row.orgName,
+    reportId:       row.reportId,
+    windowBegin:    row.windowBegin,
+    windowEnd:      row.windowEnd,
+    receivedAt:     row.receivedAt,
+    records:        row.storedCount,
+    refusedRecords: row.refusedCount,
+    evidence:       row.evidence,
+    counted:        row.evidence === storeTables.REPORT_EVIDENCE_VERIFIED,
+  };
+}
+
+// The organization a report row counts toward, or null when the row
+// recorded none.
+function _recordedOrganization(row) {
+  var value = row.verifiedOrgDomain;
+  return (typeof value === "string" && value !== storeTables.REPORT_ORGANIZATION_NONE)
+    ? value
+    : null;
+}
+
+// One domain's reading: the counting the store answers with, the reports
+// behind it, and the sending addresses that failed both alignments.
+//
+// `rows` is that domain's report rows, read once for every domain at the
+// call site so a listing over twenty domains is one query rather than
+// twenty.
+async function _domainReading(store, domain, range, limit, wide, rows) {
+  var windows = store.reports.rollup({
+    domain:                 domain,
+    since:                  range.since,
+    until:                  range.until,
+    includeUnauthenticated: wide,
+  });
+
+  var counted = 0;
+  var aligned = 0;
+  var unauthenticated = 0;
+  windows.forEach(function (entry) {
+    counted += entry.counted;
+    aligned += entry.aligned;
+    unauthenticated += entry.unauthenticated;
+  });
+
+  // The two listings the store answers, rather than a second grouping
+  // over the same rows here. Both apply the same evidence condition the
+  // counting above applies, so the addresses and the organizations
+  // printed are the ones the totals were computed over, and the sender
+  // listing records that somebody unsealed sending addresses, which a
+  // grouping written here would not.
+  var failing = await store.reports.failingSources({
+    domain:                 domain,
+    since:                  range.since,
+    until:                  range.until,
+    limit:                  limit,
+    includeUnauthenticated: wide,
+  });
+  var heard = store.reports.reporters({
+    domain:                 domain,
+    since:                  range.since,
+    until:                  range.until,
+    limit:                  limit,
+    includeUnauthenticated: wide,
+  });
+
+  // What the report rows say about themselves, which neither listing
+  // above answers: the verdict each one carries, and the ones that
+  // stored no record at all.
+  var verdicts = Object.create(null);
+  var storingNothing = 0;
+  rows.forEach(function (row) {
+    verdicts[row.evidence] = (verdicts[row.evidence] || 0) + 1;
+    if (row.storedCount === 0) storingNothing += 1;
+  });
+
+  return {
+    domain:                  domain,
+    hosted:                  store.domains.get(domain) !== null,
+    since:                   range.since,
+    until:                   range.until,
+    includesUnauthenticated: wide,
+    counted:                 counted,
+    aligned:                 aligned,
+    unaligned:               counted - aligned,
+    // The volume the three numbers above leave out, published beside
+    // them on both readings. A total that is quietly short of what
+    // arrived is the one an operator acts on without knowing to ask.
+    unauthenticated:              unauthenticated,
+    failingSourceCount:           failing.total,
+    failingSourcesShown:          failing.sources,
+    failingSourcesTruncated:      failing.truncated,
+    failingSourcesUnauthenticated: failing.unauthenticated,
+    organizationCount:            heard.total,
+    organizations:                heard.reporters,
+    organizationsTruncated:       heard.truncated,
+    unauthenticatedReports:       heard.unauthenticatedReports,
+    unattributedReports:          heard.unattributedReports,
+    windows:                      windows,
+    reports:                      rows.length,
+    reportsShown:                 rows.slice(0, limit).map(_reportRow),
+    reportsStoringNothing:        storingNothing,
+    evidence:                     verdicts,
+  };
+}
+
+// What one domain's reading looks like at a terminal, in the order the
+// question is asked: how much mail, how much of it aligned, what was
+// left out of that arithmetic, who is failing, and who reported at all.
+function _domainLines(reading) {
+  var lines = [reading.domain + (reading.hosted ? "" : "  (this server no longer hosts it)")];
+  lines.push("  " + _moment(reading.since) + " to " + _moment(reading.until));
+
+  if (reading.reports === 0) {
+    lines.push("  No aggregate report covering this period has arrived for this domain.");
+    lines.push("  A domain nobody reports on and a domain nobody spoofs read the same here, so");
+    lines.push("  this is the absence rather than a clean bill. Check the rua= address in the");
+    lines.push("  domain's DMARC record, and that mail sent to it reaches this server.");
+    return lines;
+  }
+
+  lines.push("  counted " + reading.counted + "   aligned " + reading.aligned +
+    "   unaligned " + reading.unaligned);
+  if (reading.includesUnauthenticated) {
+    lines.push("  This reading counts the reports nobody authenticated as well, so nothing");
+    lines.push("  above rests on the carrier having been authenticated: " +
+      _plural(reading.unauthenticated, "message", "messages") + " of that total");
+    lines.push("  came from a report anybody who can send mail to a published reporting");
+    lines.push("  address could have written.");
+  } else if (reading.unauthenticated > 0) {
+    lines.push("  " + _plural(reading.unauthenticated, "message", "messages") +
+      " sit outside that arithmetic, in reports whose carrier this server could not");
+    lines.push("  authenticate. Anybody who can send mail to a published reporting address can");
+    lines.push("  write one, so they are counted here and nowhere else. Fold them in with");
+    lines.push("  `blamepost reports list --include-unauthenticated`.");
+  }
+
+  if (reading.failingSourceCount === 0) {
+    lines.push("  No sending address failed both alignments.");
+  } else {
+    lines.push("  " + _plural(reading.failingSourceCount, "sending address",
+      "sending addresses") + " failed both alignments, largest first:");
+    reading.failingSourcesShown.forEach(function (source) {
+      lines.push("    " + _column(source.readable
+        ? source.sourceIp
+        : "(sealed, could not be opened)", 34) +
+        _column(source.messages + " failed", 14) +
+        _column(source.aligned + " aligned", 14) +
+        "last seen " + _moment(source.lastSeen));
+    });
+    if (reading.failingSourcesTruncated) {
+      lines.push("    " + (reading.failingSourceCount - reading.failingSourcesShown.length) +
+        " more, not shown. Raise --limit to see them.");
+    }
+  }
+
+  lines.push("  " + _plural(reading.organizationCount, "organization", "organizations") +
+    " reported, each named by the registered domain its reports passed DMARC for:");
+  reading.organizations.forEach(function (org) {
+    lines.push("    " + _column(org.organization === null
+      ? "(no authenticated domain)"
+      : org.organization, 34) +
+      _column(org.reports + " report(s)", 14) +
+      _column(org.records + " record(s)", 14) +
+      "most recent " + _moment(org.newestAt));
+    lines.push("      the name its reports give: " + _headerText(org.orgName, "(unnamed)") +
+      (org.names > 1
+        ? " (" + (org.names - 1) + " other name" + (org.names === 2 ? "" : "s") +
+          " also used)"
+        : ""));
+  });
+  if (reading.organizationsTruncated) {
+    lines.push("    " + (reading.organizationCount - reading.organizations.length) +
+      " more, not shown. Raise --limit to see them.");
+  }
+  if (reading.unauthenticatedReports > 0) {
+    lines.push("  " + _plural(reading.unauthenticatedReports, "report", "reports") +
+      " arrived from a carrier this server could not authenticate" +
+      (reading.includesUnauthenticated
+        ? ", and the organizations"
+        : ", and no organization"));
+    lines.push(reading.includesUnauthenticated
+      ? "  above include whoever those name."
+      : "  is listed above on the strength of one.");
+  }
+  if (reading.unattributedReports > 0) {
+    lines.push("  " + _plural(reading.unattributedReports, "report", "reports") +
+      " in the totals arrived before this server recorded the domain a report passed");
+    lines.push("  DMARC for. A report like that counts toward no organization.");
+  }
+
+  lines.push("  " + _plural(reading.reports, "aggregate report", "aggregate reports") +
+    ", newest first:");
+  reading.reportsShown.forEach(function (row) {
+    lines.push("    " + _column(row.id, 38) +
+      _column(row.organization === null
+        ? "(no authenticated domain)"
+        : row.organization, 32) +
+      _column(row.records + " record(s)", 14) +
+      _column(row.refusedRecords + " refused", 12) +
+      (row.counted ? "counted" : "not counted: " + row.evidence));
+  });
+  if (reading.reports > reading.reportsShown.length) {
+    lines.push("    " + (reading.reports - reading.reportsShown.length) +
+      " more, not shown. Raise --limit to see them.");
+  }
+  if (reading.reportsStoringNothing > 0) {
+    lines.push("  " + _plural(reading.reportsStoringNothing, "report", "reports") +
+      " stored no record at all, so nothing in them reaches the counting above.");
+    lines.push("  `blamepost reports show <id>` says how many records each one carried and how");
+    lines.push("  many were refused when it was read.");
+  }
+  return lines;
+}
+
+// One report as `show` prints it, and the records it carried.
+function _reportLines(row, records, recordTotal, shown) {
+  var lines = [
+    "Aggregate report " + row._id,
+    "  about " + row.policyDomain + ", covering " + _moment(row.windowBegin) + " to " +
+      _moment(row.windowEnd),
+    "  counted as the organization " + (_recordedOrganization(row) === null
+      ? "(none: no authenticated domain was recorded for it)"
+      : _recordedOrganization(row) + ", the registered domain its carrier passed DMARC for"),
+    "  the name the report gives itself: " + _headerText(row.orgName, "(unnamed)") +
+      ", report id " + _headerText(row.reportId, "(unnamed)"),
+    "  its contact mailbox: " + (row.reportEmail || "(none given)"),
+    "  arrived here " + _moment(row.receivedAt),
+    "  policy published in the zone at the time: p=" + (row.requestedPolicy || "(none)") +
+      " sp=" + (row.subdomainPolicy || "(none)") +
+      " adkim=" + (row.alignmentDkim || "(none)") +
+      " aspf=" + (row.alignmentSpf || "(none)") +
+      " pct=" + (row.samplePercent === null || row.samplePercent === undefined
+        ? "(none)" : row.samplePercent) +
+      " fo=" + (row.failureOptions || "(none)"),
+    "  " + _plural(row.storedCount, "record", "records") + " stored, " +
+      row.refusedCount + " refused when the report was read",
+  ];
+
+  if (row.evidence === storeTables.REPORT_EVIDENCE_VERIFIED) {
+    lines.push("  This server authenticated the message that carried it, so it counts toward");
+    lines.push("  the reading `blamepost reports list` prints.");
+  } else {
+    lines.push("  This server did not authenticate the message that carried it: " +
+      row.evidence + ".");
+    lines.push("  It is stored and it is not counted. A report is a document anybody who can");
+    lines.push("  send mail to a published reporting address may write, so moving a policy on");
+    lines.push("  one moves the policy for whoever wrote it.");
+  }
+
+  if (records.length === 0) {
+    lines.push("");
+    lines.push("  It carried no record this server could store.");
+    return lines;
+  }
+
+  lines.push("");
+  lines.push("  " + _column("sending address", 40) + _column("messages", 10) +
+    _column("disposition", 14) + _column("dkim", 8) + _column("spf", 8) + "header from");
+  records.forEach(function (record) {
+    // The sending address is a sealed cell. A row whose cell will not
+    // open still counts messages against a disposition, and printing the
+    // absence rather than the word `null` is what says which of the two
+    // an operator is looking at.
+    lines.push("  " + _column(typeof record.sourceIp === "string" && record.sourceIp.length > 0
+      ? record.sourceIp
+      : "(sealed, could not be opened)", 40) +
+      _column(String(record.messageCount), 10) +
+      _column(record.disposition, 14) +
+      _column(record.alignedDkim, 8) +
+      _column(record.alignedSpf, 8) +
+      (record.headerFrom || "(none)"));
+  });
+  if (recordTotal > shown) {
+    lines.push("  " + (recordTotal - shown) +
+      " more record(s), not shown. Raise --limit to see them.");
+  }
+  return lines;
+}
+
+async function cmdReports(flags, positionals) {
+  var report = _reporter("reports");
+  var verb = positionals[0];
+  if (!verb) return report.usage(USAGE_REPORTS);
+  var unread = _refuseUnread(report, "reports", verb, flags, positionals);
+  if (unread !== 0) return unread;
+  if (verb !== "list" && verb !== "show" && verb !== "forget") {
+    return report.usage(USAGE_REPORTS);
+  }
+  var config = _configFrom(flags);
+
+  if (verb === "forget") {
+    return await _cmdReportsForget(report, config, flags, positionals);
+  }
+
+  var limitRead = _reportsLimit(report, flags);
+  if (limitRead.code !== undefined) return limitRead.code;
+  var limit = limitRead.limit;
+
+  if (verb === "show") {
+    return await _cmdReportsShow(report, config, flags, positionals, limit);
+  }
+
+  var windowRead = _reportsWindow(report, flags);
+  if (windowRead.code !== undefined) return windowRead.code;
+  var range = { since: windowRead.since, until: windowRead.until };
+
+  var wanted = null;
+  if (flags.domain !== undefined) {
+    var shape = _readDomainArg(report, flags.domain);
+    if (shape.code !== undefined) return shape.code;
+    wanted = shape.domain;
+  }
+
+  var store = await _openForReporting(config, "reports", "list");
+  try {
+    if (wanted !== null && store.domains.get(wanted) === null &&
+        _reportRowQuery(wanted, 0, MAX_MOMENT_MS).count() === 0) {
+      var hosted = store.domains.list().map(function (row) { return row.domain; });
+      return report.error("this server does not host " + wanted + " and holds no report " +
+        "about it, so there is nothing to read. Hosted domains: " +
+        (hosted.length
+          ? hosted.join(", ")
+          : "none. Add one with `blamepost domain add <domain>`."), 2);
+    }
+
+    var total = _reportRowQuery(wanted, range.since, range.until).count();
+    var rows = _reportRowQuery(wanted, range.since, range.until)
+      .orderBy("receivedAt", "desc").limit(REPORTS_MAX_REPORT_ROWS).all();
+
+    // Every domain worth an answer: the ones this server hosts, so a
+    // domain nobody has reported on still gets a line saying so, and the
+    // ones the rows name, so a domain that was removed while its reports
+    // were still on the volume is not silently dropped.
+    var byDomain = Object.create(null);
+    rows.forEach(function (row) {
+      if (!byDomain[row.policyDomain]) byDomain[row.policyDomain] = [];
+      byDomain[row.policyDomain].push(row);
+    });
+    var names = [];
+    if (wanted !== null) names.push(wanted);
+    else {
+      store.domains.list().forEach(function (row) {
+        if (names.indexOf(row.domain) === -1) names.push(row.domain);
+      });
+      Object.keys(byDomain).forEach(function (name) {
+        if (names.indexOf(name) === -1) names.push(name);
+      });
+    }
+    names.sort();
+
+    var wide = flags["include-unauthenticated"] === true;
+    var readings = [];
+    for (var n = 0; n < names.length; n += 1) {
+      readings.push(await _domainReading(store, names[n], range, limit, wide,
+        byDomain[names[n]] || []));
+    }
+
+    var lines = [];
+    if (readings.length === 0) {
+      lines.push("This server hosts no domain and holds no report, so there is nothing to");
+      lines.push("read. Add a domain with `blamepost domain add <domain>` and publish its");
+      lines.push("DMARC record with an rua= address that reaches this server.");
+    }
+    readings.forEach(function (reading, index) {
+      if (index > 0) lines.push("");
+      _domainLines(reading).forEach(function (line) { lines.push(line); });
+    });
+    if (total > rows.length) {
+      lines.push("");
+      lines.push("Read the newest " + rows.length + " of " + total + " report(s) in this " +
+        "range. Narrow it with --from and --to for an answer over all of them.");
+    }
+    return _emit(report, flags, readings, lines);
+  } finally {
+    await store.close();
+  }
+}
+
+async function _cmdReportsShow(report, config, flags, positionals, limit) {
+  if (positionals[1] === undefined) return report.usage(USAGE_REPORTS);
+  var wanted = String(positionals[1]).trim();
+  if (wanted.length === 0 || wanted.length > REPORT_ID_MAX_CHARS) {
+    return report.error("give the id of one aggregate report. `blamepost reports list` " +
+      "prints them, and an id is a row identifier this server minted rather than the " +
+      "identifier the reporting organization put in its own report.", 2);
+  }
+
+  var store = await _openForReporting(config, "reports", "show");
+  try {
+    var row = b.db.from(storeTables.DMARC_REPORTS).where({ _id: wanted }).first();
+    if (!row) {
+      return report.error("no aggregate report on this volume has the id " +
+        JSON.stringify(wanted) + ". `blamepost reports list` prints the ids it holds, and a " +
+        "report is destroyed once its retention window passes.", 2);
+    }
+    var recordTotal = b.db.from(storeTables.DMARC_RECORDS)
+      .where({ reportRowId: row._id }).count();
+    // Bounded by the read ceiling as well as by the flag. Every record
+    // row is unsealed on the way out, so a request for a hundred
+    // thousand of them is a request to hold a hundred thousand sending
+    // addresses in memory at once, and what was not printed is counted
+    // below rather than dropped.
+    var records = b.db.from(storeTables.DMARC_RECORDS)
+      .where({ reportRowId: row._id })
+      .orderBy("messageCount", "desc")
+      .limit(Math.min(limit, REPORTS_MAX_RECORD_ROWS)).all();
+    return _emit(report, flags, {
+      report:  _reportRow(row),
+      policy: {
+        requested:     row.requestedPolicy,
+        subdomain:     row.subdomainPolicy,
+        alignmentDkim: row.alignmentDkim,
+        alignmentSpf:  row.alignmentSpf,
+        samplePercent: row.samplePercent,
+        failureOptions: row.failureOptions,
+      },
+      domain:       row.policyDomain,
+      contact:      row.reportEmail,
+      records:      records.map(function (record) {
+        return {
+          sourceIp:       record.sourceIp,
+          messages:       record.messageCount,
+          disposition:    record.disposition,
+          alignedDkim:    record.alignedDkim,
+          alignedSpf:     record.alignedSpf,
+          authDkimDomain: record.authDkimDomain,
+          authDkimResult: record.authDkimResult,
+          authSpfDomain:  record.authSpfDomain,
+          authSpfResult:  record.authSpfResult,
+          headerFrom:     record.headerFrom,
+          envelopeFrom:   record.envelopeFrom,
+          envelopeTo:     record.envelopeTo,
+          overrideReason: record.overrideReason,
+        };
+      }),
+      recordsHeld:  recordTotal,
+      recordsShown: records.length,
+    }, _reportLines(row, records, recordTotal, records.length));
+  } finally {
+    await store.close();
+  }
+}
+
+// The erasure verb, and the one address on this volume that belongs to
+// somebody with no account here.
+//
+// It writes, so it opens the volume for writing and is refused while the
+// server holds it, and it never falls back to a private copy: an erasure
+// carried out against a copy nothing keeps is an erasure the person who
+// asked for it was told had happened.
+async function _cmdReportsForget(report, config, flags, positionals) {
+  var confirmed = _requireConfirmation(report, flags,
+    "Forgetting an address destroys every report row naming it, along with the key each " +
+    "row was sealed under, and there is no copy. The address is matched in three places " +
+    "and one of them is the contact mailbox a reporting organization writes into its own " +
+    "reports, so an address belonging to a reporter takes every report that reporter sent " +
+    "with it, and the counting `blamepost reports list` reads comes from those rows.");
+  if (confirmed !== 0) return confirmed;
+
+  var wanted;
+  try {
+    wanted = address.canonical(positionals[1], "address").address;
+  } catch (e) {
+    return report.error("give the address the erasure was asked about. " +
+      ((e && e.message) || String(e)), 2);
+  }
+
+  var store = await storeModule.open(config);
+  try {
+    // What names the address, counted before anything is destroyed, over
+    // the three columns the store erases by. It is published beside the
+    // destroyed count rather than instead of it: the two coming apart is
+    // a row that matched and stayed, and the person who asked for the
+    // erasure has no way to ask again.
+    var forensicFrom = b.db.from(storeTables.DMARC_FORENSIC)
+      .where({ originalMailFrom: wanted }).all();
+    var forensicRcpt = b.db.from(storeTables.DMARC_FORENSIC)
+      .where({ originalRcptTo: wanted }).all();
+    var contact = b.db.from(storeTables.DMARC_REPORTS)
+      .where({ reportEmail: wanted }).all();
+    var seen = Object.create(null);
+    forensicFrom.concat(forensicRcpt).forEach(function (row) { seen[row._id] = true; });
+    var matchedForensic = Object.keys(seen).length;
+    var matched = matchedForensic + contact.length;
+
+    if (matched === 0) {
+      return _emit(report, flags, {
+        address: wanted, matched: 0, matchedForensic: 0, matchedAggregate: 0,
+        destroyed: 0, preserved: [], failed: [],
+      }, [
+        "No report row on this volume names " + wanted + ".",
+        "  Nothing was destroyed. A forensic report is stored only where the operator has",
+        "  turned that on, and every report row is destroyed on its own retention window,",
+        "  so an address that was here may already be gone.",
+      ]);
+    }
+
+    var removed = await store.reports.forgetAddress(wanted, flags.reason);
+    var lines = [
+      "Erased " + wanted + " from the stored reports.",
+      "  " + _plural(matched, "row", "rows") + " named it: " +
+        _plural(matchedForensic, "forensic row", "forensic rows") + " and " +
+        _plural(contact.length, "aggregate report row", "aggregate report rows") + ".",
+      "  " + _plural(removed.destroyed, "row", "rows") + " destroyed, with the key each one",
+      "  was sealed under, so what is left in the write-ahead log reads as absent rather",
+      "  than as ciphertext somebody may still hold a key for.",
+    ];
+    removed.preserved.forEach(function (entry) {
+      lines.push("  kept  " + entry.table + " " + entry.rowId + ": " + entry.code +
+        ". It is preserved on purpose. Release the order and run this again.");
+    });
+    removed.failed.forEach(function (entry) {
+      lines.push("  FAIL  " + entry.table + " " + entry.rowId + " could not be erased: " +
+        entry.code + ".");
+    });
+    var accounted = removed.destroyed + removed.preserved.length + removed.failed.length;
+    if (accounted !== matched) {
+      lines.push("  " + Math.abs(matched - accounted) + " row(s) that named this address " +
+        "are accounted for by neither outcome. Run this again, and if the number holds, " +
+        "the rows are on the volume and the person who asked has not been answered.");
+    }
+    _emit(report, flags, {
+      address:          removed.address,
+      matched:          matched,
+      matchedForensic:  matchedForensic,
+      matchedAggregate: contact.length,
+      destroyed:        removed.destroyed,
+      preserved:        removed.preserved,
+      failed:           removed.failed,
+    }, lines);
+    // A destroying verb that reports success over a row it left behind is
+    // the one answer nobody can correct afterwards, so the exit code says
+    // which of the two happened. A row something is preserving on purpose
+    // is not one of them: the system is working and the request finishes
+    // when the order is released.
+    return (removed.failed.length > 0 || accounted !== matched) ? 1 : 0;
+  } finally {
+    await store.close();
+  }
+}
+
+// ---- dmarc ------------------------------------------------------------------
+
+// The address a record this server offers points its `rua` tag at.
+//
+// It is the postmaster address, resolved here the way the outbound
+// handle resolves it, because that is already the address whose arriving
+// mail this server reads reports about its own sending at and the one
+// the operator guide tells an operator to point at a mailbox on a domain
+// they host.
+//
+// The assembled server reads the same value off the delivery handle
+// rather than computing it, and `dmarc-policy-wiring.test.js` holds the
+// two against each other: this file cannot build a delivery handle for
+// `preview`, because building one creates the spool directory and
+// `preview` has to answer on a volume that will not open at all.
+//
+// It comes back canonical, through the one derivation that decides what
+// a name means here. The outbound handle's default carries an uppercase
+// local part, the stepper canonicalizes whatever it is given, and a verb
+// publishing the raw form would report an address that differs from the
+// one in the record beside it by nothing an operator could see.
+function _reportingAddressFor(config) {
+  return address.canonical(config.postmaster || ("MAILER-DAEMON@" + config.hostname),
+    "blamepost dmarc: the reporting address").address;
+}
+
+// The stepper, over a store this command already opened. Composed here
+// the way `blamepost.create` composes it, from the same report handle,
+// the same posture checker and the same resolver, so a verdict read at
+// the command line and one read on the running server are the same
+// reading rather than two.
+function _dmarcPolicyOver(store, config) {
+  var sharedResolver = blamepost.resolver();
+  return blamepost.mail.dmarcPolicy.create({
+    store:   store.reports,
+    posture: blamepost.mail.posture.create({
+      hostname: config.hostname,
+      resolver: sharedResolver,
+      dkim:     blamepost.mail.dkim.create({ dataDir: config.dataDir, store: store }),
+    }),
+    dnsLookup:        blamepost.mail.posture.txtLookup(sharedResolver),
+    reportingAddress: _reportingAddressFor(config),
+  });
+}
+
+// The three record texts, one line each, widest label padded so the
+// values line up under one another and a reader comparing two of them is
+// comparing the same column.
+function _dmarcRecordLines(records, dropped, only) {
+  var levels = blamepost.mail.dmarcPolicy.LEVELS.filter(function (level) {
+    return only === null || level === only;
+  });
+  var width = levels.reduce(function (widest, level) {
+    return Math.max(widest, level.length);
+  }, 0);
+  var lines = levels.map(function (level) {
+    return "  " + level + new Array(width - level.length + 3).join(" ") + records[level];
+  });
+  if (dropped.length > 0) {
+    lines.push("");
+    lines.push("  " + _plural(dropped.length, "tag", "tags") + " on the published record " +
+      "falls outside the tag grammar of RFC 9989 section 4.8 and is left out of every " +
+      "record above: " + dropped.join(", ") + ". The record came out of DNS and the value " +
+      "above is printed at a terminal and pasted into a provider's form.");
+  }
+  return lines;
+}
+
+async function cmdDmarc(flags, positionals) {
+  var report = _reporter("dmarc");
+  var verb = positionals[0];
+  if (!verb) return report.usage(USAGE_DMARC);
+  var unread = _refuseUnread(report, "dmarc", verb, flags, positionals);
+  if (unread !== 0) return unread;
+  if (!Object.prototype.hasOwnProperty.call(VERB_SURFACE.dmarc, verb)) {
+    return report.usage(USAGE_DMARC);
+  }
+  if (positionals[1] === undefined) return report.usage(USAGE_DMARC);
+
+  var config = _configFrom(flags);
+  var shape = _readDomainArg(report, positionals[1]);
+  if (shape.code !== undefined) return shape.code;
+
+  if (verb === "preview") {
+    return await _cmdDmarcPreview(report, config, flags, shape.domain);
+  }
+  if (verb === "mark") {
+    return await _cmdDmarcMark(report, config, flags, shape.domain);
+  }
+
+  // Both readings write to the audit trail on the way to their answer,
+  // so neither falls back to a read-only copy. `b.audit.query` files a
+  // row for every read of the trail, and `status` writes a second one
+  // whenever the policy it resolves differs from the last one recorded,
+  // which is what the reject rule reads to answer how long the domain
+  // has already been at quarantine. A read that claims to be recorded
+  // and is not is worse than one that refuses.
+  var store = await storeModule.open(config);
+  try {
+    var hosted = store.domains.get(shape.domain);
+    if (!hosted) {
+      var names = store.domains.list().map(function (row) { return row.domain; });
+      return report.error("this server does not host " + shape.domain + ", so it publishes " +
+        "no policy for it and holds no reports about it. Hosted domains: " +
+        (names.length
+          ? names.join(", ")
+          : "none. Add one with `blamepost domain add <domain>`."), 2);
+    }
+    b.audit.registerNamespace(AUDIT_NAMESPACE);
+    var policy = _dmarcPolicyOver(store, config);
+    if (verb === "markings") return await _cmdDmarcMarkings(report, flags, policy, shape.domain);
+    return await _cmdDmarcStatus(report, flags, policy, shape.domain);
+  } finally {
+    await store.close();
+  }
+}
+
+// The record text alone, over no data volume at all.
+//
+// A domain whose mail is being discarded is answered by publishing the
+// weaker record, and an operator doing that is doing it because
+// something is already wrong. So this verb opens nothing, takes no lock
+// and asks the store no question: it reads the record the domain
+// publishes today, keeps every tag on it that the grammar allows, and
+// prints what each level would be published as. A reversal that needs
+// this server's database to open is a reversal that is missing on the
+// day it is wanted.
+async function _cmdDmarcPreview(report, config, flags, domain) {
+  var levels = blamepost.mail.dmarcPolicy.LEVELS;
+  var only = null;
+  if (flags.level !== undefined) {
+    only = String(flags.level).trim().toLowerCase();
+    if (levels.indexOf(only) === -1) {
+      return report.error("--level names one of " + levels.join(", ") + ", and it is " +
+        JSON.stringify(String(flags.level)) + ".", 2);
+    }
+  }
+
+  var reportingAddress = _reportingAddressFor(config);
+  var found = await blamepost.mail.posture.dmarcRecord(domain, {
+    dnsLookup: blamepost.mail.posture.txtLookup(blamepost.resolver()),
+  });
+
+  var records = {};
+  var dropped = [];
+  for (var i = 0; i < levels.length; i += 1) {
+    var built = blamepost.mail.dmarcPolicy.recordFor({
+      level:            levels[i],
+      reportingAddress: reportingAddress,
+      published:        found.record,
+    });
+    records[levels[i]] = built.value;
+    for (var d = 0; d < built.dropped.length; d += 1) {
+      if (dropped.indexOf(built.dropped[d]) === -1) dropped.push(built.dropped[d]);
+    }
+  }
+
+  // What the record above was built over. The four readings are kept
+  // apart because they call for different things: a lookup that did not
+  // complete says nothing about the zone, and a record nobody can read a
+  // policy out of is a zone to correct rather than a policy to step.
+  var head;
+  if (found.state === "published") {
+    head = domain + " publishes p=" + found.policy + " at " + found.name + ".";
+  } else if (found.state === "absent") {
+    head = domain + " publishes no DMARC record at " + found.name + ", so the records below " +
+      "carry the tags this server would start it with and nothing else.";
+  } else if (found.state === "unusable") {
+    head = "The record at " + found.name + " is published and no receiver reads a policy " +
+      "from it: " + found.why + ". The records below are built as though the name were " +
+      "empty, so anything the published one carries is not in them.";
+  } else {
+    head = "The record at " + found.name + " could not be read: " + found.why + ". The " +
+      "records below are built as though the name were empty, so any reporting address, " +
+      "alignment mode or subdomain policy already published is not carried into them.";
+  }
+
+  var lines = [head, ""];
+  _dmarcRecordLines(records, dropped, only).forEach(function (line) { lines.push(line); });
+  lines.push("");
+  lines.push("Publish one of these at " + found.name + ". Nothing here writes a zone, and");
+  lines.push("nothing was read off the data volume, so this answers while the server runs");
+  lines.push("and when its database will not open.");
+  lines.push("");
+  lines.push("The rua tag names " + reportingAddress + ". Point BLAMEPOST_POSTMASTER at a");
+  lines.push("mailbox on a domain you host, or replace the address before you publish:");
+  lines.push("a domain asking for reports at an address nobody reads accumulates nothing.");
+  return _emit(report, flags, {
+    domain:           domain,
+    name:             found.name,
+    state:            found.state,
+    level:            found.policy,
+    published:        found.record,
+    why:              found.why,
+    reportingAddress: reportingAddress,
+    records:          records,
+    recordsDropped:   dropped,
+  }, lines);
+}
+
+// Where one domain stands, and what each rule asks for beside what it
+// has.
+//
+// It exits zero whichever way it answers. A domain a fortnight into
+// accumulating evidence is the ordinary state of a domain being moved to
+// quarantine, not a fault, and a command that exits non-zero every day
+// for two weeks is one an operator stops reading.
+async function _cmdDmarcStatus(report, flags, policy, domain) {
+  var verdict = await policy.evaluate({ domain: domain });
+  var rules = policy.describe();
+
+  var lines = [];
+  lines.push(domain + (verdict.level === null
+    ? " publishes no DMARC policy this server could read."
+    : " publishes p=" + verdict.level + "."));
+  if (verdict.next !== null) {
+    lines.push("  The next step is " + verdict.next + ", and it is " +
+      (verdict.ok ? "carried by the evidence." : "not carried yet: " + verdict.reason + "."));
+  } else {
+    lines.push("  There is no step to judge: " + verdict.reason + ".");
+  }
+  lines.push("  " + verdict.detail);
+
+  if (verdict.checks.length > 0) {
+    lines.push("");
+    lines.push("Rules for the step to " + verdict.next);
+    verdict.checks.forEach(function (check) {
+      lines.push("  " + (check.ok ? "ok  " : "FAIL") + "  " + check.name +
+        (check.required === null
+          ? ""
+          : "  " + JSON.stringify(check.found) + " of " + JSON.stringify(check.required)));
+    });
+  }
+
+  if (verdict.evidence !== null) {
+    var e = verdict.evidence;
+    lines.push("");
+    lines.push("Evidence over the last " + _plural(e.windowDays, "day", "days"));
+    lines.push("  counted " + e.counted + "   aligned " + e.aligned + "   " +
+      e.alignedPercent + " percent");
+    lines.push("  reported on " + _plural(e.reportDays, "day", "days") + " by " +
+      _plural(e.organizations, "organization", "organizations") +
+      ", largest silent run " + _plural(e.largestGapDays, "day", "days"));
+    lines.push("  " + _plural(e.failingSources, "sending address", "sending addresses") +
+      " failed both alignments. Each one over " + rules.sourceFloorMessages +
+      " messages needs a marking before the step is carried:");
+    lines.push("  `blamepost reports list` prints them, and `blamepost dmarc mark` records");
+    lines.push("  what each one is.");
+  }
+
+  lines.push("");
+  lines.push("Records");
+  _dmarcRecordLines(verdict.records, verdict.recordsDropped, null)
+    .forEach(function (line) { lines.push(line); });
+  lines.push("");
+  // The stepper answers what stepping down offers against the policy it
+  // read, and a reading that could not resolve one has no policy to
+  // answer against. Printing its sentence there would tell an operator
+  // which policy the domain publishes on a run whose whole finding is
+  // that nobody knows.
+  if (verdict.level === null) {
+    lines.push("Which policy this domain publishes is not known, so there is nothing to say");
+    lines.push("about stepping down from it. Publishing any record above needs no evidence");
+    lines.push("and no threshold whichever policy it turns out to be.");
+  } else {
+    lines.push(verdict.reversal.detail);
+    if (verdict.reversal.to.length > 0) {
+      lines.push("  Weaker than what this domain publishes: " + verdict.reversal.to.join(", ") +
+        ". `blamepost dmarc preview " + domain + "` prints those without opening the volume.");
+    }
+  }
+  lines.push("Nothing here publishes a record. Put the value you want in the zone yourself.");
+
+  return _emit(report, flags, { verdict: verdict, rules: rules }, lines);
+}
+
+// One operator's written finding about one failing sending address.
+//
+// The marking is what lets a policy tighten, so a row the trail would not
+// take is reported as a marking that was not made rather than as a
+// command that worked. Nothing is written until every argument reads,
+// which is what keeps a mistyped address from costing a trail row.
+async function _cmdDmarcMark(report, config, flags, domain) {
+  var dispositions = blamepost.mail.dmarcPolicy.DISPOSITIONS;
+  if (flags.source === undefined) {
+    return report.error("give --source, the sending address a reporter named. `blamepost " +
+      "reports list` prints the addresses failing both alignments for a domain, largest " +
+      "first, and those are the ones a step waits on.", 2);
+  }
+  if (flags.disposition === undefined) {
+    return report.error("give --disposition, which is " + dispositions.join(" or ") +
+      ". A sending path of yours whose alignment is fixed and an address that is not yours " +
+      "are read differently: continued failure contradicts the first and is expected of " +
+      "the second.", 2);
+  }
+  if (dispositions.indexOf(String(flags.disposition)) === -1) {
+    return report.error("--disposition names one of " + dispositions.join(" or ") +
+      ", and it is " + JSON.stringify(String(flags.disposition)) + ". A sending path of " +
+      "yours whose alignment is fixed and an address that is not yours are read " +
+      "differently: continued failure contradicts the first and is expected of the second.",
+    2);
+  }
+  if (!flags.reason) {
+    return report.error("give --reason. The marking is the evidence a policy tightens on, " +
+      "and one with no reason answers nothing later about why mail from this address was " +
+      "accounted for.", 2);
+  }
+
+  var store = await storeModule.open(config);
+  try {
+    var hosted = store.domains.get(domain);
+    if (!hosted) {
+      return report.error("this server does not host " + domain + ", so a marking against " +
+        "it would never be read.", 2);
+    }
+    b.audit.registerNamespace(AUDIT_NAMESPACE);
+    var written;
+    try {
+      written = await _dmarcPolicyOver(store, config).markSource({
+        domain:      domain,
+        sourceIp:    flags.source,
+        disposition: flags.disposition,
+        reason:      flags.reason,
+      });
+    } catch (e) {
+      return report.error((e && e.message) || String(e), 2);
+    }
+
+    _emit(report, flags, written, [
+      "Marked one sending address for " + written.domain + " as " + written.disposition + ".",
+      "  " + written.reason,
+      written.recorded
+        ? "  The marking is in the audit trail, which is where every reading of it comes " +
+          "from. A later marking for the same address supersedes this one and leaves both " +
+          "readable."
+        : "  The audit trail did not take the row, so nothing was marked. Until it does, " +
+          "this address goes on blocking the step.",
+    ]);
+    // The marking IS the row. A verb that reported success over a row the
+    // trail refused would leave an operator waiting for a step that has
+    // nothing to clear it.
+    return written.recorded ? 0 : 1;
+  } finally {
+    await store.close();
+  }
+}
+
+// What has already been written down about one domain's failing senders.
+async function _cmdDmarcMarkings(report, flags, policy, domain) {
+  var held = await policy.markings({ domain: domain });
+  var ids = Object.keys(held.marked).sort(function (one, other) {
+    return held.marked[other].at - held.marked[one].at;
+  });
+
+  var lines = [];
+  if (!held.ok) {
+    lines.push("The audit trail could not be read, so which of " + domain + "'s failing");
+    lines.push("senders have been looked at is not known. That is not the same as none:");
+    lines.push("reporting no marking here would report every source as unreviewed.");
+    _emit(report, flags, held, lines);
+    return 1;
+  }
+
+  lines.push(_plural(ids.length, "marking", "markings") + " in force for " + domain + ".");
+  ids.forEach(function (id) {
+    var entry = held.marked[id];
+    lines.push("  " + new Date(entry.at).toISOString() + "  " + entry.disposition);
+    lines.push("    " + entry.reason);
+  });
+  if (ids.length === 0) {
+    lines.push("  Nothing has been written down yet. `blamepost dmarc status " + domain + "`");
+    lines.push("  says how many senders a step is waiting on.");
+  }
+  lines.push("");
+  lines.push("A marking is filed under the domain and the keyed digest of the sending");
+  lines.push("address, never the address itself, because the address belongs to somebody");
+  lines.push("with no account here. `blamepost reports list` is where the addresses are.");
+  if (held.truncated) {
+    lines.push("");
+    lines.push("This read reached its own ceiling, so an older marking may be missing from");
+    lines.push("it, and a step is refused rather than judged over part of the set.");
+  }
+  return _emit(report, flags, held, lines);
 }
 
 // ---- queue ------------------------------------------------------------------
@@ -1962,7 +4490,15 @@ async function cmdQueue(flags, positionals) {
         unclaimed.reduce(function (sum, entry) { return sum + entry.sizeBytes; }, 0) +
         " byte(s) of that room. Nothing lists them and nothing sends them. Clear each " +
         "with `blamepost queue remove <id> --reason ...`: " +
-        unclaimed.map(function (entry) { return entry.id; }).join(", ") + ".");
+        // The id is the body file's own name with its suffix removed, and
+        // this list exists because no descriptor accounts for that file,
+        // so the name is not one this server wrote. U+009B opens an
+        // escape sequence, so an unscreened id can erase the line it is
+        // printed on, which here is the line telling the operator why the
+        // queue reads as empty while mail is being refused.
+        unclaimed.map(function (entry) {
+          return displayText.forDisplay(entry.id);
+        }).join(", ") + ".");
     }
     return _emit(report, flags, waiting, lines);
   }
@@ -2000,7 +4536,12 @@ async function cmdQueue(flags, positionals) {
       // interface do not each phrase it their own way.
       "sender     " + (String(shown.from || "").trim() || "<>"),
       "queued     " + new Date(shown.queuedAt).toUTCString(),
-      "size       " + shown.sizeBytes + " byte(s)",
+      // A body that is gone is named rather than printed as a value,
+      // because an operator reading a number cannot tell a missing body
+      // from one of no bytes, and the two want different work.
+      "size       " + (typeof shown.sizeBytes === "number"
+        ? shown.sizeBytes + " byte(s)"
+        : "the message body is missing, so there is nothing to send"),
     ];
 
     // The attempt record. Printed oldest first, because the question it
@@ -2466,7 +5007,16 @@ function _blobReportLines(report) {
     lines.push("  FAIL  " + (entry.account || "an account with no row") + " " +
       (entry.mailbox || "") + ": the store counts " + entry.storeCount + " message(s) and " +
       entry.storeBytes + " bytes, the mailbox lists " + entry.rowCount + " and " +
-      entry.rowBytes + "." + (entry.detail ? " " + entry.detail : ""));
+      entry.rowBytes + "." +
+      // How much of this entry a repair would take, per mailbox rather
+      // than only in the closing sentence, because an operator decides
+      // mailbox by mailbox which of them they are willing to lose mail
+      // from.
+      (entry.unfiledCount > 0
+        ? " " + _plural(entry.unfiledCount, "message", "messages") + ", " +
+          entry.unfiledBytes + " bytes, is mail the store holds that no row names."
+        : "") +
+      (entry.detail ? " " + entry.detail : ""));
   });
   report.orphans.forEach(function (entry) {
     lines.push("  note  " + entry.digest.slice(0, 16) + "... " + entry.sizeBytes +
@@ -2476,7 +5026,13 @@ function _blobReportLines(report) {
         : ", reclaimable from " + new Date(entry.reclaimableAt).toUTCString()));
   });
   report.unexpected.forEach(function (entry) {
-    lines.push("  note  " + entry.path + ": " + entry.detail + ". Nothing removes it.");
+    // Screened, because this list exists precisely for a file nothing on
+    // this server put there under a name nothing on this server chose.
+    // U+009B opens an escape sequence, so an unscreened name can erase
+    // the line it is printed on, and the line it erases is a finding in
+    // the report written to say what is wrong with the volume.
+    lines.push("  note  " + displayText.forDisplay(entry.path) + ": " + entry.detail +
+      ". Nothing removes it.");
   });
   // Bodies the rows had not reached, which is what mail arriving after
   // the server's last write to disk looks like from a read-only open.
@@ -2526,9 +5082,24 @@ function _blobReportLines(report) {
       "names is a body in use.");
   }
   if (report.quotaDrift.length > 0) {
+    var removable = report.quotaDrift.filter(function (entry) {
+      return entry.unfiledCount > 0;
+    });
     lines.push("A mailbox whose quota exceeds the messages in it is charged for mail no " +
       "protocol can list. Reclaiming bodies does not change it: the count lives in the " +
       "message store, not on disk.");
+    if (removable.length > 0) {
+      lines.push("Run `blamepost blobs repair --confirm --reason <text>` with the server " +
+        "stopped to destroy that mail and let the counter fall by what went. A " +
+        "preservation order and the retention floor keep a message here exactly as they " +
+        "keep any other, and a mailbox holding one they kept stays charged for it.");
+    }
+    if (removable.length < report.quotaDrift.length) {
+      lines.push("Where the store counts FEWER messages than the mailbox lists, nothing " +
+        "here raises the counter: those rows name messages the store no longer has. " +
+        "Restore the volume from a backup whose database and blob directory were taken " +
+        "together.");
+    }
   }
   // Counted rather than measured in bytes, because a body of zero bytes
   // is still a body somebody has to decide about and a byte total of
@@ -2609,7 +5180,153 @@ async function cmdBlobs(flags, positionals) {
       return result.failed.length > 0 ? 1 : 0;
     }
 
+    if (verb === "repair") {
+      // It destroys somebody's mail, so it takes the same two flags the
+      // reclaim above does. What it removes is mail no protocol lists,
+      // which is exactly why the operator has to say so deliberately:
+      // nobody is going to notice it going.
+      var repairGate = _requireConfirmation(report, flags,
+        "Repairing destroys the mail the message store holds that no mailbox row names. " +
+        "Run `blamepost blobs report` first: it removes nothing and says how many " +
+        "messages this would take and how many bytes they hold.");
+      if (repairGate !== 0) return repairGate;
+
+      b.audit.registerNamespace(AUDIT_NAMESPACE);
+      var repaired = await store.blobs.repairQuota({ reason: flags.reason });
+      var repairLines = [
+        "Destroyed " + _plural(repaired.removed.length, "message", "messages") + ", " +
+          repaired.removedBytes + " bytes, that the message store held and no mailbox " +
+          "row named.",
+      ];
+      // Named one per line, because an operator answering for mail that
+      // was kept has to be able to say which record and which rule, and
+      // the two rules need opposite responses.
+      repaired.kept.forEach(function (entry) {
+        repairLines.push("  kept  " + (entry.account || "an account with no row") + " " +
+          entry.mailbox + ": " + entry.objectid + " (" + entry.sizeBytes + " bytes), " +
+          entry.reason + (entry.detail ? ". " + entry.detail : ""));
+      });
+      // Mailboxes the repair could not close. Named for the same reason,
+      // and separately, because nothing an operator does to this verb
+      // changes them.
+      repaired.unrepairable.forEach(function (entry) {
+        repairLines.push("  FAIL  " + (entry.account || "an account with no row") + " " +
+          entry.mailbox + ": " + entry.detail);
+      });
+      if (repaired.removed.length > 0) {
+        repairLines.push("");
+        repairLines.push("The bodies those messages named are referenced by nothing now. " +
+          "Run `blamepost blobs reclaim --confirm --reason <text>` once they have settled.");
+      }
+      _emit(report, flags, repaired, repairLines);
+      // Non-zero while any mailbox still disagrees with its counter, so a
+      // run that could not finish is not read as one that did.
+      return repaired.ok ? 0 : 1;
+    }
+
     return report.usage(USAGE_BLOBS);
+  } finally {
+    await store.close();
+  }
+}
+
+// ---- attachments ------------------------------------------------------------
+
+function _attachmentReportLines(seen) {
+  var lines = [
+    _plural(seen.messages, "stored message", "stored messages") + " across " +
+      _plural(seen.folders, "mailbox", "mailboxes") + ".",
+    "  " + seen.present + " carry files, " + seen.absent + " carry none.",
+  ];
+  if (seen.unmarked === 0) {
+    lines.push("  Every message records the answer.");
+    return lines;
+  }
+  lines.push("  " + _plural(seen.unmarked, "message", "messages") + " record neither, so a " +
+    "JMAP client is told they may carry files and the folder listing says the answer is " +
+    "not known.");
+  lines.push("Run `blamepost attachments backfill` to read those and record it.");
+  return lines;
+}
+
+function _attachmentBackfillLines(run) {
+  var lines = [
+    "Opened " + _plural(run.examined, "message", "messages") + " that recorded nothing, " +
+      "and marked " + run.marked + ": " + run.present + " carrying files, " +
+      run.absent + " carrying none.",
+  ];
+  if (run.unknown > 0) {
+    lines.push("  Left " + _plural(run.unknown, "message", "messages") + " unmarked that " +
+      "this server could not open: above the 8 MiB read bound, or a stored body it could " +
+      "not read back. What those carry is not known, so a later run opens them again.");
+  }
+  // Named one per line, because an operator answering for a message
+  // whose octets the volume would not produce has to be able to say
+  // which one, and the remedy is a different verb.
+  run.failed.forEach(function (entry) {
+    lines.push("  FAIL  " + entry.folder + ": " + entry.objectid + ": " + entry.detail);
+  });
+  if (run.failed.length > 0) {
+    lines.push("Run `blamepost blobs report --verify` for the bodies those rows name.");
+  }
+  if (run.remaining > 0) {
+    lines.push(_plural(run.remaining, "message", "messages") + " were not reached under " +
+      "the limit. Run this again to reach them.");
+  }
+  return lines;
+}
+
+async function cmdAttachments(flags, positionals) {
+  var report = _reporter("attachments");
+  var verb = positionals[0];
+  if (!verb) return report.usage(USAGE_ATTACHMENTS);
+  var unread = _refuseUnread(report, "attachments", verb, flags, positionals);
+  if (unread !== 0) return unread;
+  var config = _configFrom(flags);
+  // Both verbs open the volume outright. The backfill writes flags, and
+  // the report counts them over every mailbox: a read-only copy would
+  // answer as of the server's last write to disk, which is the one
+  // reading an operator must not act on here, since what they do next is
+  // decide whether a write has already been done.
+  var store = await storeModule.open(config);
+
+  try {
+    if (verb === "report") {
+      var seen = store.mailbox.attachmentReport();
+      _emit(report, flags, seen, _attachmentReportLines(seen));
+      return 0;
+    }
+
+    if (verb === "backfill") {
+      var limit = null;
+      if (flags.limit !== undefined) {
+        // Refused here rather than handed on. A ceiling that is not a
+        // whole number is a run that stops somewhere the operator did not
+        // choose, and the answer it prints would read as a volume that is
+        // finished.
+        if (typeof flags.limit !== "number" || !Number.isInteger(flags.limit) ||
+            flags.limit < 1) {
+          return report.error("--limit is " + JSON.stringify(String(flags.limit)) +
+            ", which is not a whole number of messages of at least one. Leave it out to " +
+            "open every message that records nothing.", 2);
+        }
+        limit = flags.limit;
+      }
+      b.audit.registerNamespace(AUDIT_NAMESPACE);
+      var run = store.mailbox.markAttachments(limit === null ? {} : { limit: limit });
+      // The row the run files is emitted on the mail layer's hot-path
+      // handle, which buffers. This process ends a moment after the
+      // answer is printed, so without this the only record that the run
+      // happened leaves with it.
+      await b.audit.flush();
+      _emit(report, flags, run, _attachmentBackfillLines(run));
+      // Non-zero when a stored body could not be read, so a scheduled run
+      // that has started failing to open mail is not read as one that
+      // finished.
+      return run.failed.length > 0 ? 1 : 0;
+    }
+
+    return report.usage(USAGE_ATTACHMENTS);
   } finally {
     await store.close();
   }
@@ -2780,7 +5497,13 @@ function _localChecks(config, activeDomains, store) {
         " waiting, each one with the descriptor that names it"
       : _plural(stranded.length, "spooled message body", "spooled message bodies") +
         " that no descriptor names (" +
-        stranded.slice(0, 5).map(function (entry) { return entry.id; }).join(", ") +
+        stranded.slice(0, 5).map(function (entry) {
+          // A spool id is the part of a file name before its suffix, and
+          // a body with no descriptor is a file this server did not
+          // finish writing under a name it may not have chosen. Screened
+          // for the reason the blob paths above are.
+          return displayText.forDisplay(entry.id);
+        }).join(", ") +
         (stranded.length > 5 ? ", and " + (stranded.length - 5) + " more" : "") +
         "), holding " +
         stranded.reduce(function (sum, entry) { return sum + entry.sizeBytes; }, 0) +
@@ -2848,7 +5571,15 @@ function _localChecks(config, activeDomains, store) {
   var keyTrouble = [];
   if (unclaimed.length > 0) {
     keyTrouble.push(_plural(unclaimed.length, "sealed private key", "sealed private keys") +
-      " no selector record names (" + unclaimed.slice(0, 5).join(", ") +
+      // Screened here rather than where the names are collected, because
+      // `onDisk` and `claimed` above hold the same names and compare them
+      // against a selector's keyRef: a screened value there would stop
+      // matching the row that claims it. A key file no row names is a file
+      // this server did not write, so its name reaches the terminal only
+      // through the screen.
+      " no selector record names (" + unclaimed.slice(0, 5).map(function (name) {
+        return displayText.forDisplay(name);
+      }).join(", ") +
       (unclaimed.length > 5 ? ", and " + (unclaimed.length - 5) + " more" : "") +
       "). Nothing here will ever use or remove them, and every backup taken from now on " +
       "carries them. Delete them from " + keyDir + " by hand.");
@@ -3019,25 +5750,33 @@ async function cmdDoctor(flags) {
 
     var ok = localOk && dnsReport.ok;
     lines.push("");
-    if (ok && unchecked === 0) {
+    // The closing line is the one most readers take away, so it says
+    // what the rows above it say and nothing else. Each sentence is
+    // written by the count it is about, rather than by a chain of
+    // conditions where one arm can describe a state the counts are not
+    // in: a summary naming a FAIL when none was printed sends a reader
+    // hunting for a line that is not there, and it was reachable while
+    // the sentence and its guard were written separately.
+    if (mismatched > 0) {
+      lines.push(_plural(mismatched, "check does", "checks do") + " not match what this " +
+        "server expects. Each FAIL above names one, and each is answered in the zone.");
+    }
+    if (unchecked > 0) {
+      // Said even when the run passed. An advisory record nobody could
+      // read leaves `ok` true, and a closing line that then said
+      // everything is in place would be making the same claim this
+      // mark exists to stop.
+      lines.push(_plural(unchecked, "record could", "records could") + " not be checked, " +
+        "because the lookup did not complete. Each ? above names one. Nothing is known " +
+        "about them, so they may well be published and correct: this is a question about " +
+        "the resolver this server reads rather than about the zone.");
+    }
+    if (mismatched === 0 && unchecked === 0) {
+      // Nothing above disagreed and nothing went unread, which is the
+      // same set of runs the exit status calls clean: a check that fails
+      // is counted in one of the two, so neither count can be zero while
+      // the run is not ok.
       lines.push("Everything this server expects is in place.");
-    } else if (mismatched === 0 && unchecked === 0) {
-      lines.push("Some records do not match what this server expects. Each FAIL above names one.");
-    } else {
-      if (mismatched > 0) {
-        lines.push(_plural(mismatched, "check does", "checks do") + " not match what this " +
-          "server expects. Each FAIL above names one, and each is answered in the zone.");
-      }
-      if (unchecked > 0) {
-        // Said even when the run passed. An advisory record nobody could
-        // read leaves `ok` true, and a closing line that then said
-        // everything is in place would be making the same claim this
-        // mark exists to stop.
-        lines.push(_plural(unchecked, "record could", "records could") + " not be checked, " +
-          "because the lookup did not complete. Each ? above names one. Nothing is known " +
-          "about them, so they may well be published and correct: this is a question about " +
-          "the resolver this server reads rather than about the zone.");
-      }
     }
 
     _emit(report, flags, { ok: ok, local: findings, dns: dnsReport }, lines);
@@ -3169,9 +5908,15 @@ function _requireConfirmation(report, flags, what) {
 // what makes an address lookup resolve, so a bundle missing it restores
 // a database that opens, an audit chain that verifies, and a server that
 // answers "no such mailbox" for every account it holds.
+//
+// The names the store reserves at the top of the volume are left out. The
+// lock names the process that took the backup, and a restore that put it
+// back would hand the restored volume a lock naming a process in another
+// container. The restore work directory holds whole earlier volumes.
 function _walkDataFiles(root, relative, into) {
   var entries = b.atomicFile.listDir(_under(root, relative), { includeStat: true });
   for (var i = 0; i < entries.length; i += 1) {
+    if (relative === "" && storeModule.VOLUME_RESERVED.indexOf(entries[i].name) !== -1) continue;
     var childRelative = relative === "" ? entries[i].name : relative + "/" + entries[i].name;
     if (entries[i].isDirectory) _walkDataFiles(root, childRelative, into);
     else if (entries[i].isFile) into.push(childRelative);
@@ -3180,8 +5925,8 @@ function _walkDataFiles(root, relative, into) {
 }
 
 // The include list a bundle is built from: the framework's own list
-// first, so the four files it insists on are marked required and their
-// absence refuses the backup rather than producing one that cannot be
+// first, so the files it marks required keep their mark and the absence
+// of one refuses the backup rather than producing one that cannot be
 // restored, and then everything else the walk finds.
 function _backupFiles(dataDir) {
   var files = b.backup.recommendedFiles({ atRest: "encrypted", vaultMode: "wrapped" });
@@ -3272,16 +6017,24 @@ function _chainLines(config, chain, checkpoints, counter, anchor) {
   // code and opposite facts.
   // Three readings rather than two, and the middle one is the reason.
   // A gap where the anchored row belongs is a range this run did not
-  // read, held open by a counter in a table the framework signs nothing
-  // in. Reporting it beside a reading that passed would put the sentence
-  // an operator carries into an incident review over rows nobody looked
-  // at, and reporting it as a break would refuse a volume that may have
-  // been through an ordinary retention run. It is its own line because
-  // it is its own fact.
+  // read, held open by the purge boundary the framework records.
+  // Reporting it beside a reading that passed would put the sentence an
+  // operator carries into an incident review over rows nobody looked at,
+  // and reporting it as a break would refuse a volume that may have been
+  // through an ordinary retention run. It is its own line because it is
+  // its own fact.
+  //
+  // A purge signs the boundary it writes, under the key sealed with the
+  // vault passphrase, and a boundary carrying no signature is a row
+  // something else put there. Which of the two is holding the gap open
+  // is what the record cost whoever wrote it, so the line says which
+  // rather than naming the weaker of the two every time.
   var witnessed = !!(anchor && anchor.checked === true);
   var unproven  = !!(anchor && anchor.proven === false);
+  var signedGap = unproven && anchor.signed === true;
   if (unproven) {
-    lines.push("  note  a gap this run did not read, trusted on an unsigned counter. " +
+    lines.push("  note  a gap this run did not read, trusted on " +
+      (signedGap ? "a signed purge boundary" : "an unsigned counter") + ". " +
       anchor.reason);
   } else if (witnessed) {
     lines.push("  ok    held against the volume's own record of its last anchoring, at " +
@@ -3303,9 +6056,11 @@ function _chainLines(config, chain, checkpoints, counter, anchor) {
   } else if (unproven) {
     lines.push("Every row this run READ follows the one before it and every checkpoint " +
       "signature holds, and that is not the whole trail. The rows the note above names " +
-      "are gone, and what stands in for them is an unsigned counter in the database " +
-      "rather than an archive anything here verified. So this run cannot say what was in " +
-      "that range and is not saying it: an erasure and a retention run leave the same " +
+      "are gone, and what stands in for them is " +
+      (signedGap ? "a boundary saying where a purge stopped" : "an unsigned counter in " +
+        "the database") + " rather than an archive anything here verified. So this run " +
+      "cannot say what was in that range and is not saying it: an erasure and a " +
+      "retention run leave the same " +
       "bytes on this volume, and the archive bundle is the only thing that tells them " +
       "apart. Find the bundle covering that range and read it back before treating this " +
       "trail as whole.");
@@ -3534,12 +6289,17 @@ async function cmdAudit(flags, positionals) {
       return _emit(report, flags, rows, rows.length === 0
         ? ["No audit rows match."]
         : [rows.length + " row(s), newest first"].concat(rows.map(function (row) {
+          // The reason and the resource an event names are quoted from
+          // whatever caused it, which reaches back to a sender's header,
+          // a peer's refusal or an account holder's filter script. This
+          // line is printed into a terminal, so both go through the
+          // screen the browser's own trail page already runs.
           return "  " + new Date(Number(row.recordedAt)).toISOString() +
             "  " + row.action + "  " + row.outcome +
             (row.actorUserId ? "  by " + row.actorUserId : "") +
             (row.resourceKind ? "  on " + row.resourceKind +
-              (row.resourceId ? " " + row.resourceId : "") : "") +
-            (row.reason ? "  reason: " + row.reason : "");
+              (row.resourceId ? " " + _headerText(row.resourceId, "") : "") : "") +
+            (row.reason ? "  reason: " + _headerText(row.reason, "") : "");
         })));
     }
 
@@ -3640,19 +6400,39 @@ async function cmdAudit(flags, positionals) {
           verified.reason);
       }
 
-      // The refusal that keeps this server able to start again. Every
-      // append takes the hash of the row before it, and the boot-time
-      // rollback check compares the recorded counter against the highest
-      // one in the table. A purge that takes the last row leaves the next
-      // event nothing to attach to and leaves that check with a counter
-      // the table cannot match, and the server never starts again.
+      // The refusal that keeps this server able to start again. The
+      // volume carries a record beside the database naming one audit row
+      // by its counter and its hash, and every open holds the trail
+      // against that row before it hands back a database. A purge whose
+      // range reaches that counter deletes the row the record names, so
+      // the next open finds the record standing against a row that is
+      // gone or against a different one, writes the finding onto the
+      // volume, and refuses every open after that until an operator
+      // clears it.
+      //
+      // The counter compared here is the one read at this command's own
+      // open, before anything it does. The live chain tip is the wrong
+      // reading and reads as the right one: opening the volume appends
+      // rows of its own, so a tip taken after that is a tip this command
+      // lengthened on its way in, and an archive of every row the
+      // operator had can never cover it. A check on that tip passes on
+      // the archive it exists to refuse.
       await b.audit.flush();
-      var tipNow = await b.auditChain.getChainTip(_readOneRow, AUDIT_TABLE);
-      if (Number(tipNow.counter) <= Number(verified.range.lastCounter)) {
-        return report.error("this archive holds every row the chain still has, up to counter " +
-          verified.range.lastCounter + ", and the chain stands at " + tipNow.counter +
-          ". A purge has to leave a row behind: the next event attaches to it, and the check " +
-          "this server runs at boot compares against it. Archive an earlier cut and purge that.");
+      var anchoredAt = store.auditAnchor;
+      if (!anchoredAt || anchoredAt.checked !== true) {
+        return report.error("this volume carries no readable record of its last anchoring, " +
+          "so nothing here can say whether this purge would take the row the next open holds " +
+          "the trail against. Nothing was deleted. Any command that opens the volume writes " +
+          "that record, so run `blamepost audit verify-chain` and then this again.");
+      }
+      if (Number(anchoredAt.counter) <= Number(verified.range.lastCounter)) {
+        return report.error("this archive covers counters " + verified.range.firstCounter +
+          " to " + verified.range.lastCounter + ", and this volume's record beside the " +
+          "database is anchored at counter " + anchoredAt.counter + ", inside that range. " +
+          "Purging it deletes " + verified.rowsVerified + " row(s), the anchored one among " +
+          "them, and what it leaves behind is a volume whose next open refuses and stays " +
+          "refused until an operator clears the finding. Nothing was deleted. Archive a cut " +
+          "that ends below counter " + anchoredAt.counter + " and purge that.");
       }
 
       var purged;
@@ -3709,19 +6489,273 @@ function _bundleFrom(report, flags) {
     "It names which bundle, by the id `blamepost backup list` prints.");
 }
 
-// Pull a bundle out of storage into a scratch directory and read its
-// manifest, without a passphrase and without opening the database. This
-// is the read an operator does while deciding what to restore, and it
-// has to work when the live volume does not.
-async function _withPulledBundle(storage, bundleId, use) {
-  var scratch = _scratchDir("bundle");
-  try {
-    var bundleDir = _under(scratch, "bundle");
-    await storage.readBundle(bundleId, bundleDir);
-    return await use(bundleDir, scratch);
-  } finally {
-    _dropScratch(scratch);
+// Where a stored bundle lies. `b.backup.diskStorage` keeps each bundle as
+// a directory named by its id under the storage root, and its `hasBundle`
+// refuses an id outside the framework's format, so a caller that has had
+// `true` from `hasBundle` holds a path that stays under the root. Bundles
+// are read where they lie rather than copied into the temp directory
+// first, which cost the bundle's whole size on that filesystem before a
+// byte of it had been checked.
+function _storedBundleDir(chosen, bundleId) {
+  return _under(chosen.root, bundleId);
+}
+
+// Bytes this process may still write on the filesystem holding `target`,
+// read at the nearest directory that exists, or null when the platform
+// does not say.
+function _freeBytes(target) {
+  var at = nodePath.resolve(target);
+  for (;;) {
+    try {
+      var stats = nodeFs.statfsSync(at);
+      return Number(stats.bavail) * Number(stats.bsize);
+    } catch (_err) {
+      var up = nodePath.dirname(at);
+      if (up === at) return null;
+      at = up;
+    }
   }
+}
+
+// Refuse work that would fill the filesystem holding `where` before it
+// starts, rather than failing partway with a full disk. Answers 0, or the
+// exit code of the refusal it printed.
+function _refuseWithoutRoom(report, where, needed, what) {
+  var free = _freeBytes(where);
+  if (free === null || free >= needed) return 0;
+  return report.error(what + " needs " + needed + " bytes on the filesystem holding " + where +
+    ", and " + free + " are free. Nothing was changed.");
+}
+
+// The plaintext bytes a bundle's entries decrypt to, over the entries
+// `keep` accepts. The caller passes the same predicate it will decrypt
+// under, because a room check made over one set and a decryption made
+// over another is a check that runs out of room having reported enough:
+// `restore apply` skips the names the volume reserves and `backup verify`
+// opens every file the bundle holds, and a bundle written before those
+// names were reserved carries a whole earlier volume under them.
+function _plaintextBytes(manifest, keep) {
+  var total = 0;
+  manifest.files.forEach(function (entry) {
+    if (typeof keep !== "function" || keep(entry)) total += Number(entry.size) || 0;
+  });
+  return total;
+}
+
+// Whether an audit signing key is one this volume holds or held before a
+// rotation. Asked with the store open, when `b.auditSign` is the volume's.
+function _isVolumeSigningKey(fingerprint) {
+  if (fingerprint === b.auditSign.getPublicKeyFingerprint()) return true;
+  return b.auditSign.getPublicKeyByFingerprint(fingerprint) !== null;
+}
+
+// What a bundle's manifest records about where it came from, held
+// against this server: the id it was written as, the data directory it
+// was taken from, and the server it was taken on. Answers null when all
+// three agree, and the first that does not otherwise, as `{ reason,
+// detail, remedy, exit }`.
+//
+// `reason` is the clause a verdict carries. `detail` is the finding an
+// operator reads and `remedy` is what to do about it, held apart so the
+// caller can say what its own verb did in between: a restore says nothing
+// was restored, and a verify says nothing was decrypted. `remedy` is the
+// empty string where there is nothing to do. `exit` separates a bundle
+// that belongs to another volume, which no command line here can change,
+// from one an operator restores by pointing this run at the directory or
+// the name the bundle records.
+//
+// Every verb that reports on a bundle asks this, because `restore apply`
+// asks it before it moves a file. A bundle it refuses cannot be restored,
+// so a verify that calls that bundle good sends an operator away
+// believing they hold a copy, and a retention sweep that counts one
+// deletes a bundle that would have restored in order to keep one that
+// will not.
+function _originFault(manifest, bundleId, config) {
+  var meta = manifest.metadata || {};
+  if (meta.bundleId !== bundleId) {
+    return {
+      exit:   1,
+      reason: "it was written as " + (typeof meta.bundleId === "string"
+        ? meta.bundleId : "no bundle id at all") + " and is stored as " + bundleId +
+        ", so it is another bundle's files renamed or copied in storage",
+      detail: "the bundle stored as " + bundleId + " records that it was written as " +
+        (typeof meta.bundleId === "string" ? meta.bundleId : "no bundle id at all") + ". A " +
+        "bundle's id is written into its manifest when the bundle is taken, so this is another " +
+        "bundle's files renamed or copied in storage, and restoring it would put back a volume " +
+        "from a moment other than the one its name gives.",
+      remedy: "",
+    };
+  }
+  if (meta.dataDir !== config.paths.dataDir) {
+    return {
+      exit:   2,
+      reason: "it " + (typeof meta.dataDir === "string"
+        ? "was taken from " + meta.dataDir : "records no data directory") +
+        " and this server's data directory is " + config.paths.dataDir,
+      detail: "this bundle " + (typeof meta.dataDir === "string"
+        ? "was taken from " + meta.dataDir
+        : "does not record the data directory it was taken from") + " and this server's data " +
+        "directory is " + config.paths.dataDir + ". The database key is sealed to the path of " +
+        "the directory it belongs to, so a restore into a different one produces a volume that " +
+        "will not open.",
+      remedy: typeof meta.dataDir === "string"
+        ? " Point BLAMEPOST_DATA_DIR at " + meta.dataDir + " and run it again." : "",
+    };
+  }
+  if (meta.hostname !== config.hostname) {
+    return {
+      exit:   2,
+      reason: "it " + (typeof meta.hostname === "string"
+        ? "was taken on the server named " + meta.hostname : "records no server") +
+        " and this server is named " + config.hostname,
+      detail: "this bundle " + (typeof meta.hostname === "string"
+        ? "was taken on the server named " + meta.hostname
+        : "does not record the server it was taken on") + " and this server is named " +
+        config.hostname + ". A bundle carries its server's hosted domains, accounts and DKIM " +
+        "keys.",
+      remedy: typeof meta.hostname === "string"
+        ? " To read it here, run this with BLAMEPOST_HOSTNAME set to " + meta.hostname + "."
+        : "",
+    };
+  }
+  return null;
+}
+
+// The one place a bundle's manifest is read, and the verdict on where it
+// came from in the same answer. Answers `{ manifest, fault }`, and raises
+// what the reader raises when the manifest cannot be read at all.
+//
+// It is one call rather than two because the two were separate and three
+// of the four verbs that read a manifest never made the second one. A
+// caller that can get the manifest on its own is a caller that can report
+// on a bundle without ever asking whether this server could restore it,
+// which is how `backup verify`, `backup inspect` and the retention sweep
+// came to vouch for bundles `restore apply` refuses outright.
+function _readBundle(bundleDir, bundleId, config) {
+  var manifest = b.restoreBundle.inspect({ bundleDir: bundleDir });
+  return { manifest: manifest, fault: _originFault(manifest, bundleId, config) };
+}
+
+// Whether a stored bundle is one a restore could use, checked without
+// decrypting its files: the manifest reads within the limits a restore
+// reads it under, the signature verifies under a key this volume holds or
+// held, the origin it records is this server's, every file the manifest
+// lists is present at the size it lists, and the vault key inside it opens
+// with this passphrase. `backup verify` decrypts every file; this is the
+// check a sweep can afford for every bundle it counts. Answers
+// `{ ok, reason, signature }`.
+async function _bundleStands(bundleDir, passphrase, bundleId, config) {
+  var read;
+  try {
+    read = _readBundle(bundleDir, bundleId, config);
+  } catch (err) {
+    return { ok: false, signature: null,
+      reason: "its manifest cannot be read: " + ((err && err.message) || String(err)) };
+  }
+  var manifest = read.manifest;
+  var signature = b.backup.verifyManifestSignature(manifest);
+  if (!signature.ok) {
+    return { ok: false, signature: signature,
+      reason: "its signature does not verify: " + signature.reason };
+  }
+  if (!_isVolumeSigningKey(signature.fingerprint)) {
+    return { ok: false, signature: signature,
+      reason: "it is signed by key " + signature.fingerprint + ", which this volume has " +
+        "never held" };
+  }
+  // Asked before the files are weighed, because a bundle belonging to
+  // another volume or another moment is one no amount of intact
+  // ciphertext makes restorable here.
+  if (read.fault !== null) {
+    return { ok: false, signature: signature, reason: read.fault.reason };
+  }
+  for (var i = 0; i < manifest.files.length; i += 1) {
+    var entry = manifest.files[i];
+    var size;
+    try {
+      // The manifest names each file, so its path is resolved through the
+      // bundle directory and refused if it leaves it.
+      var blobPath = b.safePath.resolve(bundleDir, entry.encryptedPath);
+      size = nodeFs.lstatSync(blobPath).size;
+    } catch (_err) {
+      size = -1;
+    }
+    if (size !== entry.encryptedSize) {
+      return { ok: false, signature: signature,
+        reason: size === -1
+          ? "the file for " + entry.relativePath + " is missing"
+          : "the file for " + entry.relativePath + " is " + size + " bytes and the manifest " +
+            "lists " + entry.encryptedSize };
+    }
+  }
+  try {
+    var vaultKey = await b.backupCrypto.decryptWithPassphrase(
+      Buffer.from(manifest.vaultKeyEnc, "base64"), passphrase, manifest.vaultKeySalt);
+    vaultKey.fill(0);
+  } catch (_err) {
+    return { ok: false, signature: signature,
+      reason: "it does not open with this passphrase" };
+  }
+  return { ok: true, signature: signature, reason: null };
+}
+
+// Keep the newest `keep` bundles that stand and delete the older ones
+// that stand. A directory that does not stand is neither counted nor
+// deleted: a bundle id sorts by time, so counting a directory that only
+// carries a later id would keep it in place of a bundle that restores.
+async function _sweepBundles(chosen, keep, passphrase, config) {
+  var listed = await chosen.storage.listBundles();
+  var standing = [];
+  var notCounted = [];
+  for (var i = 0; i < listed.length; i += 1) {
+    var id = listed[i].bundleId;
+    var verdict = await _bundleStands(_storedBundleDir(chosen, id), passphrase, id, config);
+    if (verdict.ok) standing.push(id);
+    else notCounted.push({ bundleId: id, reason: verdict.reason });
+  }
+  var deleted = [];
+  var notDeleted = [];
+  var older = standing.slice(keep);
+  for (var j = 0; j < older.length; j += 1) {
+    try {
+      await chosen.storage.deleteBundle(older[j]);
+      deleted.push(older[j]);
+    } catch (err) {
+      notDeleted.push({ bundleId: older[j], reason: (err && err.message) || String(err) });
+    }
+  }
+  return {
+    keep:       keep,
+    kept:       standing.slice(0, keep),
+    deleted:    deleted,
+    notDeleted: notDeleted,
+    notCounted: notCounted,
+  };
+}
+
+function _sweepLines(chosen, swept) {
+  var lines = ["  kept " + swept.kept.length + " bundle(s) that verify, newest first:"]
+    .concat(swept.kept.map(function (id) { return "    " + id; }));
+  lines.push(swept.deleted.length === 0
+    ? "  deleted nothing"
+    : "  deleted " + swept.deleted.length + ":");
+  swept.deleted.forEach(function (id) { lines.push("    " + id); });
+  swept.notDeleted.forEach(function (entry) {
+    lines.push("  could not delete " + entry.bundleId + ": " + entry.reason);
+  });
+  if (swept.notCounted.length > 0) {
+    // Each entry carries its own reason, and there are more of them than
+    // the passphrase and the signing key: a bundle recording another id,
+    // another data directory or another server is one a restore refuses,
+    // so a heading naming two of the reasons describes the wrong bundle
+    // for the rest.
+    lines.push("  left in " + chosen.root + " and not counted, each with the reason a " +
+      "restore here could not use it:");
+    swept.notCounted.forEach(function (entry) {
+      lines.push("    " + entry.bundleId + "  " + entry.reason);
+    });
+  }
+  return lines;
 }
 
 async function cmdBackup(flags, positionals) {
@@ -3781,37 +6815,62 @@ async function cmdBackup(flags, positionals) {
       return report.error("no bundle " + JSON.stringify(wanted.path) + " in " + chosen.root +
         ". `blamepost backup list --storage " + chosen.root + "` prints the ids.", 2);
     }
-    var described = await _withPulledBundle(chosen.storage, wanted.path,
-      async function (bundleDir) {
-        var manifest = b.restoreBundle.inspect({ bundleDir: bundleDir });
-        var signature = b.backup.verifyManifestSignature(bundleDir, {
-          expectedFingerprint: flags.fingerprint || undefined,
-        });
-        var total = 0;
-        manifest.files.forEach(function (entry) { total += entry.encryptedSize || 0; });
-        return {
-          bundleId:      wanted.path,
-          createdAt:     manifest.createdAt || null,
-          fileCount:     manifest.files.length,
-          encryptedSize: total,
-          dataDir:       (manifest.metadata && manifest.metadata.dataDir) || null,
-          hostname:      (manifest.metadata && manifest.metadata.hostname) || null,
-          signature:     signature,
-        };
+    var inspectedDir = _storedBundleDir(chosen, wanted.path);
+    var inspected;
+    var manifest;
+    var signature;
+    try {
+      inspected = _readBundle(inspectedDir, wanted.path, config);
+      manifest = inspected.manifest;
+      signature = b.backup.verifyManifestSignature(manifest, {
+        expectedFingerprint: flags.fingerprint || undefined,
       });
+    } catch (err) {
+      return report.error(wanted.path + " cannot be read: " + ((err && err.message) || String(err)));
+    }
+    var total = 0;
+    manifest.files.forEach(function (entry) { total += entry.encryptedSize || 0; });
+    var described = {
+      bundleId:      wanted.path,
+      recordedId:    (manifest.metadata && manifest.metadata.bundleId) || null,
+      createdAt:     manifest.createdAt || null,
+      fileCount:     manifest.files.length,
+      encryptedSize: total,
+      dataDir:       (manifest.metadata && manifest.metadata.dataDir) || null,
+      hostname:      (manifest.metadata && manifest.metadata.hostname) || null,
+      signature:     signature,
+      // Why a restore here would refuse it, or null when it would not.
+      // A description that reported the three recorded fields and left
+      // the reader to compare them by eye is how a bundle recording
+      // another server passed this verb while `restore apply` refused it.
+      originFault:   inspected.fault === null ? null : inspected.fault.reason,
+      restoresHere:  inspected.fault === null,
+      pinned:        typeof flags.fingerprint === "string" && flags.fingerprint.length > 0,
+    };
     _emit(report, flags, described, [
       described.bundleId,
+      "  written as:     " + (described.recordedId === wanted.path
+        ? "this id" : (described.recordedId || "no id")),
       "  created:        " + described.createdAt,
       "  files:          " + described.fileCount,
       "  encrypted size: " + described.encryptedSize + " bytes",
-      "  data directory: " + (described.dataDir ||
-        "not recorded, so this bundle predates the check that a restore target matches"),
+      "  data directory: " + (described.dataDir || "not recorded"),
       "  server:         " + (described.hostname || "not recorded"),
-      "  signature:      " + (described.signature.ok
-        ? "verified, key " + described.signature.fingerprint
-        : "NOT verified: " + described.signature.reason),
+      "  restores here:  " + (described.restoresHere
+        ? "yes, as far as the manifest says: it records this id, this data directory and " +
+          "this server. `blamepost backup verify` reads every file back."
+        : "no. " + inspected.fault.detail),
+      "  signature:      " + (!described.signature.ok
+        ? "NOT verified: " + described.signature.reason
+        : described.pinned
+          ? "verified, key " + described.signature.fingerprint + ", the key --fingerprint named"
+          : "verified against the key the manifest carries, " +
+            described.signature.fingerprint + ". Anyone can sign a manifest with a key of " +
+            "their own, so this says nothing about who wrote it: `restore apply` holds it " +
+            "against the signing key sealed inside the bundle, and --fingerprint holds it " +
+            "against one you recorded."),
     ]);
-    return described.signature.ok ? 0 : 1;
+    return described.signature.ok && described.restoresHere ? 0 : 1;
   }
 
   if (verb === "verify") {
@@ -3821,38 +6880,63 @@ async function cmdBackup(flags, positionals) {
       return report.error("no bundle " + JSON.stringify(target.path) + " in " + chosen.root +
         ". `blamepost backup list --storage " + chosen.root + "` prints the ids.", 2);
     }
-    var outcome;
+    var verifiedDir = _storedBundleDir(chosen, target.path);
+    var checked;
+    var checkedManifest;
     try {
-      outcome = await _withPulledBundle(chosen.storage, target.path,
-        async function (bundleDir, scratch) {
-          var extracted = await b.restoreBundle.extract({
-            bundleDir:           bundleDir,
-            stagingDir:          _under(scratch, "staging"),
-            passphrase:          passphrase,
-            requireSignature:    true,
-            expectedFingerprint: flags.fingerprint || undefined,
-          });
-          var signature = b.backup.verifyManifestSignature(bundleDir, {
-            expectedFingerprint: flags.fingerprint || undefined,
-          });
-          return {
-            bundleId:   target.path,
-            fileCount:  extracted.fileCount,
-            totalBytes: extracted.totalBytes,
-            signature:  signature,
-          };
-        });
+      checked = _readBundle(verifiedDir, target.path, config);
+      checkedManifest = checked.manifest;
     } catch (err) {
       return report.error(target.path + " does not open: " +
         ((err && err.message) || String(err)));
     }
+    // Before a byte is decrypted, and in the same words `restore apply`
+    // refuses in. This verb answers whether a bundle can be restored, and
+    // every file opening says nothing about that on a bundle belonging to
+    // another volume or another moment.
+    var wrongOrigin = _bundleMismatch(report, checkedManifest, target.path, config,
+      "No file in it was decrypted, and nothing under " + config.paths.dataDir +
+      " was read or written.");
+    if (wrongOrigin !== 0) return wrongOrigin;
+    // Every file is decrypted into a private directory under the temp
+    // directory and removed afterwards, so that filesystem has to hold
+    // the whole plaintext for a moment.
+    var noScratchRoom = _refuseWithoutRoom(report, nodeOs.tmpdir(),
+      _plaintextBytes(checkedManifest), "Verifying " + target.path);
+    if (noScratchRoom !== 0) return noScratchRoom;
+    var outcome;
+    var scratch = _scratchDir("verify");
+    try {
+      var extracted = await b.restoreBundle.extract({
+        bundleDir:           verifiedDir,
+        stagingDir:          _under(scratch, "staging"),
+        passphrase:          passphrase,
+        requireSignature:    true,
+        expectedFingerprint: flags.fingerprint || undefined,
+      });
+      outcome = {
+        bundleId:   target.path,
+        fileCount:  extracted.fileCount,
+        totalBytes: extracted.totalBytes,
+        signature:  b.backup.verifyManifestSignature(extracted.manifest, {
+          expectedFingerprint: flags.fingerprint || undefined,
+        }),
+      };
+    } catch (err) {
+      return report.error(target.path + " does not open: " +
+        ((err && err.message) || String(err)));
+    } finally {
+      _dropScratch(scratch);
+    }
+    var pinnedVerify = typeof flags.fingerprint === "string" && flags.fingerprint.length > 0;
     return _emit(report, flags, { ok: true, verify: outcome }, [
       outcome.bundleId + " verifies.",
       "  " + outcome.fileCount + " file(s) decrypted and checksummed, " +
         outcome.totalBytes + " bytes",
-      "  signature: " + (outcome.signature.ok
-        ? "verified, key " + outcome.signature.fingerprint
-        : outcome.signature.reason),
+      "  signature: " + (pinnedVerify
+        ? "verified, key " + outcome.signature.fingerprint + ", the key --fingerprint named"
+        : "verified against the key the manifest carries, " + outcome.signature.fingerprint +
+          ", which says nothing about who wrote it without --fingerprint"),
       "  Nothing under " + config.paths.dataDir + " was read or written.",
     ]);
   }
@@ -3876,7 +6960,6 @@ async function cmdBackup(flags, positionals) {
         passphrase:   passphrase,
         files:        _backupFiles(config.paths.dataDir),
         vaultKeyJson: function () { return b.vault.getKeysJson(); },
-        retention:    keep === null ? null : { keep: keep },
         // A flush that fails means the snapshot would be older than the
         // database it claims to be, which is exactly the bundle nobody
         // finds out about until they restore it.
@@ -3894,16 +6977,19 @@ async function cmdBackup(flags, positionals) {
         },
       });
 
-      // Read the bundle back out of storage and check the signature on
-      // the manifest, so a bundle that cannot be authenticated never
-      // reports success.
-      var signed = await _withPulledBundle(chosen.storage, summary.bundleId,
-        function (bundleDir) {
-          return b.backup.verifyManifestSignature(bundleDir);
-        });
+      // Read the bundle back where storage put it before anything older is
+      // deleted, so a bundle that cannot be used never reports success and
+      // never costs the bundles before it.
+      var stands = await _bundleStands(_storedBundleDir(chosen, summary.bundleId), passphrase,
+        summary.bundleId, config);
+      var signed = stands.signature || { ok: false, reason: stands.reason };
+      var retained = null;
+      if (stands.ok && keep !== null) {
+        retained = await _sweepBundles(chosen, keep, passphrase, config);
+      }
       await auditActor.record({
         action:   "blamepost.backup.written",
-        outcome:  signed.ok ? "success" : "failure",
+        outcome:  stands.ok ? "success" : "failure",
         actor:    auditActor.current(),
         resource: { kind: "backup_bundle", id: summary.bundleId },
         metadata: {
@@ -3911,49 +6997,63 @@ async function cmdBackup(flags, positionals) {
           fileCount: summary.fileCount,
           bytes:     summary.bundleSize,
           signed:    signed.ok === true,
+          verified:  stands.ok,
+          deleted:   retained === null ? [] : retained.deleted,
         },
       });
       await b.audit.flush();
 
-      _emit(report, flags, Object.assign({ signature: signed }, summary), [
+      var runLines = [
         "Wrote bundle " + summary.bundleId + " to " + chosen.root,
         "  " + summary.fileCount + " file(s), " + summary.bundleSize + " bytes, in " +
           summary.durationMs + "ms",
         "  signature: " + (signed.ok
           ? "verified, key " + signed.fingerprint
           : "NOT verified: " + signed.reason),
-        "  Restoring it needs this passphrase file and the vault passphrase. Neither is " +
-          "in the bundle.",
-        "  A bundle nobody has restored is a hypothesis: `blamepost backup verify` reads " +
-          "every file back.",
-      ]);
-      return signed.ok ? 0 : 1;
+      ];
+      if (!stands.ok) {
+        runLines.push("  This bundle cannot be used: " + stands.reason + ". Nothing older " +
+          "was deleted.");
+      }
+      if (retained !== null) runLines = runLines.concat(_sweepLines(chosen, retained));
+      runLines.push("  Restoring it needs this passphrase file and the vault passphrase. " +
+        "Neither is in the bundle.");
+      runLines.push("  A bundle nobody has restored is a hypothesis: `blamepost backup verify` " +
+        "reads every file back.");
+      _emit(report, flags,
+        Object.assign({ signature: signed, verified: stands.ok, retention: retained }, summary),
+        runLines);
+      return stands.ok ? 0 : 1;
     }
 
     if (verb === "purge") {
-      var purgeEngine = b.backup.create({
-        dataDir:      config.paths.dataDir,
-        storage:      chosen.storage,
-        passphrase:   passphrase,
-        files:        _backupFiles(config.paths.dataDir),
-        vaultKeyJson: function () { return b.vault.getKeysJson(); },
-      });
-      var swept = await purgeEngine.purgeOlder({ keep: keep });
+      var swept = await _sweepBundles(chosen, keep, passphrase, config);
+      // Storage holding bundles and not one of them verifying is a
+      // passphrase or a volume that does not belong to this storage, not
+      // a storage directory with nothing in it to delete.
+      var noneStand = swept.kept.length === 0 && swept.notCounted.length > 0;
       await auditActor.record({
         action:   "blamepost.backup.purged",
-        outcome:  "success",
+        outcome:  noneStand ? "failure" : "success",
         actor:    auditActor.current(),
         reason:   flags.reason,
         resource: { kind: "backup_storage", id: chosen.root },
-        metadata: { kept: swept.kept, deleted: swept.deleted },
+        metadata: {
+          kept:       swept.kept,
+          deleted:    swept.deleted,
+          notCounted: swept.notCounted.map(function (entry) { return entry.bundleId; }),
+        },
       });
       await b.audit.flush();
-      return _emit(report, flags, swept, [
-        "Kept the newest " + swept.kept + " bundle(s) in " + chosen.root + ".",
-      ].concat(swept.deleted.length === 0
-        ? ["  Nothing was old enough to delete."]
-        : ["  Deleted " + swept.deleted.length + ":"].concat(
-          swept.deleted.map(function (id) { return "    " + id; }))));
+      if (noneStand) {
+        _emit(report, flags, swept, ["None of the " + swept.notCounted.length + " bundle(s) in " +
+          chosen.root + " verify with this passphrase and this volume's signing key, so " +
+          "nothing was deleted."].concat(_sweepLines(chosen, swept)));
+        return 1;
+      }
+      return _emit(report, flags, swept,
+        ["Swept " + chosen.root + ", keeping the newest " + keep + " bundle(s) that verify."]
+          .concat(_sweepLines(chosen, swept)));
     }
 
     return report.usage(USAGE_BACKUP);
@@ -3964,10 +7064,312 @@ async function cmdBackup(flags, positionals) {
 
 // ---- restore ----------------------------------------------------------------
 
+// A restore works inside the data directory. In the shipped container the
+// data directory is the mount point of a volume: Linux will not rename it,
+// will not rename a file into it from another filesystem such as the temp
+// directory, and the image's user cannot create anything beside it. So the
+// bundle is decrypted into the store's work directory on the volume, and
+// the swap moves the entries at the top of the volume rather than the
+// directory itself. The names the store reserves are never moved.
+//
+// Layout under the work directory, each name carrying the moment it was
+// made:
+//
+//   incoming-<moment>/    a bundle decrypted and not yet in place
+//   <moment>/             a rollback point: the entries a restore replaced
+//   <moment>.json         what that restore was, for `list-rollbacks`
+//   discarded-<moment>/   the entries a rollback replaced
+//   in-flight.json        a move that has started and not finished
+
+var ROLLBACK_POINT_NAME = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/;
+var WORK_ENTRY_NAME = /^(?:incoming-|discarded-)?\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/;
+
+function _restoreWork(dataDir) {
+  return _under(dataDir, storeModule.RESTORE_WORK_DIR);
+}
+
+function _inFlightPath(dataDir) {
+  return _under(_restoreWork(dataDir), storeModule.RESTORE_IN_FLIGHT);
+}
+
+function _markerPath(dataDir, pointName) {
+  return _under(_restoreWork(dataDir), pointName + ".json");
+}
+
+// Whether a bundle entry lands on a name a restore writes. Bundles written
+// before the store reserved its names carry the lock of the process that
+// took them, and a lock naming a process in another container refuses
+// every open of the restored volume.
+function _restorableEntry(entry) {
+  var first = String(entry.relativePath).split(/[\\/]/)[0];
+  return storeModule.VOLUME_RESERVED.indexOf(first) === -1;
+}
+
+function _movableNames(dir) {
+  var names;
+  try {
+    names = nodeFs.readdirSync(dir);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return [];
+    throw err;
+  }
+  return names.filter(function (name) {
+    return storeModule.VOLUME_RESERVED.indexOf(name) === -1;
+  }).sort();
+}
+
+function _isEmptyDir(dir) {
+  try {
+    return nodeFs.lstatSync(dir).isDirectory() && nodeFs.readdirSync(dir).length === 0;
+  } catch (_err) {
+    return false;
+  }
+}
+
+function _occupied(target) {
+  try {
+    nodeFs.lstatSync(target);
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+
+// Move every entry `from` holds into `to`. A name already present at the
+// destination refuses the whole move before any entry moves, with one
+// exception: an empty directory at the source is removed instead, because
+// opening a volume creates the directories it expects and an undo meets
+// those. Refusing first is what makes a second undo of a move that was
+// already undone refuse rather than carry the volume off.
+function _moveEntries(from, to) {
+  var names = _movableNames(from);
+  var collisions = names.filter(function (name) {
+    return _occupied(_under(to, name)) && !_isEmptyDir(_under(from, name));
+  });
+  if (collisions.length > 0) {
+    throw new Error(to + " already holds " + collisions.join(", ") + ", so nothing in " + from +
+      " was moved");
+  }
+  b.atomicFile.ensureDir(to, 0o700);
+  names.forEach(function (name) {
+    var source = _under(from, name);
+    var target = _under(to, name);
+    if (_occupied(target)) {
+      nodeFs.rmdirSync(source);
+      return;
+    }
+    b.atomicFile.renameWithRetry(source, target);
+  });
+}
+
+// Remove something in the work directory once the volume itself is
+// settled. A removal that fails leaves clutter rather than a broken
+// volume, so it is noted in `left` for the caller to report and not
+// raised. `emptyOnly` removes a directory only when nothing is in it.
+function _tidyWork(left, target, emptyOnly) {
+  try {
+    if (!emptyOnly) nodeFs.rmSync(target, { recursive: true, force: true });
+    else if (_isEmptyDir(target)) nodeFs.rmdirSync(target);
+  } catch (err) {
+    left.push(target + " (" + ((err && err.message) || String(err)) + ")");
+  }
+}
+
+// Remove the in-flight record once the files are where the verb left
+// them. Answers null, or the reason it could not be removed: a record left
+// in place keeps every open of the volume refusing, which the caller has
+// to say.
+function _settleInFlight(dataDir) {
+  try {
+    nodeFs.rmSync(_inFlightPath(dataDir), { force: true });
+    return null;
+  } catch (err) {
+    return (err && err.message) || String(err);
+  }
+}
+
+function _reportLeftovers(report, verb, left) {
+  if (left.length === 0) return;
+  report.writeErr("blamepost restore " + verb + ": these could not be removed from the work " +
+    "directory and can be deleted by hand: " + left.join("; "));
+}
+
+function _writeInFlight(dataDir, record) {
+  b.atomicFile.writeSync(_inFlightPath(dataDir), JSON.stringify(record, null, 2) + "\n",
+    { fileMode: 0o600 });
+}
+
+// The record of a move that has not finished, null when there is none, or
+// `{ unreadable }` when there is one this command cannot act on. A record
+// naming a directory outside the work directory is one of those, since
+// acting on it would move the volume somewhere nobody chose.
+function _readInFlight(dataDir) {
+  var recordPath = _inFlightPath(dataDir);
+  if (!nodeFs.existsSync(recordPath)) return null;
+  var parsed;
+  try {
+    parsed = JSON.parse(String(b.atomicFile.fdSafeReadSync(recordPath, {
+      maxBytes: BYTES.kib(64), refuseSymlink: true, encoding: "utf8",
+    })));
+  } catch (err) {
+    return { unreadable: (err && err.message) || String(err) };
+  }
+  if (!parsed || (parsed.operation !== "apply" && parsed.operation !== "rollback") ||
+      (parsed.phase !== 1 && parsed.phase !== 2) ||
+      !WORK_ENTRY_NAME.test(String(parsed.aside)) ||
+      !WORK_ENTRY_NAME.test(String(parsed.incoming))) {
+    return { unreadable: "it does not describe a move this command makes" };
+  }
+  return parsed;
+}
+
+// A moment no name in the work directory carries yet.
+function _freshStamp(dataDir) {
+  var work = _restoreWork(dataDir);
+  for (var offset = 0; ; offset += 1) {
+    var moment = new Date(Date.now() + offset);
+    var stamp = b.atomicFile.pathTimestamp(moment);
+    var taken = [stamp, "incoming-" + stamp, "discarded-" + stamp, stamp + ".json"]
+      .some(function (name) { return nodeFs.existsSync(_under(work, name)); });
+    if (!taken) return stamp;
+  }
+}
+
+// Set the entries on the volume aside and put others in their place. The
+// record is written before each half, so a process killed at any point
+// leaves a record saying which entries are where.
+function _swapVolume(dataDir, record) {
+  var work = _restoreWork(dataDir);
+  _writeInFlight(dataDir, Object.assign({}, record, { phase: 1 }));
+  _moveEntries(dataDir, _under(work, record.aside));
+  _writeInFlight(dataDir, Object.assign({}, record, { phase: 2 }));
+  _moveEntries(_under(work, record.incoming), dataDir);
+}
+
+// Undo the move the record on the volume describes. Answers null when the
+// volume is back as it was before the move started, and the reason
+// otherwise, in which case the record stays and every open of the volume
+// keeps refusing. The record goes as soon as the files are back, before
+// anything is tidied, so it never describes a move that has already been
+// undone. What could not be tidied is added to `left`.
+function _undoInFlight(dataDir, left) {
+  var record = _readInFlight(dataDir);
+  if (record === null) return null;
+  if (record.unreadable) {
+    return _inFlightPath(dataDir) + " cannot be read (" + record.unreadable + "), so nothing " +
+      "here can say where the volume's files are, and none was moved back.";
+  }
+  var work = _restoreWork(dataDir);
+  // A move that reached its second half created the directory the old
+  // entries went to and still has the one the new entries came from. When
+  // either is gone, the move was already undone and tidied, or somebody
+  // removed files by hand, and moving the volume's entries into a
+  // directory that no longer holds anything would carry the volume off.
+  if (record.phase === 2) {
+    var gone = [record.aside, record.incoming].filter(function (name) {
+      var dir = _under(work, name);
+      return !_occupied(dir) || !nodeFs.lstatSync(dir).isDirectory();
+    });
+    if (gone.length > 0) {
+      return _inFlightPath(dataDir) + " records a move between " + record.aside + " and " +
+        record.incoming + " in " + work + ", and " + gone.join(" and ") + " is not there, so " +
+        "that move has already been undone or its files were removed by hand. Nothing was " +
+        "moved. Check that the volume is the one you want, then delete that file by hand.";
+    }
+  }
+  try {
+    if (record.phase === 2) {
+      _moveEntries(dataDir, _under(work, record.incoming));
+      // The entries that came in are out again, which is where a move
+      // stopped in its first half stands. The record says so before any
+      // original entry comes back, so an undo stopped from here on
+      // resumes by putting the rest back rather than by moving them
+      // toward the incoming entries that share their names.
+      _writeInFlight(dataDir, Object.assign({}, record, { phase: 1 }));
+    }
+    _moveEntries(_under(work, record.aside), dataDir);
+  } catch (err) {
+    return "Putting the files back failed (" + ((err && err.message) || String(err)) + "). " +
+      _inFlightPath(dataDir) + " still records where each file is, and every open of this " +
+      "volume refuses until `blamepost restore rollback --confirm --reason <text>` has put " +
+      "them back, which it does once the cause is fixed.";
+  }
+  var unsettled = _settleInFlight(dataDir);
+  if (unsettled !== null) {
+    return "Every file was put back, and " + _inFlightPath(dataDir) + " could not be removed (" +
+      unsettled + "). Every open of this volume refuses while it exists, so delete it by hand. " +
+      "`blamepost restore rollback` refuses it too, because the move it records has already " +
+      "been undone.";
+  }
+  if (record.operation === "apply") _tidyWork(left, _under(work, record.incoming), false);
+  _tidyWork(left, _under(work, record.aside), true);
+  return null;
+}
+
+// Bundles decrypted by a restore that was stopped before it moved a file.
+// Nothing refers to them once no move is in flight.
+function _dropStaleIncoming(dataDir) {
+  var work = _restoreWork(dataDir);
+  _movableNames(work).forEach(function (name) {
+    if (name.indexOf("incoming-") === 0 && WORK_ENTRY_NAME.test(name)) {
+      nodeFs.rmSync(_under(work, name), { recursive: true, force: true });
+    }
+  });
+}
+
+// The rollback points on the volume, newest first.
+function _rollbackPoints(dataDir) {
+  var work = _restoreWork(dataDir);
+  return _movableNames(work).filter(function (name) {
+    return ROLLBACK_POINT_NAME.test(name) && nodeFs.lstatSync(_under(work, name)).isDirectory();
+  }).sort().reverse().map(function (name) {
+    var marker;
+    try {
+      marker = JSON.parse(String(b.atomicFile.fdSafeReadSync(_markerPath(dataDir, name), {
+        maxBytes: BYTES.kib(64), refuseSymlink: true, encoding: "utf8",
+      })));
+    } catch (_err) {
+      // A point whose marker is gone is still a point; the name carries
+      // the moment it was set aside.
+      marker = null;
+    }
+    return {
+      name:         name,
+      rollbackPath: _under(work, name),
+      swappedAt:    (marker && marker.swappedAt) ||
+        name.replace(/T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, "T$1:$2:$3.$4Z"),
+      marker:       marker,
+    };
+  });
+}
+
+// The origin verdict above, printed as the refusal an operator reads.
+// `closing` is what this verb did about it, and it lands between the
+// finding and what to do next, so the sentence an operator acts on is
+// last. Answers 0, or the exit code of the refusal it printed.
+//
+// The manifest is not yet authenticated when a restore runs this, so it
+// only ever refuses: an edit that made a bundle pass here has re-signed
+// the manifest, and the signing key check after the volume opens refuses
+// that.
+function _bundleMismatch(report, manifest, bundleId, config, closing) {
+  var fault = _originFault(manifest, bundleId, config);
+  if (fault === null) return 0;
+  return report.error(fault.detail + " " + closing + fault.remedy, fault.exit);
+}
+
 // Open the volume that has just been put in place and ask it the
 // questions a restore is for. The framework refuses to open a database
 // whose audit chain does not verify, so reaching this at all is part of
 // the answer, and what it reports is the rest.
+//
+// `signedBy` is the fingerprint of the key that signed the bundle's
+// manifest, or null for a rollback. The manifest carries the key it is
+// checked under, so a signature that verifies says nothing about who made
+// it. The audit signing key sealed inside the bundle is the one key its
+// writer held, and an attacker holding neither passphrase can neither read
+// it nor replace it, so the restored volume's own key is what the
+// manifest's signer is held against.
 //
 // Three readings rather than the two named below, and the third is the
 // one that arrives as a refused open rather than as a field. The store
@@ -3991,7 +7393,7 @@ async function cmdBackup(flags, positionals) {
 // fail into the same field as the opening, a sink that was down read as
 // a volume that would not open, and the caller below undid a restore
 // that had worked.
-async function _openRestoredVolume(config, record) {
+async function _openRestoredVolume(config, record, signedBy) {
   var handle;
   try {
     handle = await storeModule.open(config);
@@ -4013,6 +7415,17 @@ async function _openRestoredVolume(config, record) {
         reason: "a signed checkpoint on the restored volume does not verify: " +
           checkpoints.reason,
         chain: chain, checkpoints: checkpoints };
+    }
+    if (signedBy) {
+      var sealedKey = b.auditSign.getPublicKeyFingerprint();
+      if (sealedKey !== signedBy) {
+        return { ok: false,
+          reason: "the bundle's manifest was signed by key " + signedBy + ", and the audit " +
+            "signing key sealed inside the bundle is " + sealedKey + ". Only the holder of that " +
+            "key could have signed for this bundle, so its manifest was signed by somebody " +
+            "else after it was written and the list of files it names cannot be trusted",
+          chain: chain, checkpoints: checkpoints };
+      }
     }
     var recorded = await record({ accounts: accounts, domains: domains });
     // The flush is wrapped for the same reason `record` is, and it was
@@ -4040,6 +7453,428 @@ async function _openRestoredVolume(config, record) {
   }
 }
 
+// The lines both restore verbs print on standard error when the act stood
+// and the row describing it did not. The volume that act replaced is the
+// one that would have held the row, so nothing else on the machine does.
+function _unrecordedNotes(report, verb, noun, verdict) {
+  if (verdict.recorded === false) {
+    report.writeErr("blamepost restore " + verb + ": the volume was " + noun + " and the row " +
+      "recording it could not be written, so this volume's audit trail has no entry for it. " +
+      "Note what was put in place and when somewhere else, and check where audit rows are " +
+      "being written.");
+  }
+  // Written and not settled onto the volume is the same absence with a
+  // different cause, so it is said rather than swallowed by a row that was
+  // accepted into a buffer nobody drained.
+  if (verdict.flushed === false) {
+    report.writeErr("blamepost restore " + verb + ": the row recording it was written and " +
+      "could not be settled onto the volume (" + verdict.flushReason + "), so the trail may " +
+      "carry no entry for it. The volume itself stays " + noun + ".");
+  }
+}
+
+// `restore apply` from the moment the volume is held.
+async function _applyHeld(report, flags, config, chosen, bundleId, bundleDir, passphrase) {
+  var started = Date.now();
+  var dataDir = config.paths.dataDir;
+  if (_readInFlight(dataDir) !== null) {
+    return report.error("an earlier restore or rollback on this volume stopped partway, and " +
+      _inFlightPath(dataDir) + " records where it left each file. Nothing was restored. Run " +
+      "`blamepost restore rollback --confirm --reason <text>` to put back the volume it " +
+      "replaced, then run this again.");
+  }
+  // Read before anything is decrypted or moved, so the answer describes the
+  // storage the operator chose this bundle from.
+  var newerBundles;
+  try {
+    newerBundles = (await chosen.storage.listBundles()).filter(function (entry) {
+      return entry.bundleId > bundleId;
+    }).length;
+  } catch (_err) {
+    // Reported as not read rather than as none.
+    newerBundles = null;
+  }
+
+  var work = _restoreWork(dataDir);
+  b.atomicFile.ensureDir(work, 0o700);
+  _dropStaleIncoming(dataDir);
+
+  // Where the replaced volume's trail had reached, read from the record
+  // beside its database before anything moves.
+  var replaced = storeModule.recordedAnchor(dataDir);
+  var stamp = _freshStamp(dataDir);
+  var record = {
+    version:   1,
+    operation: "apply",
+    aside:     stamp,
+    incoming:  "incoming-" + stamp,
+    startedAt: new Date(started).toISOString(),
+    bundleId:  bundleId,
+    reason:    flags.reason,
+  };
+  var incomingDir = _under(work, record.incoming);
+
+  var extracted;
+  try {
+    extracted = await b.restoreBundle.extract({
+      bundleDir:           bundleDir,
+      stagingDir:          incomingDir,
+      passphrase:          passphrase,
+      requireSignature:    true,
+      expectedFingerprint: flags.fingerprint || undefined,
+      filter:              _restorableEntry,
+    });
+  } catch (err) {
+    return report.error("nothing was restored: " + ((err && err.message) || String(err)));
+  }
+  // The manifest is read a second time to decrypt, so the checks made on
+  // the first reading are made again on the reading the files came from.
+  var left = [];
+  var changed = _bundleMismatch(report, extracted.manifest, bundleId, config,
+    "Nothing was restored.");
+  if (changed !== 0) {
+    _tidyWork(left, incomingDir, false);
+    _reportLeftovers(report, "apply", left);
+    return changed;
+  }
+  // `extracted` also carries the vault keypair the bundle was sealed with,
+  // which is the key to every sealed column on the volume, so only the
+  // fields named here are read from it and nothing built from the whole
+  // object is printed.
+  var signedBy = b.backup.verifyManifestSignature(extracted.manifest).fingerprint;
+  var bundleCreatedAt = extracted.manifest.createdAt;
+  var fileCount = extracted.fileCount;
+  var totalBytes = extracted.totalBytes;
+
+  try {
+    _swapVolume(dataDir, record);
+  } catch (err) {
+    var swapFailure = (err && err.message) || String(err);
+    var notPutBack = _undoInFlight(dataDir, left);
+    if (notPutBack === null) {
+      _tidyWork(left, incomingDir, false);
+      _reportLeftovers(report, "apply", left);
+      return report.error("nothing was restored: moving the volume's files failed (" +
+        swapFailure + "), and every file was put back where it was.");
+    }
+    return report.error("moving the volume's files failed (" + swapFailure + "). " + notPutBack);
+  }
+
+  var restored = storeModule.recordedAnchor(dataDir);
+  var rollbackPath = _isEmptyDir(_under(work, stamp)) ? null : _under(work, stamp);
+  var verdict = await _openRestoredVolume(config, function (found) {
+    return auditActor.record({
+      action:   "blamepost.restore.applied",
+      outcome:  "success",
+      actor:    auditActor.current(),
+      reason:   flags.reason,
+      resource: { kind: "data_volume", id: dataDir },
+      metadata: {
+        bundleId:        bundleId,
+        bundleCreatedAt: bundleCreatedAt,
+        storage:         chosen.root,
+        rollbackPath:    rollbackPath,
+        replacedAnchor:  replaced === null ? null : replaced.counter,
+        restoredAnchor:  restored === null ? null : restored.counter,
+        accounts:        found.accounts,
+        domains:         found.domains,
+      },
+    });
+  }, signedBy);
+
+  if (!verdict.ok) {
+    // A restore that lands and does not verify is the failure this verb
+    // exists to survive, so the entries it replaced go back.
+    var undoFailure = _undoInFlight(dataDir, left);
+    report.writeErr("blamepost restore apply: the restored data directory did not open: " +
+      verdict.reason);
+    _reportLeftovers(report, "apply", left);
+    _emit(report, flags,
+      { ok: false, bundleId: bundleId, reason: verdict.reason, putBack: undoFailure === null },
+      [undoFailure === null
+        ? "Nothing was restored. The volume that was here before is back in place."
+        : "The volume that was here before is not back in place. " + undoFailure]);
+    return 1;
+  }
+
+  // The restore stands from here. The record goes first, so a failure
+  // tidying afterwards cannot leave a record describing a move that
+  // finished.
+  var standing = _settleInFlight(dataDir);
+  if (standing !== null) {
+    report.writeErr("blamepost restore apply: the volume was restored and verified, and " +
+      _inFlightPath(dataDir) + " could not be removed (" + standing + "). Every open of this " +
+      "volume refuses while it exists. Delete it by hand to keep this volume, or run " +
+      "`blamepost restore rollback --confirm --reason <text>` to put back the one it replaced.");
+    return 1;
+  }
+  _tidyWork(left, incomingDir, false);
+  if (rollbackPath === null) {
+    _tidyWork(left, _under(work, stamp), true);
+  } else {
+    try {
+      b.atomicFile.writeSync(_markerPath(dataDir, stamp), JSON.stringify({
+        version:         1,
+        swappedAt:       new Date().toISOString(),
+        bundleId:        bundleId,
+        bundleCreatedAt: bundleCreatedAt,
+        reason:          flags.reason,
+      }, null, 2) + "\n", { fileMode: 0o600 });
+    } catch (err) {
+      report.writeErr("blamepost restore apply: the description of the rollback point at " +
+        rollbackPath + " could not be written (" + ((err && err.message) || String(err)) +
+        "). The point is still listed and still usable.");
+    }
+  }
+  _reportLeftovers(report, "apply", left);
+
+  _unrecordedNotes(report, "apply", "restored", verdict);
+
+  var replacedCounter = replaced === null ? null : replaced.counter;
+  var restoredCounter = restored === null ? null : restored.counter;
+
+  var lines = [
+    "Restored " + bundleId + " into " + dataDir,
+    "  " + fileCount + " file(s), " + totalBytes + " bytes, in " + (Date.now() - started) + "ms",
+    "  taken:    " + bundleCreatedAt,
+    "  signed:   key " + signedBy + ", the audit signing key the restored volume holds",
+    rollbackPath
+      ? "  kept the entries it replaced at " + rollbackPath
+      : "  nothing was here to replace, so no rollback point was kept",
+    "  chain:    " + verdict.chain.rowsVerified + " row(s) verified, " +
+      verdict.checkpoints.checkpointsVerified + " signed checkpoint(s)",
+    "  holds:    " + verdict.accounts + " account(s) across " + verdict.domains + " domain(s)",
+  ];
+  if (replacedCounter !== null && restoredCounter !== null && replacedCounter > restoredCounter) {
+    lines.push("  rewinds:  the volume it replaced had anchored its audit trail at counter " +
+      replacedCounter + ", and this bundle's trail is anchored at counter " + restoredCounter +
+      ". What the trail recorded in between is not on this volume: accounts, credentials, " +
+      "aliases and keys added, changed, revoked or removed since " + bundleCreatedAt + " are " +
+      "as they were then. Those rows are in the rollback point.");
+  } else if (replacedCounter === null && rollbackPath) {
+    lines.push("  rewinds:  the volume it replaced held no readable record of where its audit " +
+      "trail had reached, so nothing here can say how much this restore rewinds.");
+  }
+  if (newerBundles === null) {
+    lines.push("  storage:  the bundles in " + chosen.root + " could not be listed, so nothing " +
+      "here can say whether a newer one exists.");
+  } else if (newerBundles > 0) {
+    lines.push("  storage:  " + newerBundles + " bundle(s) in " + chosen.root + " are newer " +
+      "than this one.");
+  }
+
+  return _emit(report, flags, {
+    ok:              true,
+    bundleId:        bundleId,
+    bundleCreatedAt: bundleCreatedAt,
+    signedBy:        signedBy,
+    fileCount:       fileCount,
+    totalBytes:      totalBytes,
+    rollbackPath:    rollbackPath,
+    replacedAnchor:  replacedCounter,
+    restoredAnchor:  restoredCounter,
+    newerBundles:    newerBundles,
+    durationMs:      Date.now() - started,
+    verified:        true,
+    chain:           verdict.chain,
+    checkpoints:     verdict.checkpoints,
+    accounts:        verdict.accounts,
+    domains:         verdict.domains,
+  }, lines.concat([
+    "",
+    // Two runs, both before the server takes the volume, and in this
+    // order because only one of them opens a message body.
+    //
+    // What has just been verified is the bundle's signature and the
+    // audit chain in the database. Neither says whether the mail is
+    // still readable: a backup taken over a volume that had already
+    // lost or damaged a body preserves it exactly, and one taken while
+    // mail was arriving can carry a row whose body had not been
+    // written yet. `blobs report --verify` is the only thing that
+    // unseals each body and hashes it back against the row naming it.
+    //
+    // `doctor` counts bodies without opening them, so it cannot answer
+    // that question. Both verbs answer while the server holds the
+    // volume, off a read-only open whose rows stop at the server's last
+    // write to disk; running them here instead reads rows that nothing
+    // is still writing to, which is why the epilogue sends the operator
+    // to them before the start rather than after it.
+    "This volume opened and its audit chain verified. Neither of those opens a message",
+    "body, so before starting the server:",
+    "",
+    "  blamepost blobs report --verify",
+    "    unseals every body a row names and hashes it back against that row. A backup",
+    "    keeps whatever state the volume was in when it was taken, so this is where a",
+    "    message that was already unreadable shows up.",
+    "",
+    "  blamepost doctor",
+    "    a restore rewinds DKIM state, and this is what holds the selectors against the",
+    "    records in the zone. Run it here rather than after the server starts: once the",
+    "    server holds the volume it reads rows that stop at the server's last write to",
+    "    disk, and says how old that reading is before it reports anything.",
+  ]));
+}
+
+// `restore rollback` from the moment the volume is held. With a move on
+// record that did not finish, it undoes that move; otherwise it puts a
+// rollback point back.
+async function _rollbackHeld(report, flags, config) {
+  var dataDir = config.paths.dataDir;
+  var work = _restoreWork(dataDir);
+  var left = [];
+
+  var pending = _readInFlight(dataDir);
+  if (pending !== null) {
+    if (flags.point !== undefined) {
+      return report.error("an earlier restore or rollback on this volume stopped partway, and " +
+        "it has to be undone before a rollback point can be chosen. Run this again without " +
+        "--point.", 2);
+    }
+    if (pending.unreadable) {
+      return report.error(_inFlightPath(dataDir) + " cannot be read, so nothing here can say " +
+        "where the volume's files are: " + pending.unreadable + ". Nothing was moved.");
+    }
+    var what = pending.operation === "apply"
+      ? "the restore of " + pending.bundleId
+      : "the rollback";
+    var stuck = _undoInFlight(dataDir, left);
+    _reportLeftovers(report, "rollback", left);
+    if (stuck !== null) {
+      return report.error(what + " that stopped partway was not undone. " + stuck);
+    }
+    var recovered = await _openRestoredVolume(config, function (found) {
+      return auditActor.record({
+        action:   "blamepost.restore.rolled_back",
+        outcome:  "success",
+        actor:    auditActor.current(),
+        reason:   flags.reason,
+        resource: { kind: "data_volume", id: dataDir },
+        metadata: {
+          interrupted: pending.operation,
+          bundleId:    pending.bundleId || null,
+          startedAt:   pending.startedAt || null,
+          accounts:    found.accounts,
+          domains:     found.domains,
+        },
+      });
+    }, null);
+    if (recovered.ok) _unrecordedNotes(report, "rollback", "rolled back", recovered);
+    _emit(report, flags,
+      { ok: recovered.ok, verified: recovered.ok, undone: pending.operation,
+        bundleId: pending.bundleId || null },
+      ["Undid " + what + " that stopped partway, and put back the volume that was here " +
+        "before it started.",
+      recovered.ok
+        ? "  It opened and its audit chain verified."
+        : "  It did NOT open: " + recovered.reason]);
+    return recovered.ok ? 0 : 1;
+  }
+
+  var points = _rollbackPoints(dataDir);
+  var point = null;
+  if (flags.point !== undefined) {
+    var named = String(flags.point);
+    point = points.filter(function (candidate) {
+      return candidate.name === named ||
+        nodePath.resolve(candidate.rollbackPath) === nodePath.resolve(named);
+    })[0] || null;
+    if (point === null) {
+      return report.error(JSON.stringify(named) + " is not one of this volume's rollback " +
+        "points, so nothing was moved. `blamepost restore list-rollbacks` prints the ones it " +
+        "holds.", 2);
+    }
+  } else {
+    if (points.length === 0) {
+      return report.error("this volume holds no rollback point, so there is nothing to put " +
+        "back. One is kept every time `blamepost restore apply` replaces a volume.", 2);
+    }
+    point = points[0];
+  }
+
+  var stamp = _freshStamp(dataDir);
+  var record = {
+    version:   1,
+    operation: "rollback",
+    aside:     "discarded-" + stamp,
+    incoming:  point.name,
+    startedAt: new Date().toISOString(),
+    reason:    flags.reason,
+  };
+  try {
+    _swapVolume(dataDir, record);
+  } catch (err) {
+    var swapFailure = (err && err.message) || String(err);
+    var notPutBack = _undoInFlight(dataDir, left);
+    _reportLeftovers(report, "rollback", left);
+    if (notPutBack === null) {
+      return report.error("nothing was rolled back: moving the volume's files failed (" +
+        swapFailure + "), and every file was put back where it was.");
+    }
+    return report.error("moving the volume's files failed (" + swapFailure + "). " + notPutBack);
+  }
+
+  var discardedAt = _isEmptyDir(_under(work, record.aside)) ? null : _under(work, record.aside);
+  var back = await _openRestoredVolume(config, function (found) {
+    return auditActor.record({
+      action:   "blamepost.restore.rolled_back",
+      outcome:  "success",
+      actor:    auditActor.current(),
+      reason:   flags.reason,
+      resource: { kind: "data_volume", id: dataDir },
+      metadata: {
+        restoredFrom: point.rollbackPath,
+        discarded:    discardedAt,
+        accounts:     found.accounts,
+        domains:      found.domains,
+      },
+    });
+  }, null);
+
+  if (!back.ok) {
+    var undoFailure = _undoInFlight(dataDir, left);
+    report.writeErr("blamepost restore rollback: the rollback point did not open: " + back.reason);
+    _reportLeftovers(report, "rollback", left);
+    _emit(report, flags,
+      { ok: false, verified: false, rollbackPath: point.rollbackPath, reason: back.reason,
+        putBack: undoFailure === null },
+      ["The rollback point at " + point.rollbackPath + " did NOT open: " + back.reason,
+        undoFailure === null
+          ? "  The volume that was live before this ran is back in place, and the point is " +
+            "still at " + point.rollbackPath + "."
+          : "  The volume that was live before this ran is not back in place. " + undoFailure]);
+    return 1;
+  }
+
+  // The rollback stands from here, so the record goes before anything is
+  // tidied.
+  var standing = _settleInFlight(dataDir);
+  if (standing !== null) {
+    report.writeErr("blamepost restore rollback: the volume was rolled back and verified, and " +
+      _inFlightPath(dataDir) + " could not be removed (" + standing + "). Every open of this " +
+      "volume refuses while it exists. Delete it by hand to keep this volume, or run this " +
+      "command again to put back the entries it replaced.");
+    return 1;
+  }
+  _tidyWork(left, point.rollbackPath, true);
+  _tidyWork(left, _markerPath(dataDir, point.name), false);
+  if (discardedAt === null) _tidyWork(left, _under(work, record.aside), true);
+  _reportLeftovers(report, "rollback", left);
+
+  // The rollback stands either way, and an operator standing at a
+  // terminal is the one caller who can be told that the volume they just
+  // put back holds no record of the putting back.
+  _unrecordedNotes(report, "rollback", "rolled back", back);
+  _emit(report, flags,
+    { ok: true, verified: true, restoredFrom: point.rollbackPath, discardedAt: discardedAt }, [
+      "Rolled back to " + point.rollbackPath,
+      discardedAt
+        ? "  The entries that were live are kept at " + discardedAt
+        : "  Nothing was live, so nothing was kept.",
+      "  It opened and its audit chain verified.",
+    ]);
+  return 0;
+}
+
 async function cmdRestore(flags, positionals) {
   var report = _reporter("restore");
   var verb = positionals[0];
@@ -4049,86 +7884,46 @@ async function cmdRestore(flags, positionals) {
   var config = _configFrom(flags);
 
   if (verb === "list-rollbacks") {
-    var points = b.restoreRollback.list({ dataDir: config.paths.dataDir });
+    var listedDir = config.paths.dataDir;
+    var pending = _readInFlight(listedDir);
+    if (pending !== null) {
+      report.writeErr("blamepost restore list-rollbacks: " + (pending.unreadable
+        ? _inFlightPath(listedDir) + " records a restore or rollback that did not finish and " +
+          "cannot be read (" + pending.unreadable + ")"
+        : "a " + (pending.operation === "apply" ? "restore" : "rollback") + " started at " +
+          JSON.stringify(pending.startedAt) + " stopped partway, and " +
+          _inFlightPath(listedDir) + " records it") + ". Every open of this volume refuses " +
+        "until `blamepost restore rollback --confirm --reason <text>` has put it back.");
+    }
+    var points = _rollbackPoints(listedDir);
     return _emit(report, flags, points, points.length === 0
-      ? ["No rollback points. One is kept every time `blamepost restore apply` runs."]
+      ? ["No rollback points. One is kept every time `blamepost restore apply` replaces a " +
+        "volume."]
       : [points.length + " rollback point(s), newest first"].concat(
         points.map(function (point) {
-          var operator = (point.marker && point.marker.operator) || {};
+          var marker = point.marker || {};
           return "  " + point.rollbackPath + "\n" +
             "    swapped " + point.swappedAt +
-            (operator.bundleId ? "\n    bundle  " + operator.bundleId : "") +
-            (operator.reason ? "\n    reason  " + operator.reason : "");
+            (marker.bundleId ? "\n    bundle  " + marker.bundleId : "") +
+            (marker.reason ? "\n    reason  " + marker.reason : "");
         })));
   }
 
   if (verb === "rollback") {
     var confirmedRollback = _requireConfirmation(report, flags,
-      "Rolling back replaces the live data volume with the directory kept before a restore, " +
-      "and discards what is there now.");
+      "Rolling back replaces the live data volume with the entries kept before a restore.");
     if (confirmedRollback !== 0) return confirmedRollback;
-    var chosenPoint = flags.point;
-    if (chosenPoint !== undefined && !b.atomicFile.exists(chosenPoint)) {
-      return report.error("no rollback point at " + JSON.stringify(chosenPoint) +
-        ". `blamepost restore list-rollbacks` prints the ones this volume has.", 2);
-    }
-    if (chosenPoint === undefined) {
-      var held = b.restoreRollback.list({ dataDir: config.paths.dataDir });
-      if (held.length === 0) {
-        return report.error("this volume holds no rollback point, so there is nothing to " +
-          "put back. One is kept every time `blamepost restore apply` runs.", 2);
-      }
-      chosenPoint = held[0].rollbackPath;
-    }
-    var rolledBack;
+    var rollbackHold;
     try {
-      rolledBack = await b.restoreRollback.rollback({
-        dataDir:      config.paths.dataDir,
-        rollbackPath: chosenPoint,
-      });
+      rollbackHold = storeModule.holdVolume(config);
     } catch (err) {
       return report.error("nothing was rolled back: " + ((err && err.message) || String(err)));
     }
-    var back = await _openRestoredVolume(config, function (found) {
-      return auditActor.record({
-        action:   "blamepost.restore.rolled_back",
-        outcome:  "success",
-        actor:    auditActor.current(),
-        reason:   flags.reason,
-        resource: { kind: "data_volume", id: config.paths.dataDir },
-        metadata: {
-          restoredFrom: rolledBack.restoredFrom,
-          discarded:    rolledBack.discardedAt,
-          accounts:     found.accounts,
-          domains:      found.domains,
-        },
-      });
-    });
-    // The rollback stands either way, and an operator standing at a
-    // terminal is the one caller who can be told that the volume they
-    // just put back holds no record of the putting back.
-    if (back.ok && back.recorded === false) {
-      report.writeErr("blamepost restore rollback: the volume was rolled back and the row " +
-        "recording it could not be written, so this volume's audit trail has no entry for " +
-        "it. Note what was put back and when somewhere else, and check where audit rows " +
-        "are being written.");
+    try {
+      return await _rollbackHeld(report, flags, config);
+    } finally {
+      rollbackHold.release();
     }
-    // Written and not settled onto the volume is the same absence with a
-    // different cause, so it is said rather than swallowed by a row that
-    // was accepted into a buffer nobody drained.
-    if (back.ok && back.flushed === false) {
-      report.writeErr("blamepost restore rollback: the row recording it was written and " +
-        "could not be settled onto the volume (" + back.flushReason + "), so the trail may " +
-        "carry no entry for this rollback. The rollback itself stands.");
-    }
-    _emit(report, flags, Object.assign({ verified: back.ok }, rolledBack), [
-      "Rolled back to " + rolledBack.restoredFrom,
-      "  The directory that was live is kept at " + rolledBack.discardedAt,
-      back.ok
-        ? "  It opened and its audit chain verified."
-        : "  It did NOT open: " + back.reason,
-    ]);
-    return back.ok ? 0 : 1;
   }
 
   if (verb === "apply") {
@@ -4147,169 +7942,38 @@ async function cmdRestore(flags, positionals) {
         ". `blamepost backup list --storage " + chosen.root + "` prints the ids.", 2);
     }
 
-    // The database key is sealed to the absolute path of the directory
-    // it belongs to, so a bundle taken from one directory produces a
-    // volume that will not open anywhere else. Reading the manifest is
-    // cheap and needs no passphrase, so the mismatch is refused here
-    // rather than found after the live directory has been moved aside.
-    var origin = await _withPulledBundle(chosen.storage, wanted.path, function (bundleDir) {
-      var manifest = b.restoreBundle.inspect({ bundleDir: bundleDir });
-      return (manifest.metadata && manifest.metadata.dataDir) || null;
-    });
-    if (origin !== null && origin !== config.paths.dataDir) {
-      return report.error("this bundle was taken from " + origin + " and this server's data " +
-        "directory is " + config.paths.dataDir + ". The database key is sealed to the path " +
-        "of the directory it belongs to, so a restore into a different one produces a volume " +
-        "that will not open. Point BLAMEPOST_DATA_DIR at " + origin +
-        " and run it again.", 2);
-    }
-
-    var restoreHandle = b.restore.create({
-      dataDir:             config.paths.dataDir,
-      storage:             chosen.storage,
-      passphrase:          read.passphrase,
-      requireSignature:    true,
-      expectedFingerprint: flags.fingerprint || undefined,
-      // The database is not open at this point, so an audit event would
-      // be written nowhere. The restore records itself in the volume it
-      // just put in place, which is the one that can hold the row.
-      audit:               false,
-    });
-    var applied;
+    // What the manifest records about where the bundle came from, and the
+    // room its files need, are both read without the passphrase and
+    // without the volume, so a bundle that cannot be restored here is
+    // refused before anything is held or moved.
+    var bundleDir = _storedBundleDir(chosen, wanted.path);
+    var described;
     try {
-      applied = await restoreHandle.run({
-        bundleId: wanted.path,
-        marker:   { reason: flags.reason },
-      });
+      described = _readBundle(bundleDir, wanted.path, config).manifest;
+    } catch (err) {
+      return report.error(wanted.path + " cannot be read, so nothing was restored: " +
+        ((err && err.message) || String(err)));
+    }
+    var mismatch = _bundleMismatch(report, described, wanted.path, config,
+      "Nothing was restored.");
+    if (mismatch !== 0) return mismatch;
+    var noRoom = _refuseWithoutRoom(report, config.paths.dataDir,
+      _plaintextBytes(described, _restorableEntry),
+      "Restoring " + wanted.path);
+    if (noRoom !== 0) return noRoom;
+
+    var applyHold;
+    try {
+      applyHold = storeModule.holdVolume(config);
     } catch (err) {
       return report.error("nothing was restored: " + ((err && err.message) || String(err)));
     }
-
-    var verdict = await _openRestoredVolume(config, function (found) {
-      return auditActor.record({
-        action:   "blamepost.restore.applied",
-        outcome:  "success",
-        actor:    auditActor.current(),
-        reason:   flags.reason,
-        resource: { kind: "data_volume", id: config.paths.dataDir },
-        metadata: {
-          bundleId:     wanted.path,
-          storage:      chosen.root,
-          rollbackPath: applied.rollbackPath,
-          accounts:     found.accounts,
-          domains:      found.domains,
-        },
-      });
-    });
-    if (!verdict.ok) {
-      // A restore that lands and does not open is the failure this verb
-      // exists to survive. The directory that was here before was kept,
-      // so it goes back.
-      var undone = null;
-      if (applied.rollbackPath) {
-        try {
-          undone = await b.restoreRollback.rollback({
-            dataDir:      config.paths.dataDir,
-            rollbackPath: applied.rollbackPath,
-          });
-        } catch (err) {
-          undone = { failed: (err && err.message) || String(err) };
-        }
-      }
-      report.writeErr("blamepost restore apply: the restored data directory did not open: " +
-        verdict.reason);
-      _emit(report, flags,
-        { ok: false, bundleId: wanted.path, reason: verdict.reason,
-          rolledBackTo: undone && undone.restoredFrom ? undone.restoredFrom : null },
-        [undone && undone.restoredFrom
-          ? "Rolled back to " + undone.restoredFrom + ", which is what was here before."
-          : undone && undone.failed
-            ? "The rollback failed too: " + undone.failed +
-              ". The bundle is still in storage and the rollback point is still on disk."
-            : "There was nothing to roll back to, because the data directory was empty " +
-              "before this ran. The bundle is still in storage."]);
-      return 1;
+    try {
+      return await _applyHeld(report, flags, config, chosen, wanted.path, bundleDir,
+        read.passphrase);
+    } finally {
+      applyHold.release();
     }
-
-    // The restore stands. What did not happen is the row describing it,
-    // and the volume it would have gone into is the one that was just
-    // replaced, so nothing else on this machine carries the fact.
-    if (verdict.recorded === false) {
-      report.writeErr("blamepost restore apply: the volume was restored and the row " +
-        "recording it could not be written, so this volume's audit trail has no entry for " +
-        "it. Note the bundle id and the time somewhere else, and check where audit rows are " +
-        "being written.");
-    }
-    if (verdict.flushed === false) {
-      report.writeErr("blamepost restore apply: the row recording it was written and could " +
-        "not be settled onto the volume (" + verdict.flushReason + "), so the trail may " +
-        "carry no entry for this restore. The restore itself stands.");
-    }
-
-    // `applied` also carries the vault keypair the bundle was sealed
-    // with. It is the key to every sealed column on the volume, so the
-    // report is built field by field rather than from the whole object:
-    // a terminal, a log and a pipeline that captures one are all places
-    // it must never reach.
-    return _emit(report, flags, {
-      ok:           true,
-      bundleId:     applied.bundleId,
-      fileCount:    applied.fileCount,
-      totalBytes:   applied.totalBytes,
-      rollbackPath: applied.rollbackPath,
-      durationMs:   applied.durationMs,
-      verified:     true,
-      chain:        verdict.chain,
-      checkpoints:  verdict.checkpoints,
-      accounts:     verdict.accounts,
-      domains:      verdict.domains,
-    }, [
-      "Restored " + applied.bundleId + " into " + config.paths.dataDir,
-      "  " + applied.fileCount + " file(s), " + applied.totalBytes + " bytes, in " +
-        applied.durationMs + "ms",
-      // Null when there was no data directory here to move aside, which
-      // is what a restore onto a fresh host looks like. The failure path
-      // above already reads it that way; printing the word null as a
-      // location is the same fact reported as a place an operator could
-      // go and look.
-      applied.rollbackPath
-        ? "  kept the directory it replaced at " + applied.rollbackPath
-        : "  nothing was here to replace, so no earlier directory was kept",
-      "  chain:    " + verdict.chain.rowsVerified + " row(s) verified, " +
-        verdict.checkpoints.checkpointsVerified + " signed checkpoint(s)",
-      "  holds:    " + verdict.accounts + " account(s) across " + verdict.domains + " domain(s)",
-      "",
-      // Two runs, both before the server takes the volume, and in this
-      // order because only one of them opens a message body.
-      //
-      // What has just been verified is the bundle's signature and the
-      // audit chain in the database. Neither says whether the mail is
-      // still readable: a backup taken over a volume that had already
-      // lost or damaged a body preserves it exactly, and one taken while
-      // mail was arriving can carry a row whose body had not been
-      // written yet. `blobs report --verify` is the only thing that
-      // unseals each body and hashes it back against the row naming it.
-      //
-      // `doctor` counts bodies without opening them, so it cannot answer
-      // that question. Both verbs answer while the server holds the
-      // volume, off a read-only open whose rows stop at the server's last
-      // write to disk; running them here instead reads rows that nothing
-      // is still writing to, which is why the epilogue sends the operator
-      // to them before the start rather than after it.
-      "This volume opened and its audit chain verified. Neither of those opens a message",
-      "body, so before starting the server:",
-      "",
-      "  blamepost blobs report --verify",
-      "    unseals every body a row names and hashes it back against that row. A backup",
-      "    keeps whatever state the volume was in when it was taken, so this is where a",
-      "    message that was already unreadable shows up.",
-      "",
-      "  blamepost doctor",
-      "    a restore rewinds DKIM state, and this is what holds the selectors against the",
-      "    records in the zone. Run it here rather than after the server starts: once the",
-      "    server holds the volume it reads rows that stop at the server's last write to",
-      "    disk, and says how old that reading is before it reports anything.",
-    ]);
   }
 
   return report.usage(USAGE_RESTORE);
@@ -4331,12 +7995,23 @@ function _isArgumentFault(err) {
 // The stack belongs to whoever is debugging blamepost, not to the
 // operator reading a refusal, so it is printed only when they have asked
 // for that much detail.
+//
+// Both writes go through the screen. The message is whatever the layer
+// underneath was holding, which for an unreadable argument is the token
+// itself and for a refused lookup is the name that was looked up, and
+// the stack carries that same message on its first line. The stack is
+// screened per line by the same helper the reporter uses, so the frames
+// below it stay on their own lines.
 function _reportFailure(command, err) {
-  var message = (err && err.message) || String(err);
+  var message = _linesForDisplay((err && err.message) || String(err));
   var argumentFault = _isArgumentFault(err);
   process.stderr.write("blamepost" + (command ? " " + command : "") + ": " + message + "\n");
-  if (String(process.env.BLAMEPOST_LOG_LEVEL || "").toLowerCase() === "debug") {
-    if (err && err.stack) process.stderr.write(err.stack + "\n");
+  // The level in effect rather than the environment variable. A level
+  // written in the configuration file is an equal origin everywhere else
+  // it is read, and an operator who set `logLevel` there and got no
+  // trace was reading a document that promised one.
+  if (configModule.logLevelInEffect() === "debug") {
+    if (err && err.stack) process.stderr.write(_linesForDisplay(err.stack) + "\n");
   } else if (!argumentFault) {
     // Offered only where it would help. A mistyped address is fixed by
     // retyping it, and pointing at a stack trace suggests otherwise.
@@ -4375,14 +8050,25 @@ async function _run(command, flags, positionals) {
     case "account": return await cmdAccount(flags, positionals);
     case "domain":  return await cmdDomain(flags, positionals);
     case "dkim":    return await cmdDkim(flags, positionals);
+    case "zone":    return await cmdZone(flags, positionals);
+    case "credential": return await cmdCredential(flags, positionals);
+    case "reports": return await cmdReports(flags, positionals);
+    case "dmarc":   return await cmdDmarc(flags, positionals);
     case "queue":   return await cmdQueue(flags, positionals);
     case "blobs":   return await cmdBlobs(flags, positionals);
+    case "attachments": return await cmdAttachments(flags, positionals);
     case "doctor":  return await cmdDoctor(flags);
     case "audit":   return await cmdAudit(flags, positionals);
     case "backup":  return await cmdBackup(flags, positionals);
     case "restore": return await cmdRestore(flags, positionals);
     default:
-      process.stderr.write("blamepost: no command named '" + command + "'\n");
+      // The name is quoted back so the operator can see what was read,
+      // and it is screened for the same reason every other quoted value
+      // here is: an argument reaching this server from a container
+      // entrypoint, a scheduled job or a line copied off a page is not
+      // text this server wrote.
+      process.stderr.write("blamepost: no command named '" +
+        _linesForDisplay(command) + "'\n");
       return 2;
   }
 }
@@ -4393,7 +8079,8 @@ async function main(argv) {
   try {
     parsed = parser.parse(argv);
   } catch (err) {
-    process.stderr.write("blamepost: " + ((err && err.message) || String(err)) + "\n");
+    process.stderr.write("blamepost: " +
+      _linesForDisplay((err && err.message) || String(err)) + "\n");
     process.stderr.write("Run `blamepost help` for the list of commands.\n");
     return 2;
   }

@@ -80,6 +80,11 @@ var check   = helpers.check;
 // arriving here as a hole nobody edits.
 var tables  = require("../../lib/store/tables");
 
+// The vocabulary gate, for its `word` decoder. The input-validation labels
+// end in a word that gate refuses in every file, so the detector below
+// that names those labels builds the word from parts with `word`.
+var vocabulary = require("../../scripts/check-forbidden-vocabulary.js");
+
 var REPO_ROOT = helpers.REPO_ROOT;
 var SELF_REL  = "test/layer-0-primitives/codebase-patterns.test.js";
 
@@ -87,6 +92,16 @@ var SELF_REL  = "test/layer-0-primitives/codebase-patterns.test.js";
 // punctuation the detector refuses.
 var EM_DASH = String.fromCharCode(0x2014);
 var EN_DASH = String.fromCharCode(0x2013);
+
+// The same construction, for the control characters. A red fixture for
+// `raw-control-byte-in-text` has to CARRY the byte it proves the matcher
+// fires on, and typing one here would make this file the next thing the
+// detector reports. Building it is also the convention the detector
+// exists to enforce, so the fixtures are written the way the tree is.
+var NUL       = String.fromCharCode(0x00);
+var VTAB      = String.fromCharCode(0x0b);
+var ESCAPE    = String.fromCharCode(0x1b);
+var DELETE_CH = String.fromCharCode(0x7f);
 
 // ---------------------------------------------------------------------------
 // File-tree walking
@@ -161,8 +176,16 @@ function _readRecord(abs) {
   var rel = _relPath(abs);
   if (_fileCache[rel]) return _fileCache[rel];
   var text;
+  // A read fault is refused rather than answered with empty text. Empty text
+  // is a file every detector reads as clean, and it still counts toward the
+  // total each one publishes, so a locked or vanished file would buy itself a
+  // pass from all 100 at once with nothing in the output to say so.
   try { text = fs.readFileSync(abs, "utf8"); }
-  catch (_e) { text = ""; }
+  catch (e) {
+    throw new Error("codebase-patterns: " + rel + " was found by the walk and could not be " +
+      "read (" + (e && e.code ? e.code : "read fault") + "). A file this gate cannot open is " +
+      "not a file it can report clean.");
+  }
   var rec = { rel: rel, abs: abs, text: text, lines: text.split(/\r?\n/) };
   _fileCache[rel] = rec;
   return rec;
@@ -229,6 +252,32 @@ function _codeOf(line) {
   if (_isCommentLine(line)) return "";
   var comment = _commentOf(line);
   return comment ? line.slice(0, line.length - comment.length) : line;
+}
+
+// What a line holds when the whole line is a `//` comment: the marker
+// and the indentation removed, or "" when the line is anything else.
+//
+// The three comment surfaces are different places and this reads one of
+// them. Code is disabled by commenting the lines it occupies, which puts
+// the disabled statement at the head of its own line. A block comment is
+// where a usage example is written, so whole call statements appear
+// there verbatim under `@example` and mean the opposite thing. A comment
+// on the end of a line of code sits beside a statement that still runs.
+function _lineCommentBody(line) {
+  if (!/^\s*\/\//.test(line)) return "";
+  return line.trim().replace(/^\/\/+\s?/, "").trim();
+}
+
+// Whether a fragment leaves a parenthesis open, so whatever it begins
+// carries on past the end of it.
+function _leavesParenOpen(text) {
+  var open = 0;
+  for (var i = 0; i < text.length; i += 1) {
+    var c = text.charAt(i);
+    if (c === "(") open += 1;
+    else if (c === ")") open -= 1;
+  }
+  return open > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -583,6 +632,45 @@ function _callArguments(mask, openParenIdx) {
 function _firstArgument(mask, openParenIdx) {
   var args = _callArguments(mask, openParenIdx);
   return args === null ? null : args[0];
+}
+
+// The brace span of the object literal one named key of an object
+// literal holds, or null when the literal does not name that key at its
+// own depth or holds something other than a literal under it.
+//
+// A key of the same name nested inside a sibling's value belongs to that
+// sibling and answers a different question, so the walk counts brackets
+// and reads only the keys at depth zero. The span is bounded by the
+// matching brace rather than by a character budget, so a configuration
+// block that grows is still read whole.
+//
+// Walked over the mask, so a name written in a comment or inside a
+// string is not a key, and a brace inside either cannot end the literal
+// early.
+function _objectValueBraces(mask, braces, key) {
+  var base  = braces.start + 1;
+  var slice = mask.slice(base, braces.end);
+  var depth = 0;
+  var re    = /[A-Za-z_$][\w$]*|[{}[\]()]/g;
+  var m;
+  while ((m = re.exec(slice)) !== null) {
+    var tok = m[0];
+    if (tok === "{" || tok === "[" || tok === "(") { depth += 1; continue; }
+    if (tok === "}" || tok === "]" || tok === ")") { depth -= 1; continue; }
+    if (depth !== 0 || tok !== key) continue;
+    if (mask[base + m.index - 1] === ".") continue;
+    var at = re.lastIndex;
+    while (at < slice.length && /\s/.test(slice[at])) at += 1;
+    if (slice[at] !== ":") continue;
+    at += 1;
+    while (at < slice.length && /\s/.test(slice[at])) at += 1;
+    if (slice[at] !== "{") continue;
+    var open = base + at;
+    var end  = _matchingBracket(mask, open);
+    if (end === -1) continue;
+    return { start: open, end: end };
+  }
+  return null;
 }
 
 // How many arguments a call carries, when the answer has to survive a
@@ -1078,6 +1166,514 @@ function _rowAheadOfItsMaterial(file, spec) {
 }
 
 // ---------------------------------------------------------------------------
+// A URL this application hands the browser, read for whether it was built
+//
+// The browser surface turns a value into a URL in two places, and the two
+// take different forms.
+//
+//   - A redirect is an absolute path on this server, passed through a
+//     helper that refuses anything else.
+//   - A view field is what a template writes AFTER a slash of its own, so
+//     it is that same path with its leading slash removed. A second helper
+//     composes the first, takes the slash off, and refuses a value whose
+//     remainder begins with a slash or a backslash, because the template's
+//     slash followed by either one names another host.
+//
+// The two forms are not interchangeable. A path handed to a template
+// renders as `//mail/INBOX`, which a browser reads as a host called mail,
+// and a view field handed to a redirect is a relative target.
+//
+// Reading which helper built a value needs a handful of small readers: one
+// that finds where an assigned expression ends, one that takes the first
+// argument of a call, one that splits a conditional into the values it can
+// produce, one that finds the view field builders a file defines, and the
+// classifiers for each form.
+//
+// None of them names a helper. A redirect target counts as built when it
+// BEGINS with a call, which is the shape a built target has under every
+// name the helper could be given. A view field counts as built when it IS
+// one call to a function the same file defines with the view field
+// builder's shape: a body that removes one leading character, compares
+// what is left against a slash and against a backslash, and throws. The
+// cost of anchoring on the shape is that a call reaching no refusal reads
+// the same as one that does, and that is the question the deep read of this
+// surface answers by walking each builder to what it returns. These readers
+// answer the questions that walk cannot reach: whether the value was built
+// at all, and whether it was built into the form the place it lands on
+// takes.
+// ---------------------------------------------------------------------------
+
+var LINK_TICK = String.fromCharCode(96);
+
+// A value that is already screened by construction begins with a call.
+// The callee may be a plain name or a property path, because the helper
+// is reached under both spellings.
+var LINK_CALL_RE    = /^[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*\(/;
+var LINK_LITERAL_RE = /^(["'])((?:[^\\]|\\.)*)\1$/;
+
+// An absolute path on this server: one leading slash, and no second
+// slash or backslash behind it to start an authority. The deep read of
+// this surface drives the framework's resolver over these same shapes;
+// what is needed here is only whether the text was written as a path.
+var LINK_ROOT_RELATIVE_RE = /^\/(?![/\\])[^\\]*$/;
+// A control byte inside a path splices a response header onto it or
+// hides an authority from whoever reads the link, so a literal carrying
+// one is not a path. Written as escapes, so this file carries none.
+var LINK_CONTROL_RE       = new RegExp("[\\u0000-\\u001F\\u007F]");
+
+// Characters that cannot end a complete expression, so a line break
+// after one continues the statement.
+var LINK_DANGLING_RE  = /[+\-*/%?:&|^,=!<>.([{]$/;
+// Characters that can open a continuation of the expression above, so a
+// line break before one continues the statement too.
+var LINK_CONTINUES_RE = /[?:+\-*/%&|^.,)(\]}=<>!]/;
+
+// The first character of `text` at or after `from` that is neither space
+// nor comment, or "" when there is none.
+function _linkNextMeaningful(text, from) {
+  var i = from;
+  while (i < text.length) {
+    var c = text.charAt(i);
+    if (c === " " || c === "\t" || c === "\r" || c === "\n") { i += 1; continue; }
+    if (c === "/" && text.charAt(i + 1) === "/") {
+      var nl = text.indexOf("\n", i);
+      if (nl === -1) return "";
+      i = nl + 1;
+      continue;
+    }
+    if (c === "/" && text.charAt(i + 1) === "*") {
+      var close = text.indexOf("*/", i);
+      if (close === -1) return "";
+      i = close + 2;
+      continue;
+    }
+    return c;
+  }
+  return "";
+}
+
+// The expression starting at `from`, up to the semicolon that closes the
+// statement. Depth and quote aware, so a semicolon inside a call's
+// arguments or inside a string does not end it, and a value written
+// across several lines is read whole. Comments inside the expression
+// contribute nothing, so prose between two branches of a conditional
+// neither ends the read nor reaches the classifier. `stopAtComma` reads a
+// property value inside an object literal, which a comma at its own depth
+// ends as well.
+function _linkExpressionAt(text, from, stopAtComma) {
+  var depth = 0;
+  var quote = "";
+  var out = "";
+  for (var i = from; i < text.length; i += 1) {
+    var c = text.charAt(i);
+    if (quote) {
+      out += c;
+      if (c === "\\") { out += text.charAt(i + 1); i += 1; continue; }
+      if (c === quote) quote = "";
+      continue;
+    }
+    if (c === "/" && text.charAt(i + 1) === "/") {
+      var nl = text.indexOf("\n", i);
+      if (nl === -1) break;
+      i = nl - 1;
+      continue;
+    }
+    if (c === "/" && text.charAt(i + 1) === "*") {
+      var close = text.indexOf("*/", i);
+      if (close === -1) break;
+      i = close + 1;
+      continue;
+    }
+    if (c === "\"" || c === "'" || c === LINK_TICK) { quote = c; out += c; continue; }
+    if (c === "(" || c === "[" || c === "{") { depth += 1; out += c; continue; }
+    if (c === ")" || c === "]" || c === "}") {
+      if (depth === 0) break;
+      depth -= 1;
+      out += c;
+      continue;
+    }
+    if (c === ";" && depth === 0) break;
+    if (c === "," && depth === 0 && stopAtComma === true) break;
+    if (c === "\n" && depth === 0) {
+      var sofar = out.replace(/\s+$/, "");
+      if (sofar.length > 0 && !LINK_DANGLING_RE.test(sofar) &&
+          !LINK_CONTINUES_RE.test(_linkNextMeaningful(text, i + 1))) {
+        break;
+      }
+    }
+    out += c;
+  }
+  return out.trim();
+}
+
+// The first argument of the call whose opening parenthesis is at `from`.
+function _linkFirstArgument(text, from) {
+  var depth = 0;
+  var quote = "";
+  var out = "";
+  for (var i = from; i < text.length; i += 1) {
+    var c = text.charAt(i);
+    if (quote) {
+      out += c;
+      if (c === "\\") { out += text.charAt(i + 1); i += 1; continue; }
+      if (c === quote) quote = "";
+      continue;
+    }
+    if (c === "\"" || c === "'" || c === LINK_TICK) { quote = c; out += c; continue; }
+    if (c === "(" || c === "[" || c === "{") {
+      depth += 1;
+      if (depth > 1) out += c;
+      continue;
+    }
+    if (c === ")" || c === "]" || c === "}") {
+      depth -= 1;
+      if (depth === 0) break;
+      out += c;
+      continue;
+    }
+    if (c === "," && depth === 1) break;
+    out += c;
+  }
+  return out.trim();
+}
+
+// An expression wrapped whole in one pair of parentheses, unwrapped. A
+// nested conditional is ordinarily written that way, and a reader that
+// refused it would fire on the correct shape, which teaches people to
+// route around the gate. Unwrapping weakens nothing, because a
+// concatenation in parentheses is still a concatenation once they come
+// off.
+function _linkUnwrap(expr) {
+  var s = expr.trim();
+  if (s.charAt(0) !== "(") return s;
+  var depth = 0;
+  var quote = "";
+  for (var i = 0; i < s.length; i += 1) {
+    var c = s.charAt(i);
+    if (quote) {
+      if (c === "\\") { i += 1; continue; }
+      if (c === quote) quote = "";
+      continue;
+    }
+    if (c === "\"" || c === "'" || c === LINK_TICK) { quote = c; continue; }
+    if (c === "(") { depth += 1; continue; }
+    if (c !== ")") continue;
+    depth -= 1;
+    if (depth > 0) continue;
+    return i === s.length - 1 ? _linkUnwrap(s.slice(1, -1)) : s;
+  }
+  return s;
+}
+
+// The values a conditional can produce, with the condition discarded. A
+// non-conditional expression is one value. `?.` and `??` are not
+// conditionals and are stepped over rather than split on.
+function _linkBranches(expr) {
+  var depth = 0;
+  var quote = "";
+  var qAt = -1;
+  var cAt = -1;
+  var pending = 0;
+  for (var i = 0; i < expr.length; i += 1) {
+    var c = expr.charAt(i);
+    if (quote) {
+      if (c === "\\") { i += 1; continue; }
+      if (c === quote) quote = "";
+      continue;
+    }
+    if (c === "\"" || c === "'" || c === LINK_TICK) { quote = c; continue; }
+    if (c === "(" || c === "[" || c === "{") { depth += 1; continue; }
+    if (c === ")" || c === "]" || c === "}") { depth -= 1; continue; }
+    if (depth !== 0) continue;
+    if (c === "?") {
+      var next = expr.charAt(i + 1);
+      if (next === "." || next === "?") { i += 1; continue; }
+      if (qAt === -1) qAt = i; else pending += 1;
+      continue;
+    }
+    if (c !== ":" || qAt === -1) continue;
+    if (pending > 0) { pending -= 1; continue; }
+    cAt = i;
+    break;
+  }
+  if (qAt === -1 || cAt === -1) return [expr.trim()];
+  return _linkBranches(expr.slice(qAt + 1, cAt))
+    .concat(_linkBranches(expr.slice(cAt + 1)));
+}
+
+// One value a URL expression can produce, classified. Returns null when
+// the value is constrained by construction, and the reason it is not
+// otherwise. Every branch of a conditional is classified, so one good
+// branch does not answer for the other.
+function _linkTargetNotBuilt(branch) {
+  var expr = _linkUnwrap(branch);
+  if (expr.length === 0) return null;
+
+  var parts = _linkBranches(expr);
+  if (parts.length > 1) {
+    for (var i = 0; i < parts.length; i += 1) {
+      var why = _linkTargetNotBuilt(parts[i]);
+      if (why !== null) return why;
+    }
+    return null;
+  }
+
+  var literal = LINK_LITERAL_RE.exec(expr);
+  if (literal !== null) {
+    var body = literal[2];
+    // An empty value renders no link and sends the browser nowhere.
+    if (body.length === 0) return null;
+    if (LINK_ROOT_RELATIVE_RE.test(body) && !LINK_CONTROL_RE.test(body)) return null;
+    return "the literal " + JSON.stringify(body) +
+      ", which is not an absolute path on this server";
+  }
+
+  if (LINK_CALL_RE.test(expr)) return null;
+
+  return "the expression " + JSON.stringify(expr.replace(/\s+/g, " ").slice(0, 90)) +
+    ", which is neither built by a call nor written as an absolute path on this server";
+}
+
+// Every value an expression can produce, with each conditional split and
+// each wrapping pair of parentheses removed, however deeply they nest.
+function _linkLeaves(expr) {
+  var parts = _linkBranches(_linkUnwrap(expr));
+  if (parts.length === 1) return [_linkUnwrap(parts[0])];
+  var out = [];
+  for (var i = 0; i < parts.length; i += 1) out = out.concat(_linkLeaves(parts[i]));
+  return out;
+}
+
+// The callee a value begins with, spaces removed, or null.
+var LINK_CALLEE_RE = /^([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\(/;
+
+// Whether `expr` is one call with nothing written after its closing
+// parenthesis. Quote aware, so a parenthesis inside a string argument does
+// not close the call.
+function _linkIsOneCall(expr) {
+  var depth = 0;
+  var quote = "";
+  for (var i = expr.indexOf("("); i !== -1 && i < expr.length; i += 1) {
+    var c = expr.charAt(i);
+    if (quote) {
+      if (c === "\\") { i += 1; continue; }
+      if (c === quote) quote = "";
+      continue;
+    }
+    if (c === "\"" || c === "'" || c === LINK_TICK) { quote = c; continue; }
+    if (c === "(" || c === "[" || c === "{") { depth += 1; continue; }
+    if (c !== ")" && c !== "]" && c !== "}") continue;
+    depth -= 1;
+    if (depth === 0) return expr.slice(i + 1).trim().length === 0;
+  }
+  return false;
+}
+
+// The view field builder's shape, read off a function body. It removes one
+// leading character, compares what is left against a slash and against a
+// backslash, and throws. The slash and the throw are read off the mask, so
+// prose cannot supply them; the backslash is read off the source, because
+// the mask blanks the escape that spells one.
+var LINK_FUNCTION_RE       = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\(/g;
+var LINK_TAIL_TRIM_RE      = /\.\s*(?:slice|substring|substr)\s*\(\s*1\s*\)/;
+var LINK_TAIL_SLASH_RE     = /===\s*"\/"|"\/"\s*===/;
+var LINK_TAIL_BACKSLASH_RE = /===\s*"\\\\"|"\\\\"\s*===/;
+var LINK_THROW_RE          = /\bthrow\b/;
+
+// The functions in one file whose body has the view field builder's shape.
+function _linkShapedIn(file) {
+  var mask = _maskOf(file);
+  var out = {};
+  LINK_FUNCTION_RE.lastIndex = 0;
+  var m;
+  while ((m = LINK_FUNCTION_RE.exec(mask)) !== null) {
+    var params = _matchingBracket(mask, m.index + m[0].length - 1);
+    var open   = params === -1 ? -1 : mask.indexOf("{", params);
+    var close  = open === -1 ? -1 : _matchingBracket(mask, open);
+    if (close === -1) continue;
+    var code = mask.slice(open, close);
+    if (LINK_TAIL_TRIM_RE.test(code) && LINK_TAIL_SLASH_RE.test(code) && LINK_THROW_RE.test(code) &&
+        LINK_TAIL_BACKSLASH_RE.test(file.text.slice(open, close))) {
+      out[m[1]] = true;
+    }
+  }
+  return out;
+}
+
+// The local modules a file requires, as file records. Only a relative
+// require resolves, and the vendored tree is left out: the framework is
+// read-only and a walk into it would answer for code this repository does
+// not write. A require naming no file here resolves to nothing, which
+// leaves a call through it unbuilt, which is the verdict a typo deserves.
+var LINK_LOCAL_REQUIRE_RE =
+  /\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*"(\.[^"]*)"\s*\)/g;
+
+// The path a file record stands for. A fixture record writes the detector
+// and the fixture's index in front of the path it is written as, so a
+// require inside one resolves from the directory the fixture says it sits
+// in rather than from a directory nothing holds.
+var LINK_FIXTURE_REL_RE = /^fixture:[^/]*\//;
+
+function _linkRequiredModules(file) {
+  var from = path.dirname(path.join(REPO_ROOT, file.rel.replace(LINK_FIXTURE_REL_RE, "")));
+  var out = [];
+  LINK_LOCAL_REQUIRE_RE.lastIndex = 0;
+  var m;
+  while ((m = LINK_LOCAL_REQUIRE_RE.exec(file.text)) !== null) {
+    var base = path.resolve(from, m[2]);
+    var tries = [base + ".js", path.join(base, "index.js")];
+    for (var i = 0; i < tries.length; i += 1) {
+      var rel = _relPath(tries[i]);
+      if (rel.indexOf("lib/vendor/") === 0 || rel.indexOf("..") === 0) continue;
+      var isFile;
+      try { isFile = fs.statSync(tries[i]).isFile(); }
+      catch (_missing) {
+        // Drop-silent by design: a path that is not a file is not the
+        // module, and the next candidate spelling is tried.
+        continue;
+      }
+      if (!isFile) continue;
+      out.push({ name: m[1], file: _readRecord(tries[i]) });
+      break;
+    }
+  }
+  return out;
+}
+
+// The functions that are a local NAME for a builder already known: every
+// return is exactly one call to one, and there is at least one return. A
+// function with a second return that is not built is not a name for a
+// builder, it is a branch that reaches a template unscreened.
+function _linkDelegatesIn(file, known) {
+  var mask = _maskOf(file);
+  var out = [];
+  LINK_FUNCTION_RE.lastIndex = 0;
+  var m;
+  while ((m = LINK_FUNCTION_RE.exec(mask)) !== null) {
+    if (known[m[1]] === true) continue;
+    var params = _matchingBracket(mask, m.index + m[0].length - 1);
+    var open   = params === -1 ? -1 : mask.indexOf("{", params);
+    var close  = open === -1 ? -1 : _matchingBracket(mask, open);
+    if (close === -1) continue;
+    var returns = 0;
+    var built = 0;
+    var re = /\breturn\b/g;
+    re.lastIndex = open;
+    var r;
+    while ((r = re.exec(mask)) !== null && r.index < close) {
+      returns += 1;
+      var expr = _linkExpressionAt(file.text, r.index + r[0].length).trim();
+      var callee = LINK_CALLEE_RE.exec(expr);
+      if (callee === null) continue;
+      if (known[callee[1].replace(/\s+/g, "")] !== true) continue;
+      if (!_linkIsOneCall(expr)) continue;
+      built += 1;
+    }
+    if (returns > 0 && returns === built) out.push(m[1]);
+  }
+  return out;
+}
+
+// Every name a file can build a link value through. Read once per file.
+//
+// Three sources, because the rule lives in one file and the surfaces that
+// compose it keep their own names for it. A function in THIS file with the
+// shape. A function with the shape in a module this file requires, named
+// `module.function`. And a local name for either: a function whose every
+// return is one call to a builder already named, which is what a surface
+// writes so that its call sites do not have to move when the rule moves.
+// The third is taken to a fixed point, so a name for a name still resolves.
+function _linkTailBuilders(file) {
+  if (file._linkTails) return file._linkTails;
+  var out = _linkShapedIn(file);
+  _linkRequiredModules(file).forEach(function (mod) {
+    var shaped = _linkShapedIn(mod.file);
+    Object.keys(shaped).forEach(function (fn) { out[mod.name + "." + fn] = true; });
+  });
+  var added = true;
+  while (added) {
+    added = false;
+    _linkDelegatesIn(file, out).forEach(function (name) {
+      if (out[name] !== true) { out[name] = true; added = true; }
+    });
+  }
+  file._linkTails = out;
+  return out;
+}
+
+// One view field value, classified. Null when every value it can produce
+// is empty or is exactly one call to a view field builder this file
+// defines, and the reason otherwise.
+function _linkViewFieldNotBuilt(expr, tails) {
+  var leaves = _linkLeaves(expr);
+  for (var i = 0; i < leaves.length; i += 1) {
+    var leaf = leaves[i].trim();
+    if (leaf.length === 0) continue;
+    var literal = LINK_LITERAL_RE.exec(leaf);
+    if (literal !== null) {
+      if (literal[2].length === 0) continue;
+      return "the literal " + JSON.stringify(literal[2]) + ". A template writes a slash of its " +
+        "own in front of a view field, so a literal reaches the page unscreened, and one that " +
+        "begins with a slash renders as two and names another host";
+    }
+    var callee = LINK_CALLEE_RE.exec(leaf);
+    if (callee === null) {
+      return "the expression " + JSON.stringify(leaf.replace(/\s+/g, " ").slice(0, 90)) +
+        ", which no view field builder produced";
+    }
+    var name = callee[1].replace(/\s+/g, "");
+    if (tails[name] !== true) {
+      return "a value from " + name + "(), which is not a view field builder this file " +
+        "defines. A path built for a redirect begins with a slash, and the template's own " +
+        "slash in front of it renders a link to another host";
+    }
+    if (!_linkIsOneCall(leaf)) {
+      return "a value from " + name + "() with more written after the call, which the " +
+        "builder never screened";
+    }
+  }
+  return null;
+}
+
+// One redirect target, classified: built as `_linkTargetNotBuilt` reads it,
+// and never by a view field builder, whose value is relative to the page
+// once a redirect sends it.
+function _linkRedirectNotBuilt(expr, tails) {
+  var why = _linkTargetNotBuilt(expr);
+  if (why !== null) return why;
+  var leaves = _linkLeaves(expr);
+  for (var i = 0; i < leaves.length; i += 1) {
+    var callee = LINK_CALLEE_RE.exec(leaves[i].trim());
+    if (callee !== null && tails[callee[1].replace(/\s+/g, "")] === true) {
+      return "a value from " + callee[1] + "(), which builds a view field without its leading " +
+        "slash, so the browser resolves the redirect against the page it was on";
+    }
+  }
+  return null;
+}
+
+// A path refusal and a view field builder over it, for the fixtures below.
+// Both are written under names the tree does not use, so what the reader
+// recognizes is the shape rather than a spelling it was handed.
+var LINK_PATH_REFUSAL_SOURCE =
+  "function _p(v) {\n" +
+  "  if (typeof v === \"string\" && v.charAt(0) === \"/\" &&\n" +
+  "      b.safeRedirect.resolve(v, { fallback: \"\" }) === v) {\n" +
+  "    return v;\n" +
+  "  }\n" +
+  "  throw new TypeError(\"not a path on this server\");\n" +
+  "}\n";
+var LINK_TAIL_BUILDER_SOURCE = LINK_PATH_REFUSAL_SOURCE +
+  "function _v(value) {\n" +
+  "  var tail = _p(value).slice(1);\n" +
+  "  var first = tail.charAt(0);\n" +
+  "  if (first === \"/\" || first === \"\\\\\" || first === \"\\t\") {\n" +
+  "    throw new TypeError(\"not a view field\");\n" +
+  "  }\n" +
+  "  return tail;\n" +
+  "}\n";
+
+// ---------------------------------------------------------------------------
 // Detectors
 // ---------------------------------------------------------------------------
 
@@ -1099,7 +1695,11 @@ function _rowAheadOfItsMaterial(file, spec) {
 var UNFINISHED_RE = /todo|fixme|xxx\b|hack\b|not[ -]?supported|not[ -]?implemented|unimplemented|out[ -]?of[ -]?scope|placeholder|stub\b|coming[ -]?soon|later patch|follow[ -]?up patch|in[ -]?the[ -]?future/i;
 var DEFERRED_WORK_RE = /\bdefer(?:red|ral|s|ring)?\b[^\n]{0,40}?\b(?:later|future|next|follow[ -]?up|subsequent)\s+(?:release|version|patch|milestone|commit|cut)\b/i;
 
-var NUMBERING_RE  = /\b(?:phase|sweep|batch|slice|group|round)[ -]?\d+\b|\btier[ -]?[abc]\b/i;
+// The lettered label is built from parts, since the forbidden-vocabulary
+// gate refuses its noun in every file, this one included.
+var NUMBERING_RE  = new RegExp(
+  "\\b(?:phase|sweep|batch|slice|group|round)[ -]?\\d+\\b|\\b" + vocabulary.word("ti|er") + "[ -]?[abc]\\b",
+  "i");
 var TOOLING_RE    = /\b(?:claude|anthropic|chatgpt|openai|copilot|gemini|co[- ]authored[- ]by|ai[- ]generated|llm[- ]generated)\b/i;
 
 // The dash matcher, in two halves.
@@ -1137,22 +1737,27 @@ var TOOLING_TOKEN_EXCEPTIONS = {
     "the flow never meets",
 };
 
-// The validation tiers of the authoring rules, named as labels. The
-// discipline is real and the vocabulary is private: an operator reading
-// "defensive by tier" is being told which internal classification a
-// reader was written under, which answers none of the questions the
-// comment is there to answer. Say what the code does with bad input.
+// The input-validation labels of the authoring rules. The discipline is
+// real and the vocabulary is private: an operator reading one of these
+// labels is being told which internal classification a reader was
+// written under, which answers none of the questions the comment is
+// there to answer. Say what the code does with bad input.
 //
 // The names are the rulebook's own, so the pattern is a frozen contract
 // rather than a list somebody keeps in step by hand, and it stays clear
-// of the two other things this tree calls a tier: the health-probe
+// of the two other senses of the word in this tree: the health-probe
 // tiers, which are a framework field, and a listener described as the
-// tier a protocol sits at.
-var TIER_LABEL_RE = new RegExp(
-  "\\bby\\s+tiers?\\b" +
+// protocol layer it sits at.
+//
+// The noun every label ends in is built with the vocabulary gate's `word`,
+// in lower case and capitalized.
+var LABEL_NOUN         = vocabulary.word("ti|er");
+var LABEL_NOUN_CAPITAL = vocabulary.word("Ti|er");
+var VALIDATION_LABEL_RE = new RegExp(
+  "\\bby\\s+" + LABEL_NOUN + "s?\\b" +
   "|\\b(?:the|this|that|a|an)\\s+" +
   "(?:wire(?:[- ]protocol)?|observability|config(?:[- ]time)?|entry[- ]point|defensive|" +
-  "hot[- ]path|drop[- ]silent|best[- ]effort|validation)\\s+tier\\b",
+  "hot[- ]path|drop[- ]silent|best[- ]effort|validation)\\s+" + LABEL_NOUN + "\\b",
   "i"
 );
 
@@ -1258,19 +1863,45 @@ var MAILBOX_ADAPTER = "lib/mail/mailbox.js";
 // one. Named as a path for the same reason the adapter above is.
 var BLOB_RECONCILER = "lib/store/blobs.js";
 
-// The one module that reads the `@primitive` documentation blocks, and
-// so the one place a matcher for that tag belongs. Written as a pattern
-// anchored on the tail of the path rather than as an exact string, so
-// the exemption is provable on a fixture standing in for that file.
-var PRIMITIVE_PARSE_OWNER_RE = /(?:^|[/\\])scripts[/\\]source-primitives\.js$/;
+// The one module that screens text somebody else wrote before a person
+// reads it, and so the only place the framework's text guard is composed
+// for display. Named as a path for the same reason the two above are.
+var DISPLAY_SCREEN = "lib/text/index.js";
 
-// The tag OPENING a pattern, which is the shape of a parse: a regular
-// expression literal beginning with it, or a RegExp built from a string
-// beginning with it, in both cases allowing the `^` anchor a matcher puts
-// first. Naming the tag in a message or in prose is not this shape and is
+// A composition of the framework's repairing text guard, and a hand-rolled
+// pass over the C1 range. Both are anchored on the framework's own token
+// and on the code points themselves rather than on any helper's name,
+// because the helper that wrapped them was called four different things
+// in four files and a fifth spelling would have gone unread.
+var DISPLAY_SCREEN_BY_HAND_RE =
+  /\bguardText\s*\.\s*sanitize\s*\(|0x0*80\s*,\s*0x0*9[fF]\b/;
+
+// The one module that reads the documentation blocks, and so the one place
+// a matcher for their tags belongs. The gates reach it through
+// scripts/source-primitives.js and the wiki reaches it directly. Written as
+// a pattern anchored on the tail of the path rather than as an exact
+// string, so the exemption is provable on a fixture standing in for that
+// file.
+var DOCUMENTATION_READER_RE = /(?:^|[/\\])lib[/\\]web[/\\]wiki[/\\]blocks\.js$/;
+
+// A documentation tag OPENING a pattern, which is the shape of a parse: a
+// regular expression literal, or a RegExp built from a string, beginning
+// with an at sign and then one of three things. The first is a tag the
+// reader returns, not followed by a name character or an escaped dot, so
+// an address such as `@example\.net` in a pattern is not a tag. The second,
+// anchored with `^`, is a capture opening on a letter class, which is a
+// reader of any tag name. The third, anchored with `^`, is the end of the
+// string followed by `+`, which builds the pattern from a tag name held in a
+// variable. Naming a tag in a message or in prose is not this shape and is
 // deliberately outside it, because the sentence describing a rule must not
 // trip the rule.
-var PRIMITIVE_TAG_MATCHER_RE = /(?:\/|RegExp\s*\(\s*["'])\^?@primitive/;
+var DOCUMENTATION_TAG_MATCHER_RE = new RegExp(
+  "(?:\\/|RegExp\\s*\\(\\s*[\"'])(?:" +
+    "\\^?@(?:primitive|signature|since|status|spec|deprecated|originated|related|" +
+      "module|nav|title|order|slug|featured|intro|card|opts|example|section)" +
+      "(?![A-Za-z0-9_$.-]|\\\\{1,2}\\.)" +
+    "|\\^@(?:\\((?:\\?:)?(?:\\[A-Za-z|\\[a-z|\\\\w)|[\"']\\s*\\+)" +
+  ")");
 
 // The vendored module that decides which audit namespaces need no
 // registration. Read rather than copied, so this gate cannot disagree
@@ -1906,6 +2537,18 @@ var SENDING_IDENTITY_REDERIVED_RE =
 // question, and a detector anchored on the name would go quiet on one.
 var SENDING_IDENTITY_OWNER_RE = /(?:^|[\\/])lib[\\/]mail[\\/]listeners\.js$/;
 
+// The framework call that builds an outbound delivery chain, and the one
+// module allowed to make it.
+//
+// The name is the framework's published surface rather than a local a
+// rename could take away, and the dots are spaced because a call written
+// across several lines is the same call. The owner is matched by path
+// for the reason the derivation above is: which module owns the outbound
+// chain is not a fact about any name inside it.
+var OUTBOUND_COMPOSER_BUILT_RE =
+  /\bb\s*\.\s*mail\s*\.\s*send\s*\.\s*deliver\s*\.\s*create\s*\(/g;
+var OUTBOUND_COMPOSER_OWNER_RE = /(?:^|[\\/])lib[\\/]mail[\\/]delivery\.js$/;
+
 // The framework's two answers about a domain name, which are a
 // published surface rather than a local name a rename could take away.
 //
@@ -2037,6 +2680,121 @@ var ORDER_PROSE_RE      =
 // owns the mailbox failure budget. Written as a path suffix so a fixture
 // can exercise the boundary rather than only the pattern.
 var IDENTITY_LAYER_RE = /(^|[/\\])lib[/\\]store[/\\]accounts\.js$/;
+
+// The other identity space this server authenticates: a domain-scoped
+// sending credential, reached through the documented store path
+// `blamepost.store.credentials.verify`. A caller that renames its local
+// handle for the registry has moved off that path, and a rename of the
+// primitive itself is a breaking change the api-snapshot gate refuses, so
+// the dotted tail is a frozen contract rather than a local symbol.
+var CREDENTIAL_VERIFY_RE = /\.credentials\.verify\s*\(/g;
+
+// The failure budget being spent. `recordFailure` is `b.auth.lockout`'s
+// own verb, so it survives every rename this repository can make and
+// disappears only when the budget itself is taken out, which is exactly
+// what the detector below exists to notice.
+var BUDGET_SPEND_RE = /\brecordFailure\s*\(/;
+
+// The vault's plain seal, which binds a value to the volume and to
+// nothing else. `b.vault.seal` is a framework primitive, so the dotted
+// tail survives every rename this repository can make; `vault.aad.seal`
+// does not match it, because the name before `.seal(` there is `aad`.
+var CONTEXTLESS_SEAL_RE = /\bvault\.seal\s*\(/g;
+
+// The plaintext's own digest, computed in the function that seals it.
+// A value written under a file name that IS the hash of what it carries
+// is bound by that name: the read recomputes the hash and refuses
+// anything else, so the seal is not the only thing placing the value.
+// `sha3Hash` is the framework's digest verb, so it survives a rename of
+// whatever local handle holds it.
+var VALUE_NAMED_BY_ITS_DIGEST_RE = /\bsha3Hash\s*\(/;
+
+// A long-lived secret sealed to the volume with no context.
+//
+// The span is the enclosing function, because the name a value is filed
+// under and the seal that carries it are settled in one body: a seal
+// whose function also derives the plaintext's digest is a
+// content-addressed write, and every other one is a value that opens
+// wherever it is put.
+function _sealedWithoutItsPurpose(file) {
+  var mask = _maskOf(file);
+  var out = [];
+  CONTEXTLESS_SEAL_RE.lastIndex = 0;
+  var m;
+  while ((m = CONTEXTLESS_SEAL_RE.exec(mask)) !== null) {
+    var span = _enclosingFunctionSpan(mask, m.index);
+    var body = span ? mask.slice(span.start, span.end + 1) : mask;
+    if (VALUE_NAMED_BY_ITS_DIGEST_RE.test(body)) continue;
+    out.push(_atOffset(file, m.index,
+      "this secret is sealed to the volume and to nothing else, so any other sealed value " +
+      "on the volume opens in its place"));
+  }
+  return out;
+}
+
+// The vault's plain open, which hands a value back exactly as it found
+// it when that value carries no seal. `b.vault.unseal` is a framework
+// primitive, so the dotted tail survives every rename this repository
+// can make; `vault.aad.unseal` does not match it, because the name
+// before `.unseal(` there is `aad`.
+var CONTEXTLESS_UNSEAL_RE = /\bvault\.unseal\s*\(/g;
+
+// A reader establishing which form the value in front of it is in
+// before it opens anything. Two shapes do it, and both are framework
+// contracts rather than local names: the authenticated-data test, which
+// separates a value bound to a context from one that is not, and a
+// prefix test at offset zero, which separates a sealed cell from a file
+// holding something else.
+var SEAL_FORM_ESTABLISHED_RE = /\bisAadSealed\s*\(|\.indexOf\s*\([^)]*\)\s*===\s*0/;
+
+// A sealed value opened without establishing what it is.
+//
+// The vault returns an unsealed value unchanged rather than refusing it,
+// so a reader that hands it whatever is in the file opens the contents
+// of a file nothing here wrote and carries on with them. Binding a value
+// to a context is what separates it from every other sealed value on the
+// volume, and the reader has to ask which form it holds before it can
+// open either one.
+//
+// The span is the enclosing function, because the question and the open
+// are settled in one body.
+function _openedWithoutEstablishingItsForm(file) {
+  var mask = _maskOf(file);
+  var out = [];
+  CONTEXTLESS_UNSEAL_RE.lastIndex = 0;
+  var m;
+  while ((m = CONTEXTLESS_UNSEAL_RE.exec(mask)) !== null) {
+    var span = _enclosingFunctionSpan(mask, m.index);
+    var body = span ? mask.slice(span.start, span.end + 1) : mask;
+    if (SEAL_FORM_ESTABLISHED_RE.test(body)) continue;
+    out.push(_atOffset(file, m.index,
+      "this value is opened without asking which form it is in, so a file carrying no seal " +
+      "at all comes back unchanged and is used as though it had opened"));
+  }
+  return out;
+}
+
+// A sending credential verified where no failure is recorded against it.
+//
+// The span is the enclosing named function when there is one and the
+// whole file otherwise, so a verification mounted as an anonymous route
+// handler is measured against the function that mounts it rather than
+// against nothing.
+function _credentialVerifiedWithoutABudget(file) {
+  var mask = _maskOf(file);
+  var out = [];
+  CREDENTIAL_VERIFY_RE.lastIndex = 0;
+  var m;
+  while ((m = CREDENTIAL_VERIFY_RE.exec(mask)) !== null) {
+    var span = _enclosingFunctionSpan(mask, m.index);
+    var body = span ? mask.slice(span.start, span.end + 1) : mask;
+    if (BUDGET_SPEND_RE.test(body)) continue;
+    out.push(_atOffset(file, m.index,
+      "a sending credential is verified here and no failure is recorded against it, so " +
+      "guesses aimed at this surface are bounded by nothing"));
+  }
+  return out;
+}
 
 // The value a key carries inside an object literal, read to the next
 // separator at the literal's own depth so a conditional or a nested
@@ -2256,9 +3014,10 @@ function _frameworkCodeNamespaces() {
 // table of the framework's own. That table is the one place a counter
 // with no row behind it stops being a deletion and becomes a retention
 // run, which makes it the highest-value row on the volume to forge: it
-// carries no signature, is linked into no chain, is covered by no
-// checkpoint and has no append-only trigger over it, so writing one
-// costs write access to the database and nothing else.
+// is linked into no chain, is covered by no checkpoint and has no
+// append-only trigger over it, so the signature the framework puts on
+// the row is the only thing standing between write access to the
+// database and a range that reads as archived.
 //
 // It is identified by the columns that make it a chain origin —
 // `lastPurgedCounter` and `lastPurgedRowHash` — rather than by its name,
@@ -2311,9 +3070,10 @@ function _chainOriginNames(mask) {
   var derived = _chainOriginTables();
   if (derived.names.length === 0) {
     throw new Error("codebase-patterns: no chain-origin table found under " + VENDOR_TREE +
-      " (" + derived.filesRead + " file(s) read). The matcher for an unsigned purge " +
-      "record cannot answer without one, and answering \"nothing to check\" over a tree " +
-      "it could not read is the failure this refusal exists to prevent.");
+      " (" + derived.filesRead + " file(s) read). The matcher for a purge record read " +
+      "without its signature cannot answer without one, and answering \"nothing to " +
+      "check\" over a tree it could not read is the failure this refusal exists to " +
+      "prevent.");
   }
   var names = derived.names.slice();
   derived.names.forEach(function (table) {
@@ -2621,6 +3381,223 @@ var PATTERN_NARROWINGS = [{
             "is the trade a matcher that guessed would take away",
 }];
 
+// ---------------------------------------------------------------------------
+// Raw control bytes
+// ---------------------------------------------------------------------------
+
+// Tab, newline and carriage return are the three control characters a
+// text file carries as layout. Every other code point below the space,
+// and DEL at 0x7f, is a byte no editor shows and no reviewer sees.
+function _isRawControl(code) {
+  if (code === 0x09 || code === 0x0a || code === 0x0d) return false;
+  return code < 0x20 || code === 0x7f;
+}
+
+// Render the offending line for the report WITHOUT the byte in it. The
+// summary is printed to stdout and copied into
+// `.test-output/codebase-patterns.log`, so passing the raw character
+// through would make the log itself the thing grep calls binary, which
+// is the failure this detector exists to stop.
+function _escapeControls(line) {
+  var out = "";
+  for (var i = 0; i < line.length; i++) {
+    var code = line.charCodeAt(i);
+    if (!_isRawControl(code)) { out += line.charAt(i); continue; }
+    out += "<0x" + (code < 16 ? "0" : "") + code.toString(16) + ">";
+  }
+  return out;
+}
+
+function _controlByteScan(file) {
+  var out = [];
+  for (var i = 0; i < file.lines.length; i++) {
+    var line = file.lines[i];
+    for (var j = 0; j < line.length; j++) {
+      if (!_isRawControl(line.charCodeAt(j))) continue;
+      out.push({
+        file:    file.rel,
+        line:    i + 1,
+        content: _escapeControls(line).trim(),
+      });
+      break;
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Start tags in shipped templates
+// ---------------------------------------------------------------------------
+
+// The types a template may give a script element that carries a body. A
+// browser treats a script element with one of these types as a data
+// block and does not run its body. The comparison ignores ASCII case,
+// ASCII whitespace at either end, and any parameters after a `;`. A type
+// that is not listed here counts as script, including a JavaScript
+// spelling that appears nowhere in this file.
+var TEMPLATE_DATA_BLOCK_TYPES = [
+  { type: "application/ld+json", what: "JSON-LD structured data, which search engines read from the page source" },
+  { type: "application/json",    what: "a JSON document that an island reads with JSON.parse from the element's text" },
+];
+
+// The whitespace the HTML tokenizer separates a tag's parts with: tab,
+// line feed, form feed, carriage return and space.
+var HTML_TAG_WS_RE = /[\t\n\f\r ]/;
+
+// The end tag that closes a script element's body: `</script` in any
+// ASCII case, followed by whitespace, `/`, `>` or the end of the text.
+var HTML_SCRIPT_END_RE = /<\/script(?=[\t\n\f\r />]|$)/gi;
+
+// A script source that resolves to this origin: `/` followed by a
+// character that cannot begin a host. `//host`, `/\host` and a tab or
+// newline between the two slashes all resolve off this origin, and a
+// character reference could decode to any of them.
+var TEMPLATE_SCRIPT_SRC_RE = /^\/[A-Za-z0-9._~-]/;
+
+// ASCII letters folded to lowercase, every other code point unchanged.
+function _asciiLower(s) {
+  return s.replace(/[A-Z]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) + 32); });
+}
+
+// The start tag opening at `lt`, read the way the HTML tokenizer reads
+// one. The tag name ends at whitespace, `/` or `>`. An attribute name is
+// folded to lowercase and may open with `=`. A value is double-quoted,
+// single-quoted or unquoted, and a `>` inside a quoted value belongs to
+// the value. A `value` of null is an attribute written with no `=`. An
+// attribute written twice is returned twice, in source order. Character
+// references in a value stay encoded. `end` is the offset after the
+// closing `>`, or the length of the text when the tag does not close.
+function _htmlStartTag(text, lt) {
+  var i = lt + 1;
+  while (i < text.length && !HTML_TAG_WS_RE.test(text[i]) && text[i] !== "/" && text[i] !== ">") i += 1;
+  var tag = { name: _asciiLower(text.slice(lt + 1, i)), attrs: [], end: text.length, closed: false };
+  while (i < text.length) {
+    var c = text[i];
+    if (c === ">") { tag.end = i + 1; tag.closed = true; return tag; }
+    if (HTML_TAG_WS_RE.test(c) || c === "/") { i += 1; continue; }
+    var at = i;
+    i += 1;
+    while (i < text.length && !HTML_TAG_WS_RE.test(text[i]) && "/>=".indexOf(text[i]) === -1) i += 1;
+    var attr = { name: _asciiLower(text.slice(at, i)), value: null, at: at };
+    tag.attrs.push(attr);
+    var j = i;
+    while (j < text.length && HTML_TAG_WS_RE.test(text[j])) j += 1;
+    if (text[j] !== "=") continue;
+    i = j + 1;
+    while (i < text.length && HTML_TAG_WS_RE.test(text[i])) i += 1;
+    var quote = text[i];
+    if (quote === "\"" || quote === "'") {
+      var close = text.indexOf(quote, i + 1);
+      if (close === -1) close = text.length;
+      attr.value = text.slice(i + 1, close);
+      i = close + 1;
+    } else {
+      var from = i;
+      while (i < text.length && !HTML_TAG_WS_RE.test(text[i]) && text[i] !== ">") i += 1;
+      attr.value = text.slice(from, i);
+    }
+  }
+  return tag;
+}
+
+// True when an attribute name is an event handler's.
+function _isHandlerAttr(attr) {
+  return attr.value !== null && /^on[a-z]{3,}$/.test(attr.name);
+}
+
+// Null when a script element's attributes make it a data block, or the
+// phrase saying why its body counts as script. A data block carries
+// exactly one `type` attribute, whose value before any `;`, with ASCII
+// whitespace trimmed from both ends, is one of TEMPLATE_DATA_BLOCK_TYPES.
+// An event handler on the element is reported by the handler pass.
+function _templateScriptBodyVerdict(attrs) {
+  var types = attrs.filter(function (a) { return a.name === "type"; });
+  if (types.length > 1) {
+    return "names its type more than once, so its body counts as script, which this policy refuses to run";
+  }
+  var essence = types.length
+    ? _asciiLower(String(types[0].value || "").split(";")[0].replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, ""))
+    : "";
+  var listed = TEMPLATE_DATA_BLOCK_TYPES.some(function (x) { return x.type === essence; });
+  return listed ? null : "carries its own body, which this policy refuses to run";
+}
+
+// How a caught error is turned into text: the message when the value
+// carries one, and the value's own text when it does not. Written for any
+// binding name, because the name of a catch parameter is the most
+// renameable thing in a handler and a matcher anchored on `err` goes
+// quiet the first time somebody writes `readErr`.
+var CAUGHT_ERROR_TEXT_RE =
+  /\(\s*([A-Za-z_$][\w$]*)\s*&&\s*\1\s*\.\s*message\s*\)\s*\|\|\s*String\s*\(\s*\1\s*\)/g;
+
+// The name of the call an expression is written directly inside, or the
+// empty string when it is not the first thing inside a call at all.
+//
+// Read by walking backwards from the expression rather than by searching
+// a window in front of it. A wrapper's name sits immediately against its
+// own parenthesis, so the question is adjacency, and a window would
+// answer a proximity question instead: a screened value earlier in the
+// same argument list would read as this one being screened.
+function _wrapperCallBefore(mask, at) {
+  var i = at - 1;
+  while (i >= 0 && /\s/.test(mask.charAt(i))) i -= 1;
+  if (mask.charAt(i) !== "(") return "";
+  i -= 1;
+  while (i >= 0 && /\s/.test(mask.charAt(i))) i -= 1;
+  var end = i + 1;
+  while (i >= 0 && /[A-Za-z0-9_$.]/.test(mask.charAt(i))) i -= 1;
+  return mask.slice(i + 1, end);
+}
+
+// Whether that call is the display screen. `forDisplay` is the published
+// name of the primitive that owns this question, so a local wrapper
+// spelled `_screenForDisplay` is the same answer reached through a bound
+// this module adds, and anything else is a different answer.
+var DISPLAY_SCREEN_CALL_RE = /(?:^|\.)(?:forDisplay|[A-Za-z0-9_$]*ForDisplay)$/;
+
+// The same question asked of a whole expression rather than of the call
+// wrapped directly around one term, for a value that is a property rather
+// than an argument.
+var DISPLAY_SCREEN_IN_VALUE_RE =
+  /(?:^|[^A-Za-z0-9_$.])(?:[A-Za-z0-9_$]+\.)*(?:forDisplay|[A-Za-z0-9_$]*ForDisplay)\s*\(/;
+
+// The fields a refusal reaches a client under, and the field that says
+// which refusal it is. RFC 8620 section 5.3 gives a SetError a `type` and
+// a `description`; RFC 9457 section 3.1 gives a problem document a `type`
+// and a `detail`. Both are wire contracts rather than names this
+// repository chose, so neither can be renamed without changing what this
+// server answers, and the pair together is what distinguishes a refusal
+// somebody's client renders from an internal report row that happens to
+// carry a field of the same name.
+var REFUSAL_FIELD_RE = /(?:^|[\s{,])["']?(?:description|detail)["']?\s*:/g;
+var REFUSAL_TYPE_KEY_RE = /(?:^|[\s{,])["']?type["']?\s*:/;
+
+// Any `message` read out of anything. Written without a holder name,
+// because the name of a catch parameter is the most renameable thing in a
+// handler and a matcher anchored on `err` goes quiet the first time
+// somebody writes `patchErr`.
+var MESSAGE_READ_RE = /\.\s*message\b/;
+
+// One property value, from its colon to the comma or the closing bracket
+// that ends it at the literal's own depth. A structural boundary rather
+// than a count of characters: a value that grows another term is still
+// one value, and a detector bounded by length would stop reading the day
+// it did.
+function _propertyValueSpan(mask, colonIdx) {
+  var depth = 0;
+  for (var i = colonIdx + 1; i < mask.length; i += 1) {
+    var ch = mask.charAt(i);
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth === 0) return mask.slice(colonIdx + 1, i);
+      depth -= 1;
+    } else if (ch === "," && depth === 0) {
+      return mask.slice(colonIdx + 1, i);
+    }
+  }
+  return mask.slice(colonIdx + 1);
+}
+
 var DETECTORS = [
   {
     name: "todo-fixme-hack-xxx",
@@ -2650,6 +3627,356 @@ var DETECTORS = [
     green: [
       "// The retention floor refuses the delete and the audit row records the refusal.\n",
       "var waiting = outcome.deferred || [];   // messages held for the next retry window\n",
+    ],
+  },
+
+  {
+    name: "display-screen-rolled-again",
+    description:
+      "The screen between text somebody else wrote and a person reading it, composed outside " +
+      "the module that owns it. Eight files used to answer this question and they answered it " +
+      "differently: each composed the framework's balanced profile and took the C1 range off " +
+      "afterwards, three folded a tab to a space and five did not, one folded the carriage " +
+      "return and line feed run and the rest left it. So a subject that misaligned a console " +
+      "table read correctly on the browser page, and a record value that was one line in the " +
+      "browser broke a zone diff into three. The screen is one reader now: call " +
+      "blamepost.text.forDisplay, which composes the guard, removes the C1 range the balanced " +
+      "profile passes, and folds tab, line feed and carriage return to a space. A caller " +
+      "holding several lines splits them and screens each one.",
+    dirs: ["lib", "bin"],
+    scan: function (file) {
+      if (file.rel === DISPLAY_SCREEN) return [];
+      return _named(file, _lineMatcher(DISPLAY_SCREEN_BY_HAND_RE, "code")(file));
+    },
+    red: [
+      "function _headerText(value) {\n" +
+        "  return b.codepointClass.replaceRanges(\n" +
+        "    b.guardText.sanitize(value, HEADER_TEXT_GUARD), C1_CONTROL_RANGES, \"\");\n}\n",
+      "var C1_CONTROL_RANGES = Object.freeze([[0x0080, 0x009f]]);\n",
+      "function _printable(v) {\n  return b.guardText.sanitize(String(v), { profile: \"balanced\" });\n}\n",
+    ],
+    green: [
+      "var text = require(\"../text\");\n" +
+        "function _headerText(value) {\n  return text.forDisplay(value);\n}\n",
+      "var reason = text.forDisplay((err && err.message) || String(err));\n",
+      // The refusal side of the same module, which is a different
+      // question and is not this pattern.
+      "if (text.hasControlChar(name)) throw err(\"store/bad-argument\", \"a control character\");\n",
+      // The guard's other verbs are not the display screen. A write gate
+      // that validates rather than repairs is composing the right thing.
+      "var verdict = b.guardText.validate(text, { profile: \"strict\" });\n",
+    ],
+  },
+
+  {
+    name: "caught-error-text-into-an-audit-row-unscreened",
+    description:
+      "A caught error turned into text and written into an audit row with nothing between " +
+      "it and the row. An error's message is not this server's prose: a parser answers a " +
+      "header line carrying no colon with the line itself, a resolver quotes the record a " +
+      "third party published, and a peer's own reply is the text a delivery failure carries. " +
+      "So the codepoints in it are a stranger's to choose. `b.audit.safeEmit` redacts " +
+      "credential shapes and nothing else, which means a row keeps whatever arrived, and the " +
+      "row is read back later in a console table and on the administration page: a value " +
+      "carrying the single-byte control sequence introducer at U+009B repaints the row above " +
+      "the one it is on, a bidirectional override reverses the sentence an operator is " +
+      "deciding on, and a carriage return turns one row into two. The screen is " +
+      "blamepost.text.forDisplay, at the site that builds the value, because the row is " +
+      "written once and read many times and nothing downstream can recover what arrived. " +
+      "Pass the conversion through it, or through a local bound wrapper named for it.",
+    dirs: ["lib", "bin"],
+    scan: function (file) {
+      var mask = _maskOf(file);
+      var out  = [];
+      // The row's own call, which is a framework verb rather than a name
+      // this repository chose, and its matching bracket as the boundary.
+      // A count of characters would stop reading the moment a row grew
+      // another field, and a detector that has gone quiet passes green
+      // over the code it was written to read.
+      var EMIT = /\bsafeEmit\s*\(/g;
+      var m;
+      EMIT.lastIndex = 0;
+      while ((m = EMIT.exec(mask)) !== null) {
+        var open = m.index + m[0].length - 1;
+        var end  = _matchingBracket(mask, open);
+        if (end === -1) continue;
+        var span = mask.slice(open, end);
+        var conversion;
+        CAUGHT_ERROR_TEXT_RE.lastIndex = 0;
+        while ((conversion = CAUGHT_ERROR_TEXT_RE.exec(span)) !== null) {
+          var at = open + conversion.index;
+          if (DISPLAY_SCREEN_CALL_RE.test(_wrapperCallBefore(mask, at))) continue;
+          out.push(_atOffset(file, at,
+            "a caught error is turned into text and written into an audit row with no " +
+            "display screen in front of it"));
+        }
+      }
+      return out;
+    },
+    red: [
+      "function _drained(name, err) {\n" +
+        "  b.audit.safeEmit({\n" +
+        "    action:   \"blamepost.mail.listeners.drain_incomplete\",\n" +
+        "    outcome:  \"failure\",\n" +
+        "    metadata: { listener: name, error: (err && err.message) || String(err) },\n" +
+        "  });\n}\n",
+      // The same shape under a renamed binding, which is what the matcher
+      // reads as a shape rather than as the word `err`.
+      "b.audit.safeEmit({ action: \"a.b\", reason: (readErr && readErr.message) || " +
+        "String(readErr) });\n",
+      // Written into a row that has grown other fields around it, so the
+      // boundary is the call rather than a distance from it.
+      "b.audit.safeEmit({\n  action: \"a.b\",\n  outcome: \"failure\",\n" +
+        "  actor: { userId: null },\n  resource: null,\n  requestId: null,\n" +
+        "  metadata: {\n    domain: domain,\n    cause: cause || null,\n" +
+        "    reason: (signErr && signErr.message) || String(signErr),\n  },\n});\n",
+      // One screened value beside one that is not. A screen anywhere in
+      // the literal does not answer for the value next to it, which is
+      // why the walk asks about the call a conversion sits directly
+      // inside rather than about the row it ends up in.
+      "b.audit.safeEmit({ action: \"a.b\", metadata: {\n" +
+        "  domain: displayText.forDisplay(domain),\n" +
+        "  reason: (err && err.message) || String(err),\n} });\n",
+    ],
+    green: [
+      "b.audit.safeEmit({ action: \"a.b\",\n" +
+        "  metadata: { error: text.forDisplay((err && err.message) || String(err)) } });\n",
+      "b.audit.safeEmit({ action: \"a.b\",\n" +
+        "  metadata: { error: _screenForDisplay((err && err.message) || String(err)) } });\n",
+      // A log line is read by an operator too, and it is a different
+      // sink with a different lifetime: this pattern is about the row.
+      "log.error(\"the push sweep threw: \" + ((err && err.message) || String(err)));\n",
+      // A code rather than a message. Nothing a stranger wrote reaches
+      // a row through it, so there is nothing here to screen.
+      "b.audit.safeEmit({ action: \"a.b\", metadata: { code: (err && err.code) || null } });\n",
+      // A row carrying more than one screened value, each screened where
+      // it is built. The walk asks about the call a conversion sits
+      // directly inside rather than about anything else in the literal,
+      // so a row stays silent when every conversion in it is wrapped and
+      // reports the one that is not, however many screened values sit
+      // beside it.
+      "b.audit.safeEmit({ action: \"a.b\", metadata: {\n" +
+        "  domain: displayText.forDisplay(domain),\n" +
+        "  reason: displayText.forDisplay((err && err.message) || String(err)),\n} });\n",
+    ],
+  },
+
+  {
+    name: "caught-error-text-onto-a-terminal-unscreened",
+    description:
+      "A caught error turned into text and written straight to one of this process's own " +
+      "streams. It is the sibling of the audit-row pattern and the harm arrives sooner: a " +
+      "row is read back later, and this is already on the operator's screen. An error's " +
+      "message is not this server's prose, so an argument parser quotes the token it could " +
+      "not read, a resolver quotes what it was looking up, and a filesystem refusal quotes " +
+      "a path. A terminal ACTS on what it is given rather than rendering it inertly, so a " +
+      "value carrying the single-byte control sequence introducer at U+009B repaints the " +
+      "row above the one it is on, an escape introducer at U+001B clears the line that " +
+      "named the fault, a bidirectional override reverses the sentence an operator is " +
+      "deciding on, and a carriage return overwrites the first half of a line with the " +
+      "second. The screen is blamepost.text.forDisplay, run on each line rather than on " +
+      "the whole value, because folding is what makes a single line safe and a stack trace " +
+      "is several. Pass the conversion through it, or through a local bound wrapper named " +
+      "for it.",
+    dirs: ["lib", "bin"],
+    scan: function (file) {
+      var mask = _maskOf(file);
+      var out  = [];
+      // The write itself, which is the platform's own verb rather than a
+      // name this repository chose, so no rename here can quiet this.
+      // The matching bracket is the boundary for the same reason the
+      // audit-row pattern uses one: a count of characters stops reading
+      // the moment a line grows another term, and a detector that has
+      // gone quiet passes green over the code it was written to read.
+      var WRITE = /\bprocess\s*\.\s*(?:stdout|stderr)\s*\.\s*write\s*\(/g;
+      var m;
+      WRITE.lastIndex = 0;
+      while ((m = WRITE.exec(mask)) !== null) {
+        var open = m.index + m[0].length - 1;
+        var end  = _matchingBracket(mask, open);
+        if (end === -1) continue;
+        var span = mask.slice(open, end);
+        var conversion;
+        CAUGHT_ERROR_TEXT_RE.lastIndex = 0;
+        while ((conversion = CAUGHT_ERROR_TEXT_RE.exec(span)) !== null) {
+          var at = open + conversion.index;
+          if (DISPLAY_SCREEN_CALL_RE.test(_wrapperCallBefore(mask, at))) continue;
+          out.push(_atOffset(file, at,
+            "a caught error is turned into text and written to a terminal with no " +
+            "display screen in front of it"));
+        }
+      }
+      return out;
+    },
+    red: [
+      "process.stderr.write(\"blamepost: \" + ((err && err.message) || String(err)) + \"\\n\");\n",
+      // The same shape under a renamed binding and on the other stream,
+      // which is what the matcher reads as a shape rather than as the
+      // word `err` or as one of the two streams.
+      "process.stdout.write(((readErr && readErr.message) || String(readErr)) + \"\\n\");\n",
+      // Written into a line that has grown other terms around it, so the
+      // boundary is the call rather than a distance from it.
+      "process.stderr.write(\"blamepost \" + command + \": \" + prefix + \" \" + label +\n" +
+        "  \" \" + ((err && err.message) || String(err)) + \" \" + hint + \"\\n\");\n",
+    ],
+    green: [
+      "process.stderr.write(text.forDisplay((err && err.message) || String(err)) + \"\\n\");\n",
+      "process.stderr.write(_linesForDisplay((err && err.message) || String(err)) + \"\\n\");\n",
+      // This server's own prose, which carries nothing a stranger chose.
+      "process.stderr.write(\"Run `blamepost help` for the list of commands.\\n\");\n",
+      // A code rather than a message. Nothing a stranger wrote reaches
+      // the terminal through it.
+      "process.stderr.write(String((err && err.code) || \"no code\") + \"\\n\");\n",
+      // The audit row's own pattern, which is a different exit with a
+      // different lifetime and is covered by its own detector.
+      "b.audit.safeEmit({ action: \"a.b\",\n" +
+        "  metadata: { error: (err && err.message) || String(err) } });\n",
+    ],
+  },
+
+  {
+    name: "caught-error-text-into-a-client-refusal-unscreened",
+    description:
+      "A caught fault's own message written into the refusal a client is handed back. It is " +
+      "the third exit in the same family as the audit row and the terminal, and it is the " +
+      "one where the reader is the person who asked. A fault's message is not this server's " +
+      "prose: a JMAP client chooses the keyword and the property name a patch names and the " +
+      "sentence refusing the patch quotes them, and a receiving peer chooses the reply text " +
+      "a delivery failure carries. Markup escaping does not answer it, because none of what " +
+      "does the harm is markup: the right-to-left override at U+202E reverses the reading " +
+      "order of the rest of the sentence, the single-byte control sequence introducer at " +
+      "U+009B opens an escape sequence for anything reading the answer as a stream, and a " +
+      "carriage return with no line feed overwrites the first half of the line with the " +
+      "second. The screen is blamepost.text.forDisplay, at the site that builds the value, " +
+      "because a value built once is read on a page, in a client and in whatever log the " +
+      "caller keeps. Pass the read through it, or through a local bound wrapper named for " +
+      "it. A refusal carrying a code rather than a message is not this pattern, and neither " +
+      "is an internal report row: the field named here is paired with the `type` a SetError " +
+      "and a problem document both carry.",
+    dirs: ["lib", "bin"],
+    scan: function (file) {
+      var mask = _maskOf(file);
+      var out  = [];
+      var m;
+      REFUSAL_FIELD_RE.lastIndex = 0;
+      while ((m = REFUSAL_FIELD_RE.exec(mask)) !== null) {
+        var colon = m.index + m[0].length - 1;
+        // The literal this field belongs to, which is what says whether
+        // the field is a wire refusal or an internal row that happens to
+        // use the same word. The brace pair is the boundary for the same
+        // reason the audit-row pattern uses the call's bracket: a literal
+        // that grows another field is still one literal.
+        var literal = _enclosingBraces(mask, colon);
+        if (literal === null) continue;
+        REFUSAL_TYPE_KEY_RE.lastIndex = 0;
+        if (!REFUSAL_TYPE_KEY_RE.test(mask.slice(literal.start, literal.end))) continue;
+        var span = _propertyValueSpan(mask, colon);
+        if (!MESSAGE_READ_RE.test(span)) continue;
+        if (DISPLAY_SCREEN_IN_VALUE_RE.test(span)) continue;
+        out.push(_atOffset(file, colon,
+          "a caught fault's message is written into a refusal a client renders with no " +
+          "display screen in front of it"));
+      }
+      return out;
+    },
+    red: [
+      "notUpdated[id] = { type: \"invalidProperties\", description: patchErr.message };\n",
+      // The other conversion shape, under a renamed binding, in the other
+      // field, so what the matcher reads is the shape rather than one
+      // spelling or one holder.
+      "_sendProblem(res, {\n  status: 502,\n  type:   PROBLEM.undeliverable,\n" +
+        "  title:  \"That message was not handed to the outbound path\",\n" +
+        "  detail: (sendErr && sendErr.message) || String(sendErr),\n});\n",
+      // A refusal that has grown other fields around it, so the boundary
+      // is the literal rather than a distance from anything.
+      "answer = { problem: {\n  status: 403,\n  instance: here,\n  type: T.author,\n" +
+        "  title: \"no\",\n  detail: (e && e.message) || String(e),\n  extra: null,\n} };\n",
+    ],
+    green: [
+      "notUpdated[id] = { type: \"invalidProperties\",\n" +
+        "  description: displayText.forDisplay(patchErr.message) };\n",
+      "notCreated[key] = { type: \"forbiddenToSend\",\n" +
+        "  description: _faultForDisplay(sendErr) };\n",
+      // A code rather than a message. Nothing a stranger wrote reaches
+      // the client through it.
+      "notUpdated[id] = { type: \"invalidProperties\", description: (e && e.code) || \"unknown\" };\n",
+      // This server's own prose, which carries nothing anybody else chose.
+      "_sendProblem(res, { status: 503, type: T.unreadable, title: \"no\",\n" +
+        "  detail: \"The message was not sent. The operator's audit trail names what is " +
+        "wrong.\" });\n",
+      // An internal report row. It carries no `type`, because nothing
+      // reads it as a SetError or as a problem document, and the screen
+      // for the surface that eventually prints it belongs there.
+      "refused.push({ objectid: id, reason: code, detail: (e && e.message) || String(e) });\n",
+    ],
+  },
+
+  {
+    name: "control-char-offset-spent-as-a-cut",
+    description:
+      "A control-character offset spent as a place to cut rather than as a reason to refuse. " +
+      "The framework's offset answers where the text stops being printable, and a body that " +
+      "cuts there keeps everything in front of the first control character and drops the rest. " +
+      "That reads as a screen and is not one: the codepoints that change what a line APPEARS " +
+      "to say are not control characters at all, so a bidirectional override and a zero-width " +
+      "character sit in the kept half untouched, and a value carrying one goes into an audit " +
+      "row, a console table and a log line rendering as a different value. The cut also throws " +
+      "away the text a reader needed, which is the half of the finding they were looking at. " +
+      "Two shapes are correct instead. A field this server stores asks " +
+      "blamepost.text.hasControlChar and refuses; a value on its way to somebody's eyes goes " +
+      "through blamepost.text.forDisplay, which removes what a reader would act on and keeps " +
+      "everything else. Comparing the offset against -1 and refusing on it is the refusal " +
+      "shape and is not this pattern.",
+    dirs: ["lib", "bin"],
+    scan: function (file) {
+      var mask   = _maskOf(file);
+      var bodies = _functionBodies(mask);
+      var out    = [];
+      var OFFSET = /\bfirstControlCharOffset\s*\(/g;
+      // A cut anywhere in the same function body is the second half. The
+      // body is the boundary rather than a character count, so a body
+      // that grows keeps matching, and the match is attributed to the
+      // innermost function so two siblings are never joined into one.
+      var CUT = /\.\s*slice\s*\(|\.\s*substring\s*\(|\.\s*substr\s*\(/;
+      bodies.forEach(function (body) {
+        _matchesIn(mask, bodies, body, OFFSET).forEach(function (m) {
+          if (!CUT.test(mask.slice(body.start, body.end))) return;
+          out.push(_atOffset(file, m.offset,
+            "a control-character offset is spent as a place to cut rather than as a refusal"));
+        });
+      });
+      return out;
+    },
+    red: [
+      "function _field(value, limit) {\n" +
+        "  var text = value.trim();\n" +
+        "  if (text.length > limit) text = text.slice(0, limit);\n" +
+        "  var control = b.codepointClass.firstControlCharOffset(text, { forbidTab: true });\n" +
+        "  if (control === 0) return null;\n" +
+        "  if (control > 0) text = text.slice(0, control);\n" +
+        "  return text;\n}\n",
+      "function _recordable(value) {\n" +
+        "  var at = b.codepointClass.firstControlCharOffset(value);\n" +
+        "  return at === -1 ? value : value.substring(0, at);\n}\n",
+    ],
+    green: [
+      // The refusal shape: the offset is compared and nothing is cut on it.
+      "function _wireName(name) {\n" +
+        "  if (b.codepointClass.firstControlCharOffset(name, { forbidTab: true }) !== -1) {\n" +
+        "    throw err(\"mailbox/bad-mailbox-name\", \"a name carries no control characters.\");\n" +
+        "  }\n  return name;\n}\n",
+      // The screen, which removes rather than cuts, with a length bound
+      // that has nothing to do with the offset.
+      "function _field(value, limit) {\n" +
+        "  var text = displayText.forDisplay(value).trim();\n" +
+        "  if (text.length > limit) text = text.slice(0, limit);\n" +
+        "  return text.length > 0 ? text : null;\n}\n",
+      // Two siblings, one refusing and one cutting, are two functions and
+      // neither is this pattern.
+      "function _named(n) {\n" +
+        "  if (b.codepointClass.firstControlCharOffset(n) !== -1) throw new TypeError(\"control\");\n" +
+        "  return n;\n}\n" +
+        "function _short(n) {\n  return n.slice(0, 40);\n}\n",
     ],
   },
 
@@ -2698,7 +4025,7 @@ var DETECTORS = [
       "wrong by however far the correction went, in whichever direction it went: a step forward " +
       "expires state that is still live, and a step backwards holds it until the clock has " +
       "climbed back to where it was. Neither shows up as an error anywhere. Measure elapsed " +
-      "time on process.hrtime.bigint(), which counts from a point this process cannot move and " +
+      "time on b.time.monotonicMs, which counts from a point no clock correction can move and " +
       "advances only at the rate of real time. A reading that has to say WHEN something " +
       "happened is a different thing and stays on the wall clock: an internal date, an audit " +
       "row, a cookie expiry a browser will read, and a retry schedule read back off disk after " +
@@ -3013,6 +4340,63 @@ var DETECTORS = [
   },
 
   {
+    name: "mailbox-listener-without-the-mailbox-auth-surface",
+    description:
+      "An IMAP, POP3 or ManageSieve listener built without declaring the mailbox " +
+      "authentication surface. This server has two identity spaces and only one listener holds " +
+      "both: submission accepts an account or a sending credential, and a credential speaks for " +
+      "every local part in a hosted domain. A mailbox protocol handed the submission surface, " +
+      "or handed a verifier that names no surface at all, therefore accepts a secret issued to " +
+      "SEND mail as an identity that can READ it, and the credential's own refusal list does " +
+      "not bound that: it names addresses the credential may not write and says nothing about " +
+      "what it may open. What that buys an attacker holding one leaked application secret is " +
+      "every message in the domain over IMAP, the maildrop deleted on QUIT over POP3, and the " +
+      "filters that decide where mail lands rewritten over ManageSieve. Build each of these " +
+      "with the mailbox surface, so the listener refuses a credential as an unknown identity " +
+      "and a client cannot tell the refusal from a wrong password. The check reads the absence " +
+      "of the good token rather than the presence of the bad one, so a listener added later, a " +
+      "verifier that takes no surface, and a renamed constant all fail here rather than going " +
+      "quietly green.",
+    dirs: ["lib"],
+    scan: function (file) {
+      var mask = _maskOf(file);
+      var re   = /\bb\.mail\.server\.(imap|pop3|managesieve)\.create\s*\(/g;
+      var out  = [];
+      var m;
+      re.lastIndex = 0;
+      while ((m = re.exec(mask)) !== null) {
+        var openParen = m.index + m[0].length - 1;
+        var close     = _matchingBracket(mask, openParen);
+        if (close === -1) continue;
+        if (!/AUTH_SURFACES\s*\.\s*MAILBOX\b/.test(mask.slice(openParen, close))) {
+          out.push(_atOffset(file, m.index,
+            "b.mail.server." + m[1] + ".create() does not declare AUTH_SURFACES.MAILBOX, so " +
+            "a sending credential may be an identity on a mailbox protocol"));
+        }
+      }
+      return out;
+    },
+    red: [
+      "function _buildImap() {\n  return b.mail.server.imap.create({\n" +
+      "    auth:      _authConfig(AUTH_SURFACES.SUBMISSION),\n" +
+      "    mailStore: mailStore,\n  });\n}\n",
+      "function _buildPop3() {\n  return b.mail.server.pop3.create({\n" +
+      "    auth:      _authConfig(),\n    mailStore: mailStore,\n  });\n}\n",
+      "function _buildManageSieve() {\n  return b.mail.server.managesieve.create({\n" +
+      "    auth:      { mechanisms: [\"PLAIN\"], verify: _verify },\n" +
+      "    mailStore: mailStore,\n  });\n}\n",
+    ],
+    green: [
+      "function _buildImap() {\n  return b.mail.server.imap.create({\n" +
+      "    auth:      _authConfig(AUTH_SURFACES.MAILBOX),\n" +
+      "    mailStore: mailStore,\n  });\n}\n",
+      "function _buildSubmission() {\n  return b.mail.server.submission.create({\n" +
+      "    auth:      _authConfig(AUTH_SURFACES.SUBMISSION),\n" +
+      "    mailStore: mailStore,\n  });\n}\n",
+    ],
+  },
+
+  {
     name: "mx-listener-built-with-a-relay-grant",
     description:
       "An MX listener built with relayAllowedFor. That option tells the listener to accept a " +
@@ -3083,6 +4467,112 @@ var DETECTORS = [
     ],
     green: [
       "function notifyOperator(env) {\n  return outbound.deliver(env);\n}\n",
+    ],
+  },
+
+  {
+    name: "outbound-composer-built-in-a-second-place",
+    description:
+      "A second outbound delivery chain, built somewhere other than the module that owns " +
+      "the one this server sends through. The detector beside this one catches a raw " +
+      "transport, which is the loud way past the policy chain; this is the quiet way, " +
+      "because a second composer runs a chain of its own and looks entirely correct doing " +
+      "it. What it does not share is the settings: the MTA-STS posture, the DANE posture " +
+      "and the operator's pinned resolver are arguments, so a second call carries whatever " +
+      "its own caller wrote, and a message sent through it leaves under a posture the " +
+      "operator never configured. Nothing on the wire says which chain a message took. The " +
+      "spool, the retry budget and the report path are not shared either, so a recipient " +
+      "the second chain defers waits in nobody's queue and its sender is never told. " +
+      "Compose the handle blamepost.mail.delivery.create hands back instead of building " +
+      "another one.",
+    dirs: ["lib", "bin"],
+    // Read off the mask, so the outbound module's own documentation of
+    // the call it makes is documentation rather than a second call. The
+    // owner is excluded by path for the same reason a detector for a
+    // rule never fires on the rule.
+    scan: function (file) {
+      if (OUTBOUND_COMPOSER_OWNER_RE.test(file.rel)) return [];
+      var mask = _maskOf(file);
+      var out = [];
+      OUTBOUND_COMPOSER_BUILT_RE.lastIndex = 0;
+      var hit = OUTBOUND_COMPOSER_BUILT_RE.exec(mask);
+      while (hit !== null) {
+        out.push(_atOffset(file, hit.index));
+        if (hit.index === OUTBOUND_COMPOSER_BUILT_RE.lastIndex) {
+          OUTBOUND_COMPOSER_BUILT_RE.lastIndex += 1;
+        }
+        hit = OUTBOUND_COMPOSER_BUILT_RE.exec(mask);
+      }
+      return out;
+    },
+    red: [
+      "function _alertTransport(config) {\n" +
+        "  return b.mail.send.deliver.create({ hostname: config.hostname });\n}\n",
+      // The same call written across several lines, which is the shape a
+      // matcher bound to one line goes quiet on.
+      "function _reportSender(config) {\n" +
+        "  return b.mail\n    .send\n    .deliver\n    .create({\n" +
+        "    hostname: config.hostname,\n    policy:   { mtaSts: \"off\" },\n  });\n}\n",
+    ],
+    green: [
+      // The one module that may build it, named by its path.
+      {
+        as:   "lib/mail/delivery.js",
+        text: "function create(opts) {\n" +
+          "  var deliver = b.mail.send.deliver.create({ hostname: opts.hostname });\n" +
+          "  return deliver;\n}\n",
+      },
+      // Everywhere else composes the handle that module hands back.
+      "function _alertTransport(deliveryHandle) {\n" +
+        "  return deliveryHandle.send;\n}\n",
+    ],
+  },
+
+  {
+    name: "bundle-manifest-read-in-a-second-place",
+    description:
+      "A second reading of a backup bundle's manifest. The manifest is the only thing that " +
+      "records which server a bundle was taken on, which data directory it was taken from " +
+      "and which id it was written as, and every verb that reports on a bundle has to hold " +
+      "those against this server: a restore refuses a bundle whose three fields disagree, so " +
+      "a verb that vouches for one without asking sends an operator away believing they hold " +
+      "a copy, and a retention sweep that counts one deletes a bundle that would have " +
+      "restored in order to keep one that will not. Three verbs read the manifest separately " +
+      "and only the restore asked. Route every reading through the one reader that answers " +
+      "both questions at once, so a verb added later cannot get the manifest without the " +
+      "verdict on where it came from.",
+    dirs: ["bin", "lib"],
+    // Anchored on the framework's own primitive rather than on the reader
+    // around it. `b.restoreBundle.inspect` is a vendored contract this
+    // repository cannot rename, so the anchor survives every rename here
+    // and disappears only when the manifest stops being read at all. The
+    // rule is one reading per file, and the second is the finding: the
+    // first is the reader, and anything after it is a caller that went
+    // around it.
+    scan: function (file) {
+      var mask = _maskOf(file);
+      var re   = /\bb\.restoreBundle\.inspect\s*\(/g;
+      var out  = [];
+      var seen = 0;
+      var m;
+      while ((m = re.exec(mask)) !== null) {
+        seen += 1;
+        if (seen === 1) continue;
+        out.push(_atOffset(file, m.index,
+          "the bundle manifest is read here as well, so this reading can report on a bundle " +
+          "without holding the origin it records against this server"));
+      }
+      return out;
+    },
+    red: [
+      "function _stands(dir) {\n  return b.restoreBundle.inspect({ bundleDir: dir });\n}\n" +
+        "function _describe(dir) {\n  return b.restoreBundle.inspect({ bundleDir: dir });\n}\n",
+    ],
+    green: [
+      "function _readBundle(dir, bundleId, config) {\n" +
+        "  var manifest = b.restoreBundle.inspect({ bundleDir: dir });\n" +
+        "  return { manifest: manifest, fault: _originFault(manifest, bundleId, config) };\n}\n" +
+        "function _describe(dir, id, config) {\n  return _readBundle(dir, id, config).manifest;\n}\n",
     ],
   },
 
@@ -3915,23 +5405,180 @@ var DETECTORS = [
   },
 
   {
+    name: "hand-rolled-promise-sleep",
+    description:
+      "A sleep written by hand in shipped source: a Promise whose executor passes its resolve " +
+      "function straight to setTimeout. The framework ships b.safeAsync.sleep, which refuses a " +
+      "delay that is not a finite number, accepts an abort signal, and keeps the timer " +
+      "referenced unless the caller passes unref. A local copy does none of that, and each " +
+      "copy is another place the same wait can be written differently. Call " +
+      "b.safeAsync.sleep instead.",
+    dirs: ["lib", "bin"],
+    scan: _contentMatcher(/new\s+Promise\s*\((?:(?!\n\})[\s\S]){0,200}?setTimeout\s*\(\s*[A-Za-z_$][\w$]*\s*,\s*[\w$.]+\s*\)/g),
+    red: [
+      "function _sleep(ms) {\n  return new Promise(function (resolve) { setTimeout(resolve, ms); });\n}\n",
+      "var pause = function (ms) { return new Promise((r) => setTimeout(r, ms)); };\n",
+    ],
+    green: [
+      "async function pause(ms) {\n  await b.safeAsync.sleep(ms);\n}\n",
+      "return new Promise(function (resolve, reject) {\n" +
+        "  var timer = setTimeout(function () { reject(new Error(\"timed out\")); }, budgetMs);\n" +
+        "  work.then(resolve, reject);\n});\n",
+    ],
+  },
+
+  {
+    name: "test-fixture-mode-masked-by-umask",
+    description:
+      "A directory-creation mode in a test that the fixture umask narrows to something " +
+      "stricter, so the fixture does not create what it says it creates. test/helpers sets a " +
+      "0077 umask, because the server refuses to start against a data directory looser than " +
+      "0750 and a fixture that creates its own decides whether the server under test can boot. " +
+      "mkdir applies the umask to its mode argument, so a fixture written as " +
+      "mkdirSync(dir, { mode: 0o755 }) to prove that a loose directory is REFUSED gets a 0700 " +
+      "directory, the server starts, and the case passes having asserted nothing. chmod is not " +
+      "masked, so a fixture that has to be loose sets the mode with chmodSync after creating " +
+      "the directory. Only group and other bits are flagged, since those are the ones this " +
+      "umask clears. The scan reads one line at a time, so a call split across lines is not " +
+      "matched.",
+    dirs: ["test"],
+    scan: function (file) {
+      var out = [];
+      var re  = /mkdirSync\s*\([^;]{0,200}?mode\s*:\s*(0o[0-7]{3,4})/;
+      for (var i = 0; i < file.lines.length; i++) {
+        var m = re.exec(file.lines[i]);
+        if (!m) continue;
+        if ((parseInt(m[1].slice(2), 8) & 0o077) !== 0) {
+          out.push({ file: file.rel, line: i + 1, content: file.lines[i].trim() });
+        }
+      }
+      return out;
+    },
+    red: [
+      "nodeFs.mkdirSync(dir, { recursive: true, mode: 0o755 });\n",
+      "fs.mkdirSync(dataDir, { mode: 0o770 });\n",
+    ],
+    green: [
+      // Group and other bits already clear, so the umask changes nothing.
+      "nodeFs.mkdirSync(dir, { recursive: true, mode: 0o700 });\n",
+      // No mode at all is the ordinary case the umask exists to handle.
+      "nodeFs.mkdirSync(dir, { recursive: true });\n",
+      // The supported way to fixture a deliberately loose directory.
+      "nodeFs.chmodSync(ctx.cfg.paths.dataDir, 0o777);\n",
+    ],
+  },
+
+  {
+    name: "test-statement-commented-out",
+    description:
+      "A statement disabled by commenting it out in a test. The assertions are the whole of " +
+      "what a test file does, so a commented-out one costs the file its verdict while leaving " +
+      "every outward sign of health: the run proceeds, the remaining checks report, and the " +
+      "process exits zero. Nothing downstream can tell the difference, because the CHECKS " +
+      "total a passing run prints counts what still ran, so a file that lost half its " +
+      "assertions reads exactly like one that never had them, and the behavior those " +
+      "assertions pinned goes unmeasured until it breaks in production. A statement that has " +
+      "to stop running is deleted rather than commented, and a check that cannot run in this " +
+      "environment goes through helpers.skip, which lands in the skip counter and is named in " +
+      "the run instead of vanishing from it. Restore the statement, or delete it and record " +
+      "in the file what is no longer covered.",
+    dirs: ["test"],
+    scan: function (file) {
+      // A callee written hard against its parenthesis, which is how a
+      // call is written and how prose naming one is not. `Copyright (c)`
+      // and `the revision (a push that moves the head)` are a word and a
+      // parenthetical, and both carry the space that this rejects. The
+      // optional lead covers the statement keywords a call is reached
+      // through; those are language, so a rename cannot retire them.
+      var opensCall =
+        /^(?:(?:var|let|const)\s+[A-Za-z_$][A-Za-z0-9_$]*\s*=\s*|return\s+|throw\s+)?(?:await\s+)?[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*\(/;
+      // A statement ends where the call closes. Prose that happens to
+      // name a function reads `reconcile() compares the two tables` and
+      // ends in a word, so the terminator is what separates a sentence
+      // about a call from the call itself.
+      var terminates = /\)\s*;$/;
+      var out = [];
+      for (var i = 0; i < file.lines.length; i += 1) {
+        var body = _lineCommentBody(file.lines[i]);
+        if (!body || !opensCall.test(body)) continue;
+        // Either the statement closes here, or its parenthesis is still
+        // open and the rest of it is on the commented lines below. The
+        // second half is what reads a call spanning several lines, whose
+        // first line ends on a callback's brace rather than on the
+        // terminator.
+        if (!terminates.test(body) && !_leavesParenOpen(body)) continue;
+        out.push({ file: file.rel, line: i + 1, content: file.lines[i].trim() });
+      }
+      return _named(file, out);
+    },
+    red: [
+      "async function refuses(session) {\n" +
+      "  // await imapExpungeIsRefused(session, ctx.audit, ctx.identity, forImap);\n" +
+      "  session.send(session.tag() + \" LOGOUT\");\n" +
+      "}\n",
+      "// check(\"the floor refuses the message inside the window\", refused === true);\n",
+      "// session.send(session.tag() + \" LOGOUT\");\n",
+      // Spanning several lines: the first line ends on the callback's
+      // brace rather than on the terminator, and the parenthesis it
+      // opened is what says the statement continues.
+      "// await helpers.waitUntil(function () {\n" +
+      "//   return collector.received >= 1;\n" +
+      "// }, { timeoutMs: 5000, label: \"the bounce arrived\" });\n",
+      // The same, broken at the argument list.
+      "// count(\n" +
+      "//   \"the row is held\", held === true, row);\n",
+      // The value a later assertion reads, disabled with it.
+      "// var rows = ctx.audit.forAction(\"mail.expunge\");\n",
+      "// return helpers.waitUntil(predicate, opts);\n",
+    ],
+    green: [
+      // The statement running, which is the whole point.
+      "await imapExpungeIsRefused(session, ctx.audit, ctx.identity, forImap);\n",
+      // Prose naming a function opens no statement and closes none.
+      "// reconcile() compares the table against the checker's report in both\n" +
+      "// directions.\n",
+      // A parenthetical wrapping onto the next line leaves a parenthesis
+      // open across two comment lines and is still a sentence.
+      "// revision (a push after the review moves the head and this goes false\n" +
+      "// until the next one).\n",
+      "// Copyright (c) blamejs contributors\n",
+      // A call quoted inside a sentence is not at the head of the line.
+      "// The assertion is `check(label, condition)`, which takes two arguments.\n",
+      // A usage example belongs in the block above the primitive, where
+      // whole statements are the documented form, declarations included.
+      "/**\n" +
+      " * count(label, condition, detail) quotes the value in the failure.\n" +
+      " *\n" +
+      " *   var helpers = require(\"../helpers\");\n" +
+      " *   count(\"the queue drained\", queue.length === 0, queue.length);\n" +
+      " */\n",
+      // A note on the end of a line whose statement still runs.
+      "await helpers.waitUntil(pred, opts); // count(\"drained\", ok, n);\n",
+      // The skip is the supported way to record a check that could not
+      // run, and it is a live call rather than a commented one.
+      "helpers.skip(\"no container engine on this host\");\n",
+    ],
+  },
+
+  {
     name: "internal-rulebook-vocabulary-in-source",
     description:
       "Internal authoring vocabulary or an assistant-tooling name in the source. Numbered " +
       "phases, sweeps, batches, slices and lettered groupings are a private index into work " +
       "that a reader of this repository has no access to, so they describe nothing. The " +
-      "validation tiers are the same vocabulary one level down: the discipline decides how a " +
-      "reader treats bad input and the label names the classification instead of the behavior, " +
-      "so \"defensive by tier\" and \"the observability tier\" leave the reader knowing which " +
-      "bucket somebody filed the code under and not what it does with a truncated record. " +
-      "Attribution and tooling names never belong in an artifact at all. Say what the code does.",
+      "validation " + LABEL_NOUN + "s are the same vocabulary one level down: the discipline " +
+      "decides how a reader treats bad input and the label names the classification instead " +
+      "of the behavior, so \"defensive by " + LABEL_NOUN + "\" and \"the observability " +
+      LABEL_NOUN + "\" leave the reader knowing which bucket somebody filed the code under and " +
+      "not what it does with a truncated record. Attribution and tooling names never belong " +
+      "in an artifact at all. Say what the code does.",
     dirs: ["lib", "bin", "scripts", "test"],
     scan: function (file) {
       var toolingExempt = Object.prototype.hasOwnProperty.call(TOOLING_TOKEN_EXCEPTIONS, file.rel);
       var out = [];
       for (var i = 0; i < file.lines.length; i++) {
         var line = file.lines[i];
-        var hit = NUMBERING_RE.test(line) || TIER_LABEL_RE.test(line) ||
+        var hit = NUMBERING_RE.test(line) || VALIDATION_LABEL_RE.test(line) ||
           (!toolingExempt && TOOLING_RE.test(line));
         if (hit) out.push({ file: file.rel, line: i + 1, content: line.trim() });
       }
@@ -3940,11 +5587,12 @@ var DETECTORS = [
     red: [
       "// Rewritten during the phase 3 sweep over the listener glue.\n",
       "// Co-Authored-By: an assistant\n",
-      "// Tier-B accounts keep the shorter retention window.\n",
-      "// Defensive by tier: a missing, truncated or unparseable lock reads as absent.\n",
-      "// Best effort by tier, and the direction of the compromise matters.\n",
-      "  // Drop-silent by design, in the observability tier: a report is not a delivery.\n",
-      " * refuses at the point of parse. That is the wire tier doing its job.\n",
+      "// " + LABEL_NOUN_CAPITAL + "-B accounts keep the shorter retention window.\n",
+      "// Defensive by " + LABEL_NOUN + ": a missing, truncated or unparseable lock reads as absent.\n",
+      "// Best effort by " + LABEL_NOUN + ", and the direction of the compromise matters.\n",
+      "  // Drop-silent by design, in the observability " + LABEL_NOUN +
+        ": a report is not a delivery.\n",
+      " * refuses at the point of parse. That is the wire " + LABEL_NOUN + " doing its job.\n",
     ],
     green: [
       "// The MX listener refuses to bind until the operator acknowledges DNS posture.\n",
@@ -3955,8 +5603,9 @@ var DETECTORS = [
       // The health-probe tiers, which are a framework field and a real
       // distinction an operator configures.
       "  }, { tier: [\"liveness\", \"readiness\"], critical: true });\n",
-      "  // Registered per tier rather than across both, because the verdict is not the same.\n",
-      "  // The same reading on the other tier. A restart re-reads the same spool.\n",
+      "  // Registered per " + LABEL_NOUN +
+        " rather than across both, because the verdict is not the same.\n",
+      "  // The same reading on the other " + LABEL_NOUN + ". A restart re-reads the same spool.\n",
     ],
   },
 
@@ -4087,6 +5736,63 @@ var DETECTORS = [
         text: "{ \"label\": \"RFC 5321 " + EM_DASH + " Simple Mail Transfer Protocol\" }\n" },
       { as: "ARCHITECTURE.md",
         text: "```\nblamepost.db  SQLite " + EM_DASH + " accounts, domains, folders\n```\n" },
+    ],
+  },
+
+  {
+    name: "raw-control-byte-in-text",
+    description:
+      "A raw control character in a text file. Tab, newline and carriage return are layout; " +
+      "every other code point below the space and DEL at 0x7f is a byte that no editor renders " +
+      "and no reviewer sees in a diff. A program that needs one BUILDS it, the way " +
+      "`String.fromCharCode(0)` names a SASL separator, so the character the code depends on is " +
+      "written where a reader can see it. Embedding the byte instead costs the tree its own " +
+      "search: grep answers `Binary file <path> matches` and prints no line and no content, so " +
+      "every pattern the pre-ship audit runs with -n reports a file that matched and nothing " +
+      "about what matched, which is a hit that reads like a summary line and gets skimmed. A " +
+      "fixture that has to CARRY a control character is the same rule rather than an exception " +
+      "to it: build the character and concatenate it, and the test keeps testing the byte while " +
+      "the file stays readable. Binary assets are out of reach by construction, because this " +
+      "scans only the text extensions and the named text files.",
+    dirs: ["lib", "bin", "scripts", "test", "docs", "docker", "release-notes", ".github"],
+    exts: PROSE_EXT_RE,
+    includeRepoRoot: true,
+    scan: _controlByteScan,
+    red: [
+      // The shape both live sites had: a separator embedded in the
+      // expression that uses it.
+      "if (seen.has(i + \"" + NUL + "\" + target)) continue;\n",
+      // A fixture value, which is the case where the byte is the point
+      // of the line and still does not have to be typed.
+      "  \"a name with a control character in it\": \"a" + NUL + "b.sealed\",\n",
+      // The rest of the range, so the matcher is proved on more than the
+      // one code point that happened to drift in.
+      "var sep = \"" + VTAB + "\";\n",
+      "var reset = \"" + ESCAPE + "[0m\";\n",
+      "var rub = \"" + DELETE_CH + "\";\n",
+      // Prose formats carry the byte just as invisibly as source does,
+      // and the operator-facing documents are where a skimmed grep hit
+      // costs the most.
+      { as: "operator.md", text: "The queue drains" + NUL + " within a minute.\n" },
+      { as: "workflow.yml", text: "      - name: scan" + NUL + "\n" },
+      { as: "release-notes/v0.1.0.json",
+        text: "{ \"headline\": \"a" + NUL + "b\" }\n" },
+    ],
+    green: [
+      // The convention itself. The call names the code point in source a
+      // reviewer reads, and the file holds no control character.
+      "var SASL_PLAIN_SEPARATOR = String.fromCharCode(0);\n",
+      "var SEP = String.fromCharCode(0);\n",
+      "if (seen.has(i + SEP + target)) continue;\n",
+      // The escape sequence is two ordinary characters, a backslash and
+      // a letter, so source and JSON that describe a control character
+      // are left alone.
+      "var sep = \"\\u0000\";\n",
+      "var nl = \"\\n\";\n",
+      { as: "release-notes/v0.1.0.json", text: "{ \"sep\": \"\\u0000\" }\n" },
+      // The three layout characters, which every file in the tree has.
+      "function f() {\n\tvar indented = 1;\n\treturn indented;\n}\n",
+      { as: "operator.md", text: "| port | protocol |\n|------|----------|\n" },
     ],
   },
 
@@ -4811,6 +6517,117 @@ var DETECTORS = [
       // Reporting what an erasure answered is not performing one.
       "function lines(result) {\n" +
         "  return [result.rowsErased + \" row\", result.mailErased + \" message\"];\n" +
+        "}\n",
+    ],
+  },
+
+  {
+    name: "account-verdict-built-from-the-status-column-alone",
+    description:
+      "A recipient or sign-in verdict about an account, built from the row's status column " +
+      "without the erasure marker beside it. An erasure records itself on the account row " +
+      "twice, and the identity layer's declaration of the marker column says why: the status " +
+      "transition is ONE write, a records-retention posture puts a trigger on a status column " +
+      "and refuses the transition itself, and the erasure then writes the marker in a change " +
+      "set of its own. So a row whose mail an erasure has already destroyed can carry the " +
+      "marker while its status column still reads active, and a reader that asks the column " +
+      "alone answers that the mailbox is in service. The two readers then disagree about one " +
+      "account: the account layer refuses the sign in and every listing shows the outstanding " +
+      "erasure, while the recipient lookup hands the MX listener a deliverable verdict and the " +
+      "sender is told 250 for mail whose owner cannot open it and whose mailbox is part-way " +
+      "through being destroyed. Read the two columns together through " +
+      "blamepost.store.tables.accountStatus, which is the one derivation of what an account " +
+      "row's state is, and build the verdict off what it answers.",
+    dirs: ["lib", "bin"],
+    // Anchored on two frozen contracts and on no symbol a rename could
+    // move. The `account-` reason prefix is wire-visible: the MX listener
+    // maps `account-erasing` onto a 550 with the enhanced code 5.1.1, and
+    // an operator's audit filter names the same strings. The column is a
+    // SQLite column, so renaming it is a migration rather than an edit.
+    //
+    // The error codes this layer throws under `store/account-<status>`
+    // are a different string and are left alone, because the quote has to
+    // sit immediately in front of the prefix for the shape to match.
+    //
+    // The body carrying the reason is the boundary, walked as brackets
+    // rather than counted in characters, so every read of the column in
+    // the function that builds the verdict is named and a body that grows
+    // keeps being read. A body that reads the shared derivation instead
+    // stops matching on its own, so nothing here depends on a good token
+    // keeping its name.
+    //
+    // Which reads are named comes out of the source rather than out of a
+    // list written here: the reason shape carries the name the row is
+    // held under in that body, and only reads of THAT row are reported.
+    // A domain row read in the same function carries no marker beside its
+    // status and is answered by the column alone, so naming it would be
+    // reporting correct code.
+    scan: function (file) {
+      var mask   = _maskOf(file);
+      var bodies = _functionBodies(mask);
+      var out    = [];
+      var REASON = /"account-"\s*\+\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\.\s*status\b/g;
+      bodies.forEach(function (body) {
+        var text = mask.slice(body.start, body.end);
+        var held = Object.create(null);
+        var found;
+        REASON.lastIndex = 0;
+        while ((found = REASON.exec(text)) !== null) held[found[1]] = true;
+        Object.keys(held).forEach(function (name) {
+          var column = new RegExp("\\b" + name + "\\s*\\.\\s*status\\b", "g");
+          _matchesIn(mask, bodies, body, column).forEach(function (m) {
+            out.push(_atOffset(file, m.offset,
+              "an account verdict is built from the status column without the erasure " +
+              "marker beside it, so a row carrying the marker alone reads as in service"));
+          });
+        });
+      });
+      return out;
+    },
+    red: [
+      // The recipient lookup, deciding deliverability off the column it
+      // read and naming the state in the reason it hands the listener.
+      "function resolve(recipient) {\n" +
+        "  var account = b.db.from(tables.ACCOUNTS).where({ address: recipient }).first();\n" +
+        "  var deliverable = account.status === \"active\";\n" +
+        "  return { deliverable: deliverable,\n" +
+        "    reason: deliverable ? null : \"account-\" + account.status };\n" +
+        "}\n",
+      // The same shape where an alias is followed to the mailbox behind
+      // it, which is the second place a lookup reads an account row.
+      "function _expand(rows, targets) {\n" +
+        "  var live = target.status === \"active\";\n" +
+        "  targets.push({ deliverable: live, reason: live ? null : \"account-\" + target.status });\n" +
+        "}\n",
+    ],
+    green: [
+      // The shared derivation, which answers for both columns.
+      "function resolve(recipient) {\n" +
+        "  var account = b.db.from(tables.ACCOUNTS).where({ address: recipient }).first();\n" +
+        "  var status = tables.accountStatus(account);\n" +
+        "  var deliverable = status === \"active\";\n" +
+        "  return { deliverable: deliverable,\n" +
+        "    reason: deliverable ? null : \"account-\" + status };\n" +
+        "}\n",
+      // The error codes this layer throws are a different namespace, and
+      // the verbs that throw them have already read the derivation.
+      "function _bounceMailbox(value) {\n" +
+        "  var account = accounts.get(value);\n" +
+        "  if (account.status !== \"active\") {\n" +
+        "    throw err(\"store/account-\" + account.status, \"name a mailbox in service.\");\n" +
+        "  }\n" +
+        "}\n",
+      // A reason naming what was attempted rather than what state a row
+      // is in. It carries the same prefix and reads no column.
+      "function _refused(action) {\n" +
+        "  return { attempted: \"account-\" + action, outcome: \"denied\" };\n" +
+        "}\n",
+      // A domain row, which carries no marker beside its status and is
+      // answered by the column alone.
+      "function resolve(recipient) {\n" +
+        "  var domainRow = _hostedDomain(recipient.domain);\n" +
+        "  if (domainRow.status !== \"active\") return _verdict({ reason: \"domain-disabled\" });\n" +
+        "  return _verdict({ deliverable: true });\n" +
         "}\n",
     ],
   },
@@ -5846,33 +7663,32 @@ var DETECTORS = [
   },
 
   {
-    name: "unsigned-chain-origin-read-without-saying-so",
+    name: "chain-origin-read-without-verifying-its-signature",
     description:
       "A function that reads the framework table recording where an audit chain was cut, and " +
-      "hands the answer on without the word `unsigned` reaching the operator from inside that " +
-      "same function. Every other reading on that path costs an attacker the vault " +
-      "passphrase: the row hashes need it to be recomputed into a chain that agrees with " +
-      "itself, the checkpoint signatures need it to be forged, and the record beside the " +
-      "database is the one witness left when the checkpoints are deleted instead. This table " +
-      "costs write access to the database and nothing more. It carries no signature, is " +
-      "linked into no chain, is covered by no checkpoint and has no append-only trigger over " +
-      "it, and one row in it turns a counter with nothing behind it from a deletion into a " +
-      "retention run, discarding every row at or below it from the walk. So a caller handed " +
-      "only the counter has no way left to say what the counter is, and the verdict it builds " +
-      "reads as a range that was checked rather than a range that was skipped. The rule is " +
-      "that the reader states the property where the row is touched: name the counter as " +
-      "unsigned in the text the operator receives, and let a caller decide what to do about a " +
-      "gap knowing what is holding it open. Naming it in a comment does not count, because " +
-      "the operator never sees the comment.",
+      "hands the answer on without asking the framework whether the row's signature holds. " +
+      "That row is the one statement in a trail that says rows are ALLOWED to be missing: it " +
+      "discards every audit row at or below the counter it names from the walk, so it is the " +
+      "one row somebody erasing a trail has to write. It carries a signature over that " +
+      "counter, over the hash the row at it held and over the archive it names, and the key " +
+      "that signature is made with is sealed under the same passphrase as the database. A " +
+      "reader that skips the check is wrong in one of two directions and an operator acts on " +
+      "both: it reads a boundary somebody wrote as a retention run, or it reports a boundary " +
+      "this server signed as a row worth nothing. Call `verifyPurgeAnchor` inside the " +
+      "function that reads the row, and let the caller decide from the status it returns " +
+      "rather than from the shape of the columns. A comment does not count and neither does " +
+      "a check the caller makes afterwards: the place that touched the row is the place that " +
+      "knows what was read.",
     dirs: ["lib", "bin"],
     // The anchor is the framework's own table, found in the vendored
     // schema by the column pair that makes it a chain origin rather than
     // by a name this repository could rename, plus whatever local
-    // constant this file binds it to. The good token is a string literal
-    // carrying the word, because a string is what reaches an operator
-    // and a comment is masked out before the match. The enclosing
-    // function is the shared outward walk, so a read wrapped in a branch
-    // or a try block is still read as the same function.
+    // constant this file binds it to. The good token is the framework's
+    // own verifier, which is a published primitive rather than a local
+    // symbol, so it survives a rename here and disappears only when the
+    // call itself goes. The enclosing function is the shared outward
+    // walk, so a read wrapped in a branch or a try block is still read
+    // as the same function.
     scan: function (file) {
       var mask  = _maskOf(file);
       var names = _chainOriginNames(mask);
@@ -5886,11 +7702,11 @@ var DETECTORS = [
           if (!span) continue;
           if (seen[span.start]) continue;
           var body = mask.slice(span.start, span.end);
-          if (/["'][^"']*\bunsigned\b/.test(body)) continue;
+          if (/\bverifyPurgeAnchor\s*\(/.test(body)) continue;
           seen[span.start] = 1;
           out.push(_atOffset(file, m.index,
             "the record that turns a missing counter into a purge is read here and nothing " +
-            "in this function tells the operator it is unsigned"));
+            "in this function asks whether its signature holds"));
         }
       });
       return out;
@@ -5912,17 +7728,10 @@ var DETECTORS = [
         "  var row = b.db.from(\"_blamejs_audit_purge_anchor\").first();\n" +
         "  return row ? Number(row.lastPurgedCounter) : null;\n" +
         "}\n",
-      // A reporting surface that reaches the table itself and prints a
-      // sentence about the gap without saying what is holding it open.
-      "function describeGap(counter) {\n" +
-        "  var row = b.db.from(\"_blamejs_audit_purge_anchor\").first();\n" +
-        "  if (!row) return null;\n" +
-        "  return \"counter \" + counter + \" was archived and purged\";\n" +
-        "}\n",
-    ],
-    green: [
-      // The reader states the property where the row is touched, in the
-      // words the operator receives.
+      // The shape that replaced the first one and is wrong the other
+      // way: the row is read, the word an operator receives is fixed at
+      // the read, and nothing established which of the two records this
+      // volume carries.
       "var PURGE_ANCHOR_TABLE = \"_blamejs_audit_purge_anchor\";\n" +
         "function purgeRecord() {\n" +
         "  var row = b.db.from(PURGE_ANCHOR_TABLE).where({ scope: \"audit\" }).first();\n" +
@@ -5932,6 +7741,21 @@ var DETECTORS = [
         "    unsigned: \"an unsigned purge record says every row up to counter \" +\n" +
         "      row.lastPurgedCounter + \" was archived and deleted, and that table \" +\n" +
         "      \"carries no signature over it\",\n" +
+        "  };\n" +
+        "}\n",
+    ],
+    green: [
+      // The reader asks the framework about the row it just read and
+      // hands the status on, so a caller can tell a signed boundary from
+      // an older record and both from one that was edited.
+      "var PURGE_ANCHOR_TABLE = \"_blamejs_audit_purge_anchor\";\n" +
+        "function purgeRecord() {\n" +
+        "  var row = b.db.from(PURGE_ANCHOR_TABLE).where({ scope: \"audit\" }).first();\n" +
+        "  if (!row) return null;\n" +
+        "  var verdict = b.auditChain.verifyPurgeAnchor(row);\n" +
+        "  return {\n" +
+        "    through: Number(row.lastPurgedCounter),\n" +
+        "    status:  verdict.status,\n" +
         "  };\n" +
         "}\n",
       // The binding on its own. Naming the table at module level is how
@@ -6099,6 +7923,139 @@ var DETECTORS = [
         "    /* drop-silent by design */\n" +
         "  }\n" +
         "}\n",
+    ],
+  },
+
+  {
+    name: "audit-actor-assembled-at-the-emit",
+    description:
+      "An audit row whose actor is an object literal written beside the event. One module owns " +
+      "the shape the actor columns are filled from: it trims and bounds each field, removes the " +
+      "codepoints a terminal acts on rather than prints, freezes the result and marks it so a " +
+      "scope can tell an actor it built from one it did not. A literal written at the emit " +
+      "skips all of that and carries the fields whoever wrote it remembered, which on the mail " +
+      "surface is the identity and not the address the command arrived from. A session row that " +
+      "names the account and not the peer cannot answer what else that address did while it " +
+      "held a credential, and on a refusal from a stranger the address is the whole of what the " +
+      "row can stand behind. Two of the four fields come off the wire, so an actor assembled " +
+      "here is also an unbounded field a peer chose the size of. Hand the fields to the actor " +
+      "module instead. Naming no identity is still done there: a peer and no principal is the " +
+      "truthful answer for a connection that proved nothing, and it is the answer a refused " +
+      "credential is given on purpose, because the name a refused attempt claimed is a name " +
+      "whoever is guessing chose.",
+    // The mail layer, where a row describes what arrived on a socket.
+    // The browser surface builds its actor from the request and the
+    // command line from the process, and each has its own constructor in
+    // the same module; what is particular here is that one listener
+    // serves both kinds of principal on one port, so the choice between
+    // them is made per row rather than per surface.
+    dirs: ["lib/mail"],
+    scan: function (file) {
+      var mask  = _maskOf(file);
+      var found = [];
+      // The CONSTRUCTION, wherever it is written. Anchoring on the emit
+      // alone reads the sites that inline the literal and goes quiet the
+      // moment one is lifted into a helper, which is the same row with
+      // one more hop in front of it. The four names are the columns the
+      // chain writer fills from, so a literal opening with one of them
+      // is an actor whatever it is called and wherever it sits, and the
+      // only place one belongs is inside the call that shapes it.
+      var opens = /\{\s*(?:userId|ip|userAgent|sessionId)\s*:/g;
+      var at;
+      while ((at = opens.exec(mask)) !== null) {
+        if (/build\(\s*$/.test(mask.slice(Math.max(0, at.index - 40), at.index))) continue;
+        found.push(_atOffset(file, at.index,
+          "an actor for an audit row is assembled as an object literal rather than built by " +
+          "the module that owns the shape, so it carries only the fields written here and is " +
+          "neither screened nor bounded"));
+      }
+      // The other way an inline actor is wrong, which the pass above
+      // cannot see because it carries none of the names it looks for: a
+      // literal whose fields are not the ones the chain writer reads.
+      // The row then names nobody while looking, at the call site, like
+      // it names somebody.
+      return found.concat(_auditEventFindings(file, function (event) {
+        var named = _literalKeyValue(event.arg, "actor");
+        if (named === null || !/^\s*\{/.test(named)) return null;
+        if (/\b(?:userId|ip|userAgent|sessionId)\s*:/.test(named)) return null;
+        return "an audit row's actor is an object literal carrying none of the fields the " +
+          "chain writer fills the actor columns from, so every one of them is null-filled";
+      }));
+    },
+    red: [
+      { as:   "lib/mail/listeners.js",
+        text: "b.audit.safeEmit({\n" +
+              "  action:   \"blamepost.mail.listeners.imap_create_refused\",\n" +
+              "  outcome:  \"denied\",\n" +
+              "  actor:    { userId: (state.actor && state.actor.id) || null },\n" +
+              "  metadata: { mailbox: request.mailbox },\n});\n" },
+      // A credential's row is the same shape with a different id on it.
+      { as:   "lib/mail/listeners.js",
+        text: "b.audit.safeEmit({\n" +
+              "  action:   \"blamepost.mail.listeners.sending_credential_stopped\",\n" +
+              "  outcome:  \"denied\",\n" +
+              "  actor:    { userId: scope.id },\n});\n" },
+      // And a peer-only literal, which is the right CONTENT assembled in
+      // the wrong place: still unscreened, still unbounded.
+      { as:   "lib/mail/mailbox.js",
+        text: "b.audit.safeEmit({\n" +
+              "  action:   \"blamepost.mail.mailbox.expunge_denied\",\n" +
+              "  outcome:  \"denied\",\n" +
+              "  actor:    { ip: ctx.remoteAddress },\n});\n" },
+      // The same literal lifted into a helper, which is the shape an
+      // emit-anchored matcher goes quiet on while every row it feeds is
+      // still missing the peer.
+      { as:   "lib/mail/listeners.js",
+        text: "function _imapVerbActor(state) {\n" +
+              "  return { userId: (state.actor && state.actor.id) || null };\n" +
+              "}\n" },
+      // A literal naming a field the chain writer does not read. It
+      // looks attributed at the call site and lands as a row naming
+      // nobody.
+      { as:   "lib/mail/listeners.js",
+        text: "b.audit.safeEmit({\n" +
+              "  action:   \"blamepost.mail.listeners.imap_close\",\n" +
+              "  outcome:  \"failure\",\n" +
+              "  actor:    { id: state.actor.id },\n});\n" },
+    ],
+    green: [
+      { as:   "lib/mail/listeners.js",
+        text: "b.audit.safeEmit({\n" +
+              "  action:   \"blamepost.mail.listeners.imap_create_refused\",\n" +
+              "  outcome:  \"denied\",\n" +
+              "  actor:    _wireActor(state.actor, state.remoteAddress, state.id),\n" +
+              "  metadata: { mailbox: request.mailbox },\n});\n" },
+      { as:   "lib/mail/dkim.js",
+        text: "await b.audit.record({\n" +
+              "  action:   \"blamepost.mail.dkim.keys_rotated\",\n" +
+              "  outcome:  \"success\",\n" +
+              "  actor:    auditActor.current(),\n});\n" },
+      // The fields handed over rather than shaped here. The call is what
+      // makes it the module's answer, whatever the fields are.
+      { as:   "lib/mail/listeners.js",
+        text: "b.audit.safeEmit({\n" +
+              "  action:   \"blamepost.mail.listeners.mx_recipient_domain_not_hosted\",\n" +
+              "  outcome:  \"denied\",\n" +
+              "  actor:    auditActor.build({ ip: ctx.remoteAddress }),\n});\n" },
+      // A row naming no actor at all is a different question, asked by
+      // the detector above. Reporting it here would put two names on one
+      // line and send a reader to fix the wrong half.
+      { as:   "lib/mail/listeners.js",
+        text: "b.audit.safeEmit({\n" +
+              "  action:   \"blamepost.mail.listeners.boot_failed\",\n" +
+              "  outcome:  \"failure\",\n" +
+              "  metadata: { line: line },\n});\n" },
+      // The fields spread over several lines, which is how the longer
+      // ones are written and the form a bound counted in characters
+      // would stop reading.
+      { as:   "lib/mail/listeners.js",
+        text: "function _wireActor(principal, peer, connectionId) {\n" +
+              "  return auditActor.build({\n" +
+              "    userId:    (principal && principal.id) || null,\n" +
+              "    ip:        peer || null,\n" +
+              "    sessionId: connectionId || null,\n" +
+              "  });\n" +
+              "}\n" },
     ],
   },
 
@@ -6795,17 +8752,26 @@ var DETECTORS = [
   {
     name: "credential-check-outside-the-identity-layer",
     description:
-      "A password verification anywhere but the identity layer that owns authentication. " +
-      "Every listener and the browser sign in form reach one function, and that function is " +
-      "where the failure budget keyed on the mailbox is spent and read. A second place that " +
-      "checks a password answers the same question with none of that: the guesses it takes " +
-      "cost the attacker nothing, and the budget the other surfaces enforce is a bound the " +
-      "attacker walks around by picking the surface that does not have it. Route the check " +
-      "through the identity layer instead, so there is one budget rather than one per caller.",
+      "A presented secret verified where the failure budget for it is not spent. This " +
+      "server authenticates two identity spaces and each has one entry point that owns its " +
+      "budget: an account password reaches store.accounts.authenticate, and a domain-scoped " +
+      "sending credential reaches the mail layer's credential entry point, which reads the " +
+      "budget before the verify and records the outcome after it. A second place that " +
+      "checks the same secret answers the same question with none of that: the guesses it " +
+      "takes cost the attacker nothing, and the budget the other surfaces enforce is a " +
+      "bound the attacker walks around by picking the surface that does not have it. The " +
+      "two arms are the two spaces. A password verification outside the identity layer is " +
+      "one; a credential verified in a function that records no failure against it is the " +
+      "other, and the second is the one a new transport reintroduces, because reaching the " +
+      "registry directly looks like composition rather than like a second front door. " +
+      "Route the check through the entry point instead, so there is one budget rather than " +
+      "one per caller.",
     dirs: ["lib", "bin"],
     scan: function (file) {
-      if (IDENTITY_LAYER_RE.test(file.rel)) return [];
-      return _lineMatcher(/\.auth\.password\.verify\s*\(/, "code")(file);
+      var out = IDENTITY_LAYER_RE.test(file.rel)
+        ? []
+        : _lineMatcher(/\.auth\.password\.verify\s*\(/, "code")(file);
+      return out.concat(_credentialVerifiedWithoutABudget(file));
     },
     red: [
       { as:   "lib/web/index.js",
@@ -6813,6 +8779,12 @@ var DETECTORS = [
               "  return b.auth.password.verify(row.passwordHash, supplied);\n}\n" },
       { as:   "bin/blamepost.js",
         text: "var ok = await b.auth.password.verify(stored, typed);\n" },
+      { as:   "lib/web/index.js",
+        text: "async function sendRoute(req, res) {\n" +
+              "  var presented = readBearer(req);\n" +
+              "  var verdict = await store.credentials.verify(presented);\n" +
+              "  if (!verdict || verdict.ok !== true) { refuse(res, 401); return; }\n" +
+              "  await relay(res, verdict);\n}\n" },
     ],
     green: [
       { as:   "lib/store/accounts.js",
@@ -6820,6 +8792,108 @@ var DETECTORS = [
       { as:   "lib/web/index.js",
         text: "var verdict = await store.accounts.authenticate({\n" +
               "  address: address, password: password, source: peer });\n" },
+      { as:   "lib/mail/listeners.js",
+        text: "async function checkCredential(registry, secret) {\n" +
+              "  var standing = await budget.check(id);\n" +
+              "  if (standing.locked === true) return { ok: false };\n" +
+              "  var verdict = await registry.credentials.verify(secret);\n" +
+              "  if (!verdict || verdict.ok !== true) {\n" +
+              "    await budget.recordFailure(id);\n" +
+              "    return { ok: false };\n  }\n" +
+              "  await budget.recordSuccess(id);\n" +
+              "  return { ok: true };\n}\n" },
+      { as:   "lib/web/index.js",
+        text: "async function sendRoute(req, res) {\n" +
+              "  var checked = await checkCredential(store.credentials, {\n" +
+              "    secret: readBearer(req), source: peer });\n" +
+              "  if (checked.ok !== true) { refuse(res, 401); return; }\n}\n" },
+    ],
+  },
+
+  {
+    name: "secret-sealed-without-a-purpose",
+    description:
+      "A long-lived secret written to the data volume through the vault's plain seal. That " +
+      "seal binds a value to the volume and to nothing else, so every sealed value on one " +
+      "volume opens in place of every other: a provider token dropped into the signing-key " +
+      "folder opens as a signing key, and a key belonging to one selector opens as another " +
+      "selector's. The reader learns only that a server holding this volume's vault key " +
+      "wrote the value, which is not the question it is asking. Seal through b.vault.aad " +
+      "with a context naming the purpose and the thing the value belongs to, and open it " +
+      "under the same context, so a value sealed as anything else does not open at all. A " +
+      "seal whose own function derives the plaintext's digest is a content-addressed write " +
+      "and is not this: the file name is the hash of what it carries and the read recomputes " +
+      "it, so the name places the value and the seal is not asked to.",
+    dirs: ["lib", "bin"],
+    scan: _sealedWithoutItsPurpose,
+    red: [
+      { as:   "lib/mail/dkim.js",
+        text: "async function _writeKey(target, privateKeyPem) {\n" +
+              "  await b.atomicFile.write(target, vault.seal(privateKeyPem), " +
+              "{ fileMode: 0o600 });\n}\n" },
+      { as:   "lib/store/credentials.js",
+        text: "var stored = vault.seal(token);\n" },
+    ],
+    green: [
+      { as:   "lib/mail/dkim.js",
+        text: "async function _writeKey(target, privateKeyPem, context) {\n" +
+              "  await b.atomicFile.write(target, vault.aad.seal(privateKeyPem, context), " +
+              "{ fileMode: 0o600 });\n}\n" },
+      { as:   "lib/mail/mailbox.js",
+        text: "function _writeBlob(raw) {\n" +
+              "  var digest = b.crypto.sha3Hash(raw);\n" +
+              "  b.atomicFile.writeSync(_blobPath(digest), " +
+              "vault.seal(raw.toString(\"base64\")), { fileMode: 0o600 });\n" +
+              "  return digest;\n}\n" },
+      { as:   "lib/mail/dkim.js",
+        text: "if (typeof vault.seal !== \"function\") throw new TypeError(\"no vault\");\n" },
+    ],
+  },
+
+  {
+    name: "sealed-value-opened-without-establishing-its-form",
+    description:
+      "A stored value handed to the vault's plain open by a reader that never asked which " +
+      "form it is in. The vault returns a value carrying no seal exactly as it found it " +
+      "rather than refusing it, so the contents of a file nothing here wrote come back from " +
+      "the open and are used as though they had been unsealed. A value bound to a context " +
+      "through b.vault.aad does not open this way at all, and it is the binding that " +
+      "separates one sealed value on a volume from every other. Ask first: branch on " +
+      "b.vault.aad.isAadSealed and open the bound form under its own context, or test the " +
+      "seal prefix at offset zero when the value was sealed by a framework tool outside " +
+      "this server and carries no context of ours. Either way the reader knows what it is " +
+      "holding before it opens it.",
+    dirs: ["lib", "bin"],
+    scan: _openedWithoutEstablishingItsForm,
+    red: [
+      { as:   "lib/mail/mailbox.js",
+        text: "function _readBlob(digest) {\n" +
+              "  var sealed = b.atomicFile.readSync(_blobPath(digest), { encoding: \"utf8\" });\n" +
+              "  var opened = vault.unseal(sealed);\n" +
+              "  return Buffer.from(opened, \"base64\");\n}\n" },
+      { as:   "lib/store/blobs.js",
+        text: "function _digestFault(digest, path) {\n" +
+              "  var sealed = b.atomicFile.readSync(path, { encoding: \"utf8\" });\n" +
+              "  var raw = Buffer.from(vault.unseal(sealed), \"base64\");\n" +
+              "  return b.crypto.sha3Hash(raw) === digest ? null : \"mismatch\";\n}\n" },
+    ],
+    green: [
+      { as:   "lib/mail/mailbox.js",
+        text: "function _readBlob(digest) {\n" +
+              "  var sealed = b.atomicFile.readSync(_blobPath(digest), { encoding: \"utf8\" });\n" +
+              "  var opened = vault.aad.isAadSealed(sealed)\n" +
+              "    ? vault.aad.unseal(sealed, _bodySealContext(digest))\n" +
+              "    : vault.unseal(sealed);\n" +
+              "  return Buffer.from(opened, \"base64\");\n}\n" },
+      { as:   "lib/index.js",
+        text: "function _keyMaterial(keyFile) {\n" +
+              "  var keyPem = _readPem(keyFile);\n" +
+              "  if (keyPem.indexOf(SEALED_PEM_PREFIX) === 0) {\n" +
+              "    keyPem = vault.unseal(keyPem).toString(\"utf8\");\n  }\n" +
+              "  return keyPem;\n}\n" },
+      { as:   "lib/dns/index.js",
+        text: "function _readToken(sealedToken) {\n" +
+              "  return vault.aad.unseal(sealedToken, TOKEN_SEAL_CONTEXT);\n}\n" },
     ],
   },
 
@@ -8146,62 +10220,659 @@ var DETECTORS = [
   },
 
   {
-    name: "template-url-attribute-raw-interpolation",
+    name: "template-url-attribute-interpolation",
     description:
-      "An un-escaped template interpolation inside a markup attribute a browser resolves as a " +
-      "URL. The engine escapes a two-brace interpolation and deliberately does not escape a " +
-      "three-brace one, so the raw form lets the value close the attribute and open another, " +
-      "which is a scripted event handler on a link the reader is about to click. Escaping is " +
-      "not what makes a link target safe in the first place, because it leaves a scheme " +
-      "intact: the target is safe because it was BUILT by the helper that refuses anything " +
-      "which is not an absolute path on this server. So the raw form here is strictly worse " +
-      "than the escaped one, adding an attribute breakout on top of the scheme, and it has no " +
-      "legitimate use. Interpolate with two braces and build the value. The raw form stays " +
-      "correct where it belongs, which is element CONTENT carrying already-sanitized markup.",
+      "A template interpolation in a markup attribute a browser resolves as a URL, written " +
+      "where the value it is handed decides the scheme or the host. The engine escapes a " +
+      "two-brace interpolation, and escaping leaves a scheme intact, so `href=\"{{ target }}\"` " +
+      "renders `javascript:` or `https://elsewhere` as readily as a path: the page is then safe " +
+      "only while every producer of that value stays correct. The template holds the position " +
+      "itself when the text ahead of the interpolation is a literal slash, a literal fragment " +
+      "mark, or a literal scheme with the whole authority after it. Refused here: an " +
+      "interpolation or a tag at the start of the value, a literal second slash or backslash " +
+      "after the first, a literal that is none of those three, a scheme that runs what follows " +
+      "it, an interpolation inside an authority, and the un-escaped three-brace form anywhere " +
+      "in the value, which lets the value close the attribute and open another. Write the " +
+      "slash in the template and interpolate a value built without it. The three-brace form " +
+      "stays correct where it belongs, which is element CONTENT carrying already-sanitized " +
+      "markup.",
     dirs: ["lib"],
     exts: /\.html$/,
     // Anchored on the engine's delimiter syntax and the HTML attribute
     // names, both of which are frozen contracts rather than anything this
     // repository can rename. Read over the whole file rather than line by
-    // line, so an attribute written across two lines is still seen.
+    // line, so an attribute written across two lines is still seen, and in
+    // all three quoting styles, because an unquoted value is a value too.
     //
-    // test/layer-0-primitives/web-link-origin.test.js is the deep read of
-    // lib/web/views: it traces every interpolated URL attribute back to
-    // the value that feeds it. This is the wide net over every template
-    // under lib/, so a template added in a directory that read has never
-    // heard of is still refused the one shape that has no good version.
+    // A literal slash cannot stop a value that begins with a second slash
+    // or a backslash, because the pair names another host. That half is
+    // held where the value is built: the view field detector below refuses
+    // a value no view field builder produced, and
+    // test/layer-0-primitives/web-link-origin.test.js renders every view
+    // with hostile values and walks each value back to its builder. This
+    // is the wide net over every template under lib/, so a template added
+    // in a directory that read has never heard of is still held to the
+    // shape.
     scan: function (file) {
       var out = [];
       if (!/\.html$/.test(file.rel)) return out;
-      var re = /\b(?:href|src|action|formaction|cite|poster|xlink:href)\s*=\s*"([^"]*)"/gi;
+      var re = new RegExp("\\b(href|src|srcset|action|formaction|cite|poster|background|ping|" +
+        "manifest|longdesc|usemap|codebase|profile|data|xlink:href)\\s*=\\s*" +
+        "(?:\"([^\"]*)\"|'([^']*)'|([^\\s\"'>]+))", "gi");
       var m;
       while ((m = re.exec(file.text)) !== null) {
-        if (!/\{\{\{[^{}]*\}\}\}/.test(m[1])) continue;
+        var value = m[2] !== undefined ? m[2] : (m[3] !== undefined ? m[3] : m[4]);
+        var tag = /\{\{|\{%/.exec(value);
+        if (tag === null) continue;
+        var prefix = value.slice(0, tag.index);
+        var second = prefix.charAt(1);
+        var scheme = /^([A-Za-z][A-Za-z0-9+.-]*):(\/\/)?/.exec(prefix);
+        var why = null;
+        if (value.indexOf("{{{") !== -1) {
+          why = "an un-escaped interpolation, which lets the value close the attribute";
+        } else if (prefix.length === 0) {
+          why = "an interpolation at the start of the value, so the value chooses the scheme";
+        } else if (prefix.charAt(0) === "/") {
+          if (second === "/" || second === "\\" || second === "\t" || second === "\n" || second === "\r") {
+            why = "a second slash ahead of the interpolation, so the value names the host";
+          }
+        } else if (prefix.charAt(0) !== "#") {
+          if (scheme === null) {
+            why = "a literal that is not a path, a fragment or a scheme ahead of the interpolation";
+          } else if (/^(?:javascript|vbscript|livescript|data)$/i.test(scheme[1])) {
+            why = "a scheme that runs what follows it";
+          } else if (scheme[2] !== undefined && prefix.slice(scheme[0].length).indexOf("/") === -1) {
+            why = "an interpolation inside the authority, so the value names the host";
+          }
+        }
+        if (why === null) continue;
         out.push({
           file:    file.rel,
           line:    file.text.slice(0, m.index).split(/\r?\n/).length,
-          content: m[0].trim(),
+          content: m[0].trim() + ": " + why,
         });
       }
       return out;
     },
     red: [
-      { as: "page.html", text: "<a class=\"btn\" href=\"{{{ target }}}\">Open</a>\n" },
-      { as: "page.html", text: "<form action=\"{{{ postTo }}}\" method=\"post\">\n" },
+      // The value decides the scheme.
+      { as: "page.html", text: "<a class=\"btn\" href=\"{{ target }}\">Open</a>\n" },
+      { as: "page.html", text: "<form action=\"{{ postHref }}\" method=\"post\">\n" },
+      { as: "page.html", text: "<button formaction=\"{{ target }}\">Send</button>\n" },
+      { as: "page.html", text: "<img src=\"{{ m.remoteImage }}\" alt=\"\">\n" },
       // Written across two lines, which a line-at-a-time reader misses.
-      { as: "page.html", text: "<a\n  href=\"{{{ target }}}\"\n  class=\"btn\">Open</a>\n" },
-      { as: "page.html", text: "<img src=\"{{{ m.remoteImage }}}\" alt=\"\">\n" },
+      { as: "page.html", text: "<a\n  href=\"{{ target }}\"\n  class=\"btn\">Open</a>\n" },
+      // The other two quoting styles.
+      { as: "page.html", text: "<a href='{{ target }}'>Open</a>\n" },
+      { as: "page.html", text: "<a href={{ target }}>Open</a>\n" },
+      // A tag at the start decides the scheme just as well.
+      { as: "page.html", text: "<a href=\"{% if a %}{{ a }}{% endif %}\">Open</a>\n" },
+      // The un-escaped form, with and without a slash ahead of it.
+      { as: "page.html", text: "<a class=\"btn\" href=\"{{{ target }}}\">Open</a>\n" },
+      { as: "page.html", text: "<a href=\"/{{{ target }}}\">Open</a>\n" },
+      // A slash written ahead of the value that is the first of two.
+      { as: "page.html", text: "<a href=\"//{{ host }}/x\">Open</a>\n" },
+      { as: "page.html", text: "<a href=\"/\\{{ host }}\">Open</a>\n" },
+      // A scheme with the host left to the value, and a scheme that runs.
+      { as: "page.html", text: "<a href=\"https://{{ host }}/x\">Open</a>\n" },
+      { as: "page.html", text: "<a href=\"javascript:{{ code }}\">Open</a>\n" },
+      // A relative literal, which resolves against whatever page renders it.
+      { as: "page.html", text: "<a href=\"mail/{{ folder }}\">Open</a>\n" },
     ],
     green: [
-      { as: "page.html", text: "<a class=\"btn\" href=\"{{ target }}\">Open</a>\n" },
-      { as: "page.html", text: "<form action=\"{{ postTo }}\" method=\"post\">\n" },
+      { as: "page.html", text: "<a class=\"btn\" href=\"/{{ target }}\">Open</a>\n" },
+      { as: "page.html", text: "<form action=\"/{{ postHref }}\" method=\"post\">\n" },
+      { as: "page.html", text: "<a\n  href=\"/{{ target }}\"\n  class=\"btn\">Open</a>\n" },
+      { as: "page.html", text: "<a href=\"/{{ a }}?b={{ b }}\">Open</a>\n" },
       { as: "page.html", text: "<a href=\"/sign-in\">Sign in</a>\n" },
+      // A fragment, a mail address and a citation, each with its scheme or
+      // mark written in the template and only the tail interpolated.
+      { as: "page.html", text: "<a href=\"#{{ anchor }}\">Jump</a>\n" },
+      { as: "page.html", text: "<a href=\"mailto:{{ address }}\">Write</a>\n" },
+      { as: "page.html", text: "<a href=\"https://www.rfc-editor.org/rfc/rfc{{ number }}\">RFC</a>\n" },
       // The raw form where it is correct: element content carrying markup
       // the sanitizer has already screened.
       { as: "page.html", text: "<div class=\"letter-body\">{{{ m.bodyHtml }}}</div>\n" },
-      // A raw interpolation in an ordinary attribute is a different
-      // question and not this one.
+      // An interpolation in an ordinary attribute is a different question
+      // and not this one, including one whose value is the word action.
       { as: "page.html", text: "<span title=\"{{{ label }}}\">x</span>\n" },
+      { as: "page.html", text: "<input type=\"hidden\" name=\"action\" value=\"{{ pending.action }}\">\n" },
+      { as: "page.html", text: "<meta name=\"description\" content=\"{{ pageDescription }}\">\n" },
+    ],
+  },
+
+  {
+    name: "web-url-handed-to-the-browser-not-built",
+    description:
+      "A URL this application hands the browser that was not built into the form the place it " +
+      "lands on takes. The browser surface turns a value into a URL in two places. A redirect " +
+      "is an absolute path on this server, passed through the helper that refuses anything " +
+      "else. A view field, the property a template reads a link under, is that same path " +
+      "without its leading slash, because the template writes the slash itself, and it is " +
+      "built by the view field helper: the one that composes the path refusal, removes the " +
+      "slash, and refuses a remainder that begins with a slash or a backslash. Escaping holds " +
+      "neither form, because the engine escapes an interpolation and leaves the scheme intact. " +
+      "The two forms are not interchangeable: a path handed to a template renders as two " +
+      "slashes and a host, carrying the reader off this origin still holding the session, and " +
+      "a view field handed to a redirect is a target relative to the page. Refused for a view " +
+      "field is anything other than an empty value or exactly one call to a view field " +
+      "builder: a literal, a concatenation, a template literal, a bare name, a value read off " +
+      "the request, a path built for a redirect, or a builder's value with more written after " +
+      "it. A builder is one with the shape in this file, one with the shape in a module this " +
+      "file requires, or a local name for either, which is a function whose every return is " +
+      "one call to a builder. Refused for a redirect is a value neither produced by a call " +
+      "nor written as an absolute path on this server, and one produced by a view field " +
+      "builder. Build a view field through the view field helper and a redirect through the " +
+      "path helper.",
+    dirs: ["lib", "bin"],
+    // Anchored on two frozen contracts and one naming convention, none of
+    // which this repository can rename out from under the matcher. The
+    // attribute names are the browser's: a property called `href` or
+    // `src` is resolved as a URL wherever it is rendered. The `Href`
+    // suffix is the key the templates read a link target under, a form
+    // target included. The redirect is the response method the framework
+    // exposes, matched without its receiver so that naming the parameter
+    // something other than `res` changes no verdict. A view field is read
+    // both where it is assigned onto an object and where it is written as
+    // a key of an object literal, which is how nearly every page builds
+    // one.
+    //
+    // Nothing here names either helper. A redirect target counts as built
+    // when it BEGINS with a call. A view field counts as built when it is
+    // one call to a builder `_linkTailBuilders` names, which is a body
+    // with the view field builder's shape wherever it sits and the local
+    // names that reach it, so a rename leaves this silent exactly where it
+    // was silent before and firing exactly where it fired. The price of a
+    // shape anchor is that a call
+    // reaching no refusal reads like one that does; the deep read of this
+    // surface walks each builder to what it returns and answers that,
+    // while this answers whether the value was built at all and into
+    // which form.
+    //
+    // Browser code under lib/web/public assigns a link onto a live element
+    // rather than into a template, so an assignment there is a whole URL
+    // and is read the way a redirect target is.
+    //
+    // A view field exists only where a view is built, which is under
+    // lib/web. Everywhere else the attribute names are ordinary words: a
+    // backup bundle has a `manifest`, a record has a `src`. So assignments
+    // and object keys are read only in files under lib/web, and the
+    // redirect is read in every file this detector walks.
+    //
+    // `action` is deliberately not in the attribute set. The form targets
+    // these templates render read keys ending in `Href`, so nothing is
+    // lost, and a bare `action` in this tree is the audit verb a query
+    // filters on rather than anything a browser resolves. Matching it
+    // would report that filter on every read.
+    //
+    // Depth is counted rather than measured, so there is no bound on how
+    // long an expression may be and no layout a growing one can outgrow.
+    scan: function (file) {
+      var out = [];
+      if (!/\.js$/.test(file.rel)) return out;
+      var mask = _maskOf(file);
+      var browser = /(?:^|\/)lib\/web\/public\//.test(file.rel);
+      var webSurface = /(?:^|\/)lib\/web\//.test(file.rel);
+      var keys = "href|src|srcset|formaction|cite|poster|ping|manifest|[A-Za-z_$][\\w$]*Href";
+
+      var assign = new RegExp("\\.\\s*(" + keys + ")\\s*=(?!=)", "g");
+      var m;
+      while (webSurface && (m = assign.exec(mask)) !== null) {
+        var value = _linkExpressionAt(file.text, m.index + m[0].length);
+        var why = browser
+          ? _linkTargetNotBuilt(value)
+          : _linkViewFieldNotBuilt(value, _linkTailBuilders(file));
+        if (why === null) continue;
+        out.push(_atOffset(file, m.index,
+          "'" + m[1] + "' is assigned " + why));
+      }
+
+      var property = new RegExp("[{,]\\s*(" + keys + ")\\s*:(?!:)", "g");
+      var p;
+      while (webSurface && !browser && (p = property.exec(mask)) !== null) {
+        var at = p.index + p[0].length;
+        var whyKey = _linkViewFieldNotBuilt(_linkExpressionAt(file.text, at, true),
+          _linkTailBuilders(file));
+        if (whyKey === null) continue;
+        out.push(_atOffset(file, at, "'" + p[1] + "' is set to " + whyKey));
+      }
+
+      var redirect = /\.\s*redirect\s*\(/g;
+      var r;
+      while ((r = redirect.exec(mask)) !== null) {
+        var arg = _linkFirstArgument(file.text, r.index + r[0].length - 1);
+        var reason = _linkRedirectNotBuilt(arg, _linkTailBuilders(file));
+        if (reason === null) continue;
+        out.push(_atOffset(file, r.index,
+          "a redirect is answered with " + reason));
+      }
+      return out;
+    },
+    red: [
+      // A link target concatenated in place, which is the shape the guard
+      // exists to screen.
+      { as: "lib/web/index.js",
+        text: "function _cards(rows) {\n  rows.forEach(function (row) {\n" +
+          "    row.href = \"/admin/dmarc?domain=\" + row.domain;\n  });\n}\n" },
+      // The same value read straight off the request.
+      { as: "lib/web/index.js",
+        text: "function _page(req, view) {\n  view.nextHref = req.query.next;\n}\n" },
+      // A bare name, where what reaches the attribute is whatever bound it.
+      { as: "lib/web/index.js",
+        text: "function _row(item, target) {\n  item.href = target;\n}\n" },
+      // A literal that leaves this origin behind a second slash.
+      { as: "lib/web/index.js",
+        text: "function _row(item) {\n  item.href = \"//evil.example/x\";\n}\n" },
+      // A literal carrying a scheme the browser executes.
+      { as: "lib/web/index.js",
+        text: "function _row(item) {\n  item.href = \"javascript:alert(1)\";\n}\n" },
+      // A template literal assembled in place.
+      { as: "lib/web/index.js",
+        text: "function _row(item, n) {\n  item.olderHref = " + LINK_TICK + "/mail/${n}" +
+          LINK_TICK + ";\n}\n" },
+      // The same mistake in an image source, which no template in this
+      // tree carries today and which nobody would think to look at when
+      // the first one lands.
+      { as: "lib/web/index.js",
+        text: "function _row(item, u) {\n  item.src = u;\n}\n" },
+      // One good branch and one that was never built. A conditional does
+      // not stop being a link target because half of it is fine.
+      { as: "lib/web/index.js",
+        text: LINK_TAIL_BUILDER_SOURCE + "function _row(item, ok, n) {\n" +
+          "  item.backHref = ok ? _v(\"/a\") : \"/mail/\" + n;\n}\n" },
+      // A root-relative literal, which the template's own slash turns
+      // into two.
+      { as: "lib/web/index.js",
+        text: "function _nav(item) {\n  item.href = \"/admin/queue\";\n}\n" },
+      // A path built for a redirect and handed to a template, with the
+      // path refusal defined beside it. It renders `//admin/queue`.
+      { as: "lib/web/index.js",
+        text: LINK_TAIL_BUILDER_SOURCE + "function _nav(item) {\n" +
+          "  item.href = _p(\"/admin/queue\");\n}\n" },
+      // The same two mistakes as keys of an object literal, which is how
+      // nearly every page builds its view.
+      { as: "lib/web/index.js",
+        text: LINK_TAIL_BUILDER_SOURCE + "function _page(offset) {\n" +
+          "  return { nextHref: _p(\"/admin/accounts?offset=\" + offset), label: \"Next\" };\n}\n" },
+      { as: "lib/web/index.js",
+        text: "function _nav(active) {\n  return [\n" +
+          "    { href: \"/admin\", label: \"Overview\", current: active === \"overview\" },\n  ];\n}\n" },
+      // A builder's value with more written after it. The builder hands
+      // back an empty value for the root, and what follows it would then
+      // begin the value with a slash.
+      { as: "lib/web/index.js",
+        text: LINK_TAIL_BUILDER_SOURCE + "function _row(item, f) {\n" +
+          "  item.href = _v(\"/\") + \"/\" + f;\n}\n" },
+      // A builder that removes the slash and refuses a second one, but not
+      // a backslash, so it does not have the view field builder's shape.
+      { as: "lib/web/index.js",
+        text: LINK_PATH_REFUSAL_SOURCE +
+          "function _v(value) {\n  var tail = _p(value).slice(1);\n" +
+          "  if (tail.charAt(0) === \"/\") { throw new TypeError(\"x\"); }\n  return tail;\n}\n" +
+          "function _row(item) {\n  item.href = _v(\"/a\");\n}\n" },
+      // A builder this file does not define, reached as a method.
+      { as: "lib/web/wiki/index.js",
+        text: "function _link(text, path) {\n" +
+          "  return { text: text, wikiHref: links.build(path) };\n}\n" },
+      // A call through a module this repository does not hold. A require
+      // that resolves to nothing leaves the call unbuilt, which is the
+      // verdict a typo in the path deserves.
+      { as: "lib/web/index.js",
+        text: "var links = require(\"./nothing-is-here\");\n" +
+          "function _row(item) {\n  item.href = links.href(\"/a\");\n}\n" },
+      // A call through a module that resolves and defines no function
+      // under that name.
+      { as: "lib/web/index.js",
+        text: "var links = require(\"./links\");\n" +
+          "function _row(item) {\n  item.href = links.nothing(\"/a\");\n}\n" },
+      // A local name for a builder is a name for ONE builder. A second
+      // return that nothing built is a branch reaching the template
+      // unscreened, however built the first branch is.
+      { as: "lib/web/index.js",
+        text: LINK_TAIL_BUILDER_SOURCE + "function _href(value, ok) {\n" +
+          "  if (ok) { return _v(value); }\n  return value;\n}\n" +
+          "function _row(item) {\n  item.href = _href(\"/a\", true);\n}\n" },
+      // A local name whose target is not a builder at all.
+      { as: "lib/web/index.js",
+        text: "function _href(value) {\n  return links.href(value);\n}\n" +
+          "function _row(item) {\n  item.href = _href(\"/a\");\n}\n" },
+      // A redirect answering with wherever the request asked to go.
+      { as: "lib/web/index.js",
+        text: "function _signIn(req, res) {\n  res.redirect(req.query.next);\n}\n" },
+      // A redirect concatenating its own target.
+      { as: "lib/web/index.js",
+        text: "function _after(res, folder) {\n  res.redirect(\"/mail/\" + folder);\n}\n" },
+      // A redirect under a receiver named anything at all, which is why
+      // the method is matched without one.
+      { as: "lib/web/index.js",
+        text: "function _out(reply, body) {\n  reply.redirect(body.back);\n}\n" },
+      // A redirect answered with a view field, which the browser resolves
+      // against the page it was on.
+      { as: "lib/web/index.js",
+        text: LINK_TAIL_BUILDER_SOURCE + "function _after(res) {\n" +
+          "  res.redirect(_v(\"/mail/INBOX\"));\n}\n" },
+    ],
+    green: [
+      // Outside the browser surface the attribute names are ordinary words:
+      // a backup bundle has a manifest, and a record says where it came from.
+      // Nothing there is rendered by a template or resolved by a browser.
+      { as: "bin/blamepost.js",
+        text: "function _bundleSummary(opened) {\n" +
+          "  var summary = { manifest: opened.manifest, src: opened.dir };\n" +
+          "  summary.manifest = opened.manifest;\n  return summary;\n}\n" },
+      { as: "lib/store/index.js",
+        text: "function _describe(bundle) {\n  return { manifest: bundle.manifestPath };\n}\n" },
+      // Built by the view field builder.
+      { as: "lib/web/index.js",
+        text: LINK_TAIL_BUILDER_SOURCE + "function _row(item, f) {\n" +
+          "  item.href = _v(\"/admin/dmarc?domain=\" + f);\n}\n" },
+      // Built by a builder under a different name, which is the rename
+      // this detector must survive.
+      { as: "lib/web/index.js",
+        text: LINK_TAIL_BUILDER_SOURCE.replace(/_v\(/g, "_asViewLink(") +
+          "function _row(item, f) {\n" +
+          "  item.href = _asViewLink(\"/admin/dmarc?domain=\" + f);\n}\n" },
+      // Built by the builder in the module this file requires, which is
+      // where the rule lives so that both surfaces read one copy of it.
+      { as: "lib/web/index.js",
+        text: "var links = require(\"./links\");\n" +
+          "function _row(item, f) {\n  item.href = links.href(\"/mail/\" + f);\n}\n" },
+      // A local name for that builder, which is what keeps the call sites
+      // in a surface reading as the surface's own.
+      { as: "lib/web/index.js",
+        text: "var links = require(\"./links\");\n" +
+          "function _href(value) {\n  return links.href(value);\n}\n" +
+          "function _row(item, f) {\n  item.href = _href(\"/mail/\" + f);\n}\n" },
+      // A name for a name, which resolves because the names are taken to
+      // a fixed point rather than one hop.
+      { as: "lib/web/index.js",
+        text: LINK_TAIL_BUILDER_SOURCE +
+          "function _one(value) {\n  return _v(value);\n}\n" +
+          "function _two(value) {\n  return _one(value);\n}\n" +
+          "function _row(item) {\n  item.href = _two(\"/a\");\n}\n" },
+      // The wiki's shape: its own rule asked at home, the shared one
+      // asked through the module both surfaces require.
+      { as: "lib/web/wiki/index.js",
+        text: "var links = require(\"../links\");\n" +
+          "function _wikiPath(value) {\n  return links.path(value);\n}\n" +
+          "function _wikiHref(value) {\n  return links.href(_wikiPath(value));\n}\n" +
+          "function _link(text, target) {\n" +
+          "  return { text: text, wikiHref: _wikiHref(target) };\n}\n" },
+      // The empty fallback, which renders no link and is how a page says
+      // there is no next one.
+      { as: "lib/web/index.js",
+        text: LINK_TAIL_BUILDER_SOURCE + "function _page(view, more) {\n" +
+          "  view.nextHref = more ? _v(\"/admin/accounts?offset=25\") : \"\";\n}\n" },
+      { as: "lib/web/index.js",
+        text: "function _page(view) {\n  view.inboxHref = \"\";\n}\n" },
+      // A nested conditional of built targets, written in parentheses.
+      { as: "lib/web/index.js",
+        text: LINK_TAIL_BUILDER_SOURCE + "function _row(item, a, bq) {\n" +
+          "  item.href = a ? _v(\"/x\") : (bq ? _v(\"/y\") : \"\");\n}\n" },
+      // Keys of an object literal, built, beside keys that are not links.
+      { as: "lib/web/index.js",
+        text: LINK_TAIL_BUILDER_SOURCE + "function _nav(active, offset) {\n  return [\n" +
+          "    { href: _v(\"/admin\"), label: \"Overview\", current: active === \"overview\" },\n" +
+          "    { nextHref: offset > 0\n      ? _v(\"/admin/accounts?offset=\" + offset) : \"\",\n" +
+          "      label: \"Next\" },\n  ];\n}\n" },
+      // A key name read on the right of a conditional is not a key.
+      { as: "lib/web/index.js",
+        text: "function _pick(more, nextHref, prevHref) {\n" +
+          "  return f(more, more ? nextHref : prevHref);\n}\n" },
+      // Browser code assigning a whole path onto a live element.
+      { as: "lib/web/public/islands/mailbox.js",
+        text: "function _open(link) {\n  link.href = \"/mail/INBOX\";\n}\n" },
+      // A comparison is not an assignment.
+      { as: "lib/web/index.js",
+        text: "function _row(item, target) {\n" +
+          "  if (item.href === target) { return true; }\n  return false;\n}\n" },
+      // Prose describing the shape the rule refuses.
+      { as: "lib/web/index.js",
+        text: "// Never write row.href = \"//evil.example/x\" here, and never\n" +
+          "// res.redirect(req.query.next) either.\n" },
+      // A property named after a verb rather than an attribute. An audit
+      // query filters on `action`, and reporting it on every read is how
+      // a gate teaches people to skim past it.
+      { as: "lib/web/index.js",
+        text: "function _query(criteria, action) {\n" +
+          "  if (action.length > 0) { criteria.action = action; }\n}\n" },
+      // A redirect built by the helper.
+      { as: "lib/web/index.js",
+        text: "function _signIn(res, user) {\n  res.redirect(_inboxPath(user));\n}\n" },
+      // A redirect resolved with a fallback, which cannot hand back a
+      // target off this origin.
+      { as: "lib/web/index.js",
+        text: "function _back(res, body) {\n" +
+          "  res.redirect(b.safeRedirect.resolve(_str(body.back, \"/\"), { fallback: \"/\" }));\n}\n" },
+      // A redirect to a path written out in full.
+      { as: "lib/web/index.js",
+        text: "function _out(res) {\n  res.redirect(\"/sign-in\");\n}\n" },
+      // A built value written across two lines, with a second call nested
+      // inside the one that builds it. Depth is counted rather than
+      // measured, so neither the line break nor the inner call ends the
+      // read before the value is whole.
+      { as: "lib/web/index.js",
+        text: LINK_TAIL_BUILDER_SOURCE + "function _cards(finished, days) {\n" +
+          "  finished.href = _v(\"/admin/dmarc?domain=\" +\n" +
+          "    encodeURIComponent(finished.domain) + \"&days=\" + days);\n}\n" },
+      // A conditional written inside the call that builds the value. One
+      // question mark belongs to the condition, one to a string literal,
+      // and a nested conditional sits behind parentheses of its own.
+      // None of the three splits a value that is one call.
+      { as: "lib/web/index.js",
+        text: "function _back(res, path, notice) {\n" +
+          "  res.redirect(_path(notice\n" +
+          "    ? path + (path.indexOf(\"?\") === -1 ? \"?\" : \"&\") + \"notice=\" + notice\n" +
+          "    : path));\n}\n" },
+      // A redirect built by a call on a line that returns straight after
+      // it, with a property read as the argument.
+      { as: "lib/web/index.js",
+        text: "function _signIn(req, res) {\n" +
+          "  if (req.user) { res.redirect(_inboxPath(req.user)); return; }\n}\n" },
+      // An object literal as the argument to the builder. Its braces are
+      // depth like any other, and the colon inside them opens no
+      // conditional.
+      { as: "lib/web/index.js",
+        text: "function _in(res, verdict) {\n" +
+          "  res.redirect(_inboxPath({ id: verdict.accountId }));\n}\n" },
+    ],
+  },
+
+  {
+    name: "island-dom-sink-refused-by-trusted-types",
+    description:
+      "A DOM sink in shipped browser code that Trusted Types refuses. Every page this server " +
+      "renders carries require-trusted-types-for 'script', and a browser enforcing it throws a " +
+      "TypeError when a plain string reaches one of these sinks instead of a typed value. The " +
+      "island stops on that line, so whatever it was part way through building never appears " +
+      "and the reader loses the behavior with nothing on screen to say why. Nothing on this " +
+      "surface needs one: build elements with createElement, set their text with textContent, " +
+      "and set their attributes with setAttribute. A page that has to show markup it did not " +
+      "build is asking for the sanitizer, which runs on the server before the value is sent.",
+    dirs: ["lib/web/public"],
+    // Anchored on the sink names, which are frozen browser API contracts
+    // rather than anything this repository can rename, and read over the
+    // masked whole file so an assignment split across two lines is still
+    // seen. A sink reached through a computed property name is not
+    // matched; what carries that case is the policy itself, which refuses
+    // the write in the reader's browser at the moment it happens.
+    scan: function (file) {
+      var mask = _maskOf(file);
+      var out  = [];
+      [
+        [/\.\s*(?:innerHTML|outerHTML|srcdoc)\s*=(?!=)/g,
+          "markup assigned to a sink that requires a typed value"],
+        [/\.\s*(?:insertAdjacentHTML|setHTMLUnsafe|createContextualFragment)\s*\(/g,
+          "markup parsed into the document through a sink that requires a typed value"],
+        [/\bdocument\s*\.\s*write(?:ln)?\s*\(/g,
+          "markup written into the document through a sink that requires a typed value"],
+        [/\bnew\s+Function\s*\(|\beval\s*\(/g,
+          "source compiled at run time, which this policy refuses twice over"],
+        [/\b(?:setTimeout|setInterval)\s*\(\s*["'`]/g,
+          "a timer handed source as a string rather than a function"],
+      ].forEach(function (pair) {
+        var re = pair[0];
+        var m;
+        re.lastIndex = 0;
+        while ((m = re.exec(mask)) !== null) out.push(_atOffset(file, m.index, pair[1]));
+      });
+      return out;
+    },
+    red: [
+      "function paint(row) {\n  row.innerHTML = \"<b>\" + row.dataset.subject + \"</b>\";\n}\n",
+      "function paint(bar) {\n  bar.insertAdjacentHTML(\"beforeend\", \"<span>All</span>\");\n}\n",
+      "function boot() {\n  document.write(\"<p>loading</p>\");\n}\n",
+      "function later() {\n  setTimeout(\"refresh()\", 500);\n}\n",
+      "function build(src) {\n  return new Function(\"return \" + src);\n}\n",
+    ],
+    green: [
+      "function paint(bar) {\n  var label = document.createElement(\"label\");\n" +
+        "  label.textContent = \"All\";\n  bar.appendChild(label);\n}\n",
+      "function later() {\n  setTimeout(function () { refresh(); }, 500);\n}\n",
+      "function mark(el) {\n  el.setAttribute(\"aria-pressed\", \"true\");\n}\n",
+    ],
+  },
+
+  {
+    name: "template-inline-script-or-event-handler",
+    description:
+      "Script in a shipped template that the policy will not run: an event-handler attribute, " +
+      "a script element carrying its own body, or a script element sourced off this origin. " +
+      "Every page this server renders carries script-src 'self' with no unsafe-inline source, " +
+      "so a browser runs none of the three. The handler never fires on the element it is " +
+      "written on, the body of the script element is dropped, and the off-origin source is " +
+      "never fetched. All three fail quietly, which leaves a control that reads as wired and " +
+      "does nothing. Put the code in a file under lib/web/public/islands, load it with a src " +
+      "that is an absolute path on this server, and reach the element with addEventListener " +
+      "there. A script element whose one type attribute is " +
+      TEMPLATE_DATA_BLOCK_TYPES.map(function (x) { return x.type; }).join(" or ") +
+      ", with no event handler on it, is a data block the browser does not run, and it may " +
+      "carry a body.",
+    dirs: ["lib"],
+    exts: /\.html$/,
+    // Anchored on the HTML attribute prefix and the script element, both
+    // frozen contracts. Every `<` followed by a letter is read as a start
+    // tag with the tokenizer's attribute rules, including one inside a
+    // quoted value or inside another script element's body, so a data
+    // block's body is read as markup as well. The quoted-handler pattern
+    // also runs over the whole text and finds a handler after a template
+    // expression whose `>` ends the tag early. A handler both passes
+    // find is reported once.
+    scan: function (file) {
+      var out = [];
+      if (!/\.html$/.test(file.rel)) return out;
+      var text = file.text;
+      function _at(index, content) {
+        return {
+          file:    file.rel,
+          line:    text.slice(0, index).split(/\r?\n/).length,
+          content: content,
+        };
+      }
+      var handlerAt = {};
+      function _handler(index, name) {
+        if (handlerAt[index]) return;
+        handlerAt[index] = 1;
+        out.push(_at(index, name + "= is an event handler this policy refuses to run"));
+      }
+      var m;
+      var quoted = /\s(on[a-z]{3,})\s*=\s*["']/g;
+      while ((m = quoted.exec(text)) !== null) _handler(m.index + 1, m[1]);
+
+      var open = /<[A-Za-z]/g;
+      while ((m = open.exec(text)) !== null) {
+        var tag = _htmlStartTag(text, m.index);
+        tag.attrs.forEach(function (a) { if (_isHandlerAttr(a)) _handler(a.at, a.name); });
+        if (!/^script(?![a-z0-9_])/.test(tag.name)) continue;
+
+        var head = text.slice(m.index, tag.end).replace(/\s+/g, " ");
+        var bodyEnd = text.length;
+        if (tag.closed) {
+          HTML_SCRIPT_END_RE.lastIndex = tag.end;
+          var endTag = HTML_SCRIPT_END_RE.exec(text);
+          if (endTag !== null) bodyEnd = endTag.index;
+        }
+        var body = tag.closed ? text.slice(tag.end, bodyEnd) : "";
+        if (body.trim().length > 0) {
+          var verdict = _templateScriptBodyVerdict(tag.attrs);
+          if (verdict !== null) out.push(_at(m.index, head + " " + verdict));
+        }
+        // The other half of the same rule. A source off this origin is
+        // refused by the same directive that refuses an inline body, and
+        // it fails the same quiet way. Every `src` on the element is read.
+        tag.attrs.forEach(function (a) {
+          if (a.name !== "src") return;
+          var value = a.value === null ? "" : a.value;
+          if (TEMPLATE_SCRIPT_SRC_RE.test(value)) return;
+          out.push(_at(m.index,
+            "<script src=\"" + value + "\"> is not an absolute path on this server, " +
+            "which this policy refuses to load"));
+        });
+      }
+      return out;
+    },
+    red: [
+      { as: "page.html", text: "<button onclick=\"send()\">Send</button>\n" },
+      { as: "page.html", text: "<img src=\"/x.png\" onerror=\"boom()\">\n" },
+      { as: "page.html", text: "<script>window.ready = true;</script>\n" },
+      { as: "page.html", text: "<script defer>\n  boot();\n</script>\n" },
+      { as: "page.html", text: "<script src=\"https://cdn.example.net/x.js\"></script>\n" },
+      { as: "page.html", text: "<script src=\"//cdn.example.net/x.js\"></script>\n" },
+      // A type that a browser runs, or that this file does not list.
+      { as: "page.html", text: "<script type=\"\">boot();</script>\n" },
+      { as: "page.html", text: "<script type>boot();</script>\n" },
+      { as: "page.html", text: "<script type=\"module\">import \"/static/islands/x.js\";</script>\n" },
+      { as: "page.html", text: "<script type=\"text/javascript\">boot();</script>\n" },
+      { as: "page.html", text: "<script type=\" Text/JavaScript \">boot();</script>\n" },
+      { as: "page.html", text: "<script type=module>boot();</script>\n" },
+      { as: "page.html", text: "<script type=\"text/jscript\">boot();</script>\n" },
+      { as: "page.html", text: "<script type=\"importmap\">{\"imports\":{}}</script>\n" },
+      // A listed type with an event handler on the element.
+      { as: "page.html", text: "<script type=\"application/ld+json\" onload=\"boot()\">{}</script>\n" },
+      { as: "page.html", text: "<script type=\"application/ld+json\" onload=boot()>{}</script>\n" },
+      { as: "page.html", text: "<script type=\"application/ld+json\"ONLOAD=boot()>{}</script>\n" },
+      // Two type attributes, in either order, in any case, and with a `>`
+      // inside a quoted value between them.
+      { as: "page.html", text: "<script type=\"application/ld+json\" type=\"module\">boot();</script>\n" },
+      { as: "page.html", text: "<script type=\"module\" type=\"application/ld+json\">boot();</script>\n" },
+      { as: "page.html", text: "<script TYPE=\"application/ld+json\" Type=\"text/javascript\">boot();</script>\n" },
+      { as: "page.html", text: "<script type=\"application/ld+json\" data-note=\">\" type=\"module\">boot();</script>\n" },
+      // Script after a data block, where the data block's end tag carries
+      // an attribute or the executable element opens inside its body.
+      { as: "page.html", text: "<script type=\"application/ld+json\">{}</script foo><script>boot();</script>\n" },
+      { as: "page.html", text: "<svg><script type=\"application/ld+json\"><p><script>boot();</script></script></svg>\n" },
+      // A script element whose end tag never arrives.
+      { as: "page.html", text: "<script>\n  boot();\n" },
+      // Handlers the quoted pattern alone does not reach.
+      { as: "page.html", text: "<button onclick=send()>Send</button>\n" },
+      { as: "page.html", text: "<button ONCLICK=\"send()\">Send</button>\n" },
+      { as: "page.html", text: "<img src=\"/x.png\"/onerror=\"boom()\">\n" },
+      // Sources that resolve off this origin.
+      { as: "page.html", text: "<script src=https://cdn.example.net/x.js></script>\n" },
+      { as: "page.html", text: "<script src=\"/\\cdn.example.net/x.js\"></script>\n" },
+      { as: "page.html", text: "<script src=\"/&#47;cdn.example.net/x.js\"></script>\n" },
+    ],
+    green: [
+      { as: "page.html", text: "<script src=\"/static/islands/mailbox.js\" defer></script>\n" },
+      { as: "page.html", text: "<button type=\"submit\" name=\"theme\" value=\"dark\">Dark</button>\n" },
+      { as: "page.html", text: "<form method=\"post\" action=\"/compose\" data-island=\"compose\">\n" },
+      // Data blocks, with the type quoted three ways, in mixed case, with
+      // a parameter, padded, and on a tag split across lines.
+      { as: "page.html", text: "<script type=\"application/ld+json\">{\"@type\":\"SoftwareApplication\"}</script>\n" },
+      { as: "page.html", text: "<script type='application/ld+json'>{\"@type\":\"SoftwareApplication\"}</script>\n" },
+      { as: "page.html", text: "<script type=application/ld+json>{\"@type\":\"SoftwareApplication\"}</script>\n" },
+      { as: "page.html", text: "<script type=\"Application/LD+JSON\">{\"@type\":\"SoftwareApplication\"}</script>\n" },
+      { as: "page.html", text: "<script type=\"application/ld+json; charset=utf-8\">{\"@type\":\"SoftwareApplication\"}</script>\n" },
+      { as: "page.html", text: "<script type=\" application/json \" id=\"compose-limits\">{\"recipients\":100}</script>\n" },
+      { as: "page.html", text: "<script\n  type=\"application/ld+json\"\n>\n{\"@type\":\"SoftwareApplication\"}\n</script>\n" },
+      // A data block beside a loaded island, and one whose body a template
+      // writes raw from a value serialized for a script element.
+      { as: "page.html", text: "<script type=\"application/ld+json\">{}</script>\n" +
+        "<script src=\"/static/islands/theme.js\" defer></script>\n" },
+      { as: "page.html", text: "  {% if structuredData %}<script type=\"application/ld+json\">" +
+        "{{{ structuredData }}}</script>{% endif %}\n" },
+      // Prose naming a word that opens with "on", outside any tag.
+      { as: "page.html", text: "<p>Set online = true in the config.</p>\n" },
     ],
   },
 
@@ -8409,6 +11080,195 @@ var DETECTORS = [
   },
 
   {
+    name: "transport-reading-middleware-left-on-the-framework-default",
+    description:
+      "A framework middleware that decides from the transport, mounted without being handed " +
+      "this surface's own reading of it. `securityHeaders` decides whether HSTS is sent, and " +
+      "`csrfProtect` decides whether the double-submit cookie carries `Secure` and the " +
+      "`__Host-` prefix and which scheme the origin cross-check builds this server's own " +
+      "origin from. Left on the framework's default resolver, each of them answers from the " +
+      "socket this process holds. Behind a terminator that socket is cleartext while the " +
+      "browser's connection is TLS, so the cookie loses the attributes that keep it off the " +
+      "cleartext port and the cross-check compares against a scheme no browser used. Both of " +
+      "these are mounted twice on this surface, once on the request lifecycle the application " +
+      "factory builds and once on the chain the routes mount, and the two run at different " +
+      "points: the earlier mount decides the first refusal and the later one writes the last " +
+      "header. One mount left on the default therefore reads this process's socket while its " +
+      "twin reads the proxy, a request measures one of each pair and says nothing about the " +
+      "other, and the split surfaces only as a deployment behind a terminator answering " +
+      "differently from the same request arriving directly. Build one reading with " +
+      "`b.requestHelpers.trustedProtocol`, which takes `X-Forwarded-Proto` from a peer the " +
+      "configuration names and from nobody else, and pass it as `protocolResolver` at every " +
+      "mount. The application factory mounts both of these unless told otherwise, so a call " +
+      "that configures neither is two mounts on the default rather than none.",
+    dirs: ["lib", "bin"],
+    // Anchored on the framework's own names in both mounting shapes: the
+    // two middleware constructors, and the two keys the application
+    // factory reads its middleware configuration by. Those are the
+    // surface this repository composes against rather than symbols it
+    // can rename, so nothing renamed here goes quiet, and a deletion
+    // takes the mount away along with the match.
+    //
+    // What is required is the KEY and never the value. The reading is
+    // built once and handed around under whatever local name the file
+    // gives it, so a matcher spelling that name would go quiet the first
+    // time somebody renamed a variable.
+    //
+    // Both extents are bracket pairs, the call's own and the
+    // configuration literal's, so a mount that grows is still read
+    // whole. Nothing here is bounded by a character count for a body to
+    // outgrow.
+    //
+    // Read off the mask, so the same names written in a comment or
+    // inside a message the reader is shown are prose rather than a
+    // mount, and a sentence stating the rule can neither trip this nor
+    // silence it.
+    //
+    // Two shapes are reported that are not a missing key. A factory call
+    // configured from a value rather than from a literal is reported
+    // because the transport its middleware answer from cannot be read at
+    // the mount, which is the whole of what this rule asks for. And
+    // switching one of the pair off is not accommodated: the security
+    // middleware on this surface are not behind a switch, so a
+    // configuration that removed one would be the larger finding rather
+    // than a way past this one.
+    scan: function (file) {
+      var mask     = _maskOf(file);
+      var out      = [];
+      var resolver = /\bprotocolResolver\s*:/;
+      var hit;
+
+      var mounted = /\bb\s*\.\s*middleware\s*\.\s*(securityHeaders|csrfProtect)\s*\(/g;
+      while ((hit = mounted.exec(mask)) !== null) {
+        var openParen  = hit.index + hit[0].length - 1;
+        var closeParen = _matchingBracket(mask, openParen);
+        if (closeParen !== -1 && resolver.test(mask.slice(openParen, closeParen))) continue;
+        out.push(_atOffset(file, hit.index,
+          "b.middleware." + hit[1] + " is mounted with no protocolResolver, so it decides " +
+          "from this process's own socket"));
+      }
+
+      var factory = /\bb\s*\.\s*createApp\s*\(/g;
+      var keys    = ["securityHeaders", "csrf"];
+      while ((hit = factory.exec(mask)) !== null) {
+        var open  = hit.index + hit[0].length - 1;
+        var close = _matchingBracket(mask, open);
+        if (close === -1) continue;
+        var at = open + 1;
+        while (at < close && /\s/.test(mask[at])) at += 1;
+        if (mask[at] !== "{") {
+          out.push(_atOffset(file, hit.index,
+            "b.createApp is configured from a value rather than from a literal, so the " +
+            "transport its middleware decide from cannot be read at the mount"));
+          continue;
+        }
+        var appEnd = _matchingBracket(mask, at);
+        if (appEnd === -1) continue;
+        var mw = _objectValueBraces(mask, { start: at, end: appEnd }, "middleware");
+        for (var k = 0; k < keys.length; k += 1) {
+          var cfg = mw === null ? null : _objectValueBraces(mask, mw, keys[k]);
+          if (cfg !== null && resolver.test(mask.slice(cfg.start, cfg.end))) continue;
+          out.push(_atOffset(file, hit.index,
+            "b.createApp mounts " + keys[k] + " with no protocolResolver, so it decides " +
+            "from this process's own socket"));
+        }
+      }
+      return out;
+    },
+    red: [
+      // The mount taking every default there is, which is the shape a
+      // second chain gets added with.
+      "function _mountSecurity(router) {\n" +
+        "  router.use(b.middleware.securityHeaders());\n}\n",
+      // Options named, and not this one, which is the shape a mount
+      // drifts into as other settings are added around it.
+      "function _mountSecurity(router) {\n" +
+        "  router.use(b.middleware.csrfProtect({\n" +
+        "    cookie:        true,\n" +
+        "    checkOrigin:   true,\n" +
+        "    skipStateless: true,\n" +
+        "  }));\n}\n",
+      // The options assembled out of sight and handed in, which leaves a
+      // reader of the mount unable to say which transport it answers
+      // from.
+      "function _mountSecurity(router, opts) {\n" +
+        "  router.use(b.middleware.securityHeaders(opts));\n}\n",
+      // One of the pair wired through the application factory and its
+      // twin left on the default, which is the split this rule exists
+      // for: the two run at different points and answer from different
+      // connections.
+      "async function start() {\n" +
+        "  app = await b.createApp({\n" +
+        "    routes:     handle.routes,\n" +
+        "    middleware: {\n" +
+        "      securityHeaders: { protocolResolver: handle.resolveProtocol },\n" +
+        "      csrf:            { cookie: true },\n" +
+        "    },\n" +
+        "  });\n}\n",
+      // The factory configuring neither, which mounts both on the
+      // default rather than mounting neither.
+      "async function start() {\n" +
+        "  app = await b.createApp({ dataDir: dataDir, routes: handle.routes });\n}\n",
+      // The whole configuration built elsewhere.
+      "async function start() {\n  app = await b.createApp(appOptions);\n}\n",
+    ],
+    green: [
+      // Both mounts on the routed chain handed the one reading, written
+      // across an object literal.
+      "function _mountSecurity(router) {\n" +
+        "  router.use(b.middleware.securityHeaders({\n" +
+        "    referrerPolicy:   REFERRER_POLICY,\n" +
+        "    protocolResolver: transport.resolve,\n" +
+        "  }));\n" +
+        "  router.use(b.middleware.csrfProtect({\n" +
+        "    cookie:           true,\n" +
+        "    checkOrigin:      true,\n" +
+        "    skipStateless:    true,\n" +
+        "    protocolResolver: transport.resolve,\n" +
+        "  }));\n}\n",
+      // The same on one line, because the composition is written both
+      // ways across the tree.
+      "function _mountSecurity(router) {\n" +
+        "  router.use(b.middleware.csrfProtect({ cookie: true, " +
+        "protocolResolver: transport.resolve }));\n}\n",
+      // The factory with both configured, each under the name the
+      // factory reads it by.
+      "async function start() {\n" +
+        "  app = await b.createApp({\n" +
+        "    dataDir:    dataDir,\n" +
+        "    routes:     handle.routes,\n" +
+        "    middleware: {\n" +
+        "      securityHeaders: {\n" +
+        "        referrerPolicy:   REFERRER_POLICY,\n" +
+        "        protocolResolver: handle.resolveProtocol,\n" +
+        "      },\n" +
+        "      csrf: { protocolResolver: handle.resolveProtocol },\n" +
+        "    },\n" +
+        "  });\n}\n",
+      // A middleware that decides nothing from the transport, mounted
+      // the way the rest of the chain is.
+      "function _mountSecurity(router) {\n" +
+        "  router.use(b.middleware.botGuard());\n" +
+        "  router.use(b.middleware.fetchMetadata());\n}\n",
+      // The names inside a message the reader is shown, which describes
+      // the factory rather than calling it.
+      "function _refuse() {\n" +
+        "  throw new TypeError(\"mountJmapWebSocket(server) needs the bound HTTP server, \" +\n" +
+        "    \"the one b.createApp().listen resolves with.\");\n}\n",
+      // Prose stating the rule, in both comment forms, because a rule
+      // written into the tree must not trip the detector enforcing it.
+      "// b.createApp mounts securityHeaders and csrfProtect unless told\n" +
+        "// otherwise, so a middleware block naming neither leaves both of\n" +
+        "// them reading this process's own socket.\n",
+      "/**\n" +
+        " * Pass protocolResolver to b.middleware.securityHeaders() and to\n" +
+        " * b.middleware.csrfProtect() at every mount, so the HSTS decision\n" +
+        " * and the cookie and origin decisions come from one reading.\n" +
+        " */\n",
+    ],
+  },
+
+  {
     name: "build-context-exclusion-that-stops-at-the-root",
     description:
       "A .dockerignore exclusion with no `**/` in front of it. The syntax reads like " +
@@ -8455,30 +11315,43 @@ var DETECTORS = [
   },
 
   {
-    name: "primitive-block-matched-outside-its-reader",
+    name: "documentation-tag-matched-outside-its-reader",
     description:
-      "A pattern that matches the `@primitive` documentation tag, outside the module that owns " +
-      "the parse. Several gates govern those blocks, and each one governs exactly the set it " +
-      "found, so a second matcher is a second answer to what this project documents. The " +
-      "failure is silent and one-directional: a primitive a gate's own pattern does not reach " +
-      "is a primitive that gate reports nothing about, and its verdict still reads clean, so " +
-      "the freeze that never engaged and the lifecycle decision nobody was asked for both look " +
-      "exactly like a pass. Take the list from scripts/source-primitives.js, which reads each " +
-      "block once and carries every tag any gate needs. The tag spelling is the anchor because " +
-      "it is the contract: a matcher can be renamed freely and still has to spell the tag to " +
-      "find anything, so no rename can quietly retire this rule. What is matched is the tag " +
-      "opening a pattern, which is what a parse looks like; naming the tag in a message or in " +
-      "prose describes one and is left alone.",
+      "A pattern that matches a documentation block tag, outside the module that owns the parse. " +
+      "The documentation gates and the reference wiki read the same blocks, and each governs " +
+      "exactly the set it read, so a second matcher is a second answer to what a block says. " +
+      "The failure is silent in both directions. A primitive a gate's own pattern does not " +
+      "reach is one that gate reports nothing about, so its verdict still reads clean. A block " +
+      "a gate reads one way and the wiki reads another passes the gate and then fails the wiki " +
+      "build that runs when the server is created. Take the records from " +
+      "scripts/source-primitives.js, which is lib/web/wiki/blocks.js bound to this repository " +
+      "and carries every tag any gate or page needs. The tag spelling is the anchor because it " +
+      "is the contract: a matcher can be renamed freely and still has to spell the tag, or " +
+      "capture a tag name, to find anything, so no rename can quietly retire this rule. What " +
+      "is matched is a tag opening a pattern, which is what a parse looks like; naming a tag " +
+      "in a message or in prose describes one and is left alone.",
     dirs: ["lib", "bin", "scripts", "test"],
     scan: function (file) {
-      if (PRIMITIVE_PARSE_OWNER_RE.test(file.rel)) return [];
-      return _lineMatcher(PRIMITIVE_TAG_MATCHER_RE, "code")(file);
+      if (DOCUMENTATION_READER_RE.test(file.rel)) return [];
+      return _lineMatcher(DOCUMENTATION_TAG_MATCHER_RE, "code")(file);
     },
     red: [
       "var prim = /@primitive\\s+(\\S+)/.exec(block);\n",
       "var mp = line.match(/@primitive\\s+(\\S+)/);\n",
       "var re = new RegExp(\"@primitive\\\\s+(\\\\S+)\");\n",
       "var anchored = /^@primitive\\b/.test(line.trim());\n",
+      // A second reader of another tag the reader returns. This line was
+      // the comment block gate's own reading of `@signature`.
+      "var SIGNATURE_LINE_RE  = /^@signature\\s+(.+)$/;\n",
+      "var nav = /^@nav\\s+(.+)$/.exec(line);\n",
+      // A reader of any tag, built from the name held in a variable. This
+      // line was scripts/source-primitives.js reading every tag itself.
+      "  var re = new RegExp(\"^@\" + name + \"\\\\s+(.+)$\");\n",
+      "var TAG = /^@([A-Za-z][A-Za-z0-9]*)(?:\\s+(\\S.*))?$/;\n",
+      // The script the gates read through composes the reader, so a
+      // matcher written there is a second parse like any other.
+      { as:   "scripts/source-primitives.js",
+        text: "var m = /@primitive\\s+(\\S+)/.exec(blockText);\n" },
     ],
     green: [
       // The shared reader, asked for the tag by name. Nothing here spells
@@ -8486,6 +11359,7 @@ var DETECTORS = [
       // back into a second parse.
       "var token = _tag(lines, \"primitive\");\n",
       "var since = sourcePrimitives.tagMap(primitives, \"since\");\n",
+      "var text = typeof record.signature === \"string\" ? record.signature : null;\n",
       // The tag named inside a message the reader is shown. It describes
       // the parse rather than performing one, and rewording a correct
       // sentence to get past a detector removes the evidence without
@@ -8495,11 +11369,22 @@ var DETECTORS = [
       // parsed, not a parse of it, and it appears in lib/ and test/ by
       // the hundred.
       " * @primitive blamepost.store.openSnapshot\n * @since 0.1.0\n",
+      " * @module blamepost.web.wiki\n * @nav    Reference wiki\n",
       "// Reads each @primitive block's @status and @since from the shared records.\n",
+      // Patterns opening on an at sign that read no documentation tag: an
+      // address, a package scope and an image digest.
+      "var recipient = /@example\\.net$/.test(address);\n",
+      "var re = new RegExp(\"@example\\\\.net$\");\n",
+      "var bare = String(name).replace(/^@[^/]+\\//, \"\");\n",
+      "var DIGEST_RE = /@(sha256:[0-9a-f]{64})\\b/;\n",
+      // The line-scoped declaration readers the gates keep for themselves.
+      // Neither is a documentation block tag.
+      { as:   "scripts/source-primitives.js",
+        text: "var REMOVAL_RE = /^(?:\\/\\/+|\\*|\\/\\*\\*)?\\s*@removed\\s+(.+?)\\s*$/;\n" },
       // The owner is where the matcher belongs, so it is the one file the
       // rule cannot apply to.
-      { as:   "scripts/source-primitives.js",
-        text: "var m = /@primitive\\s+(\\S+)/.exec(blockText);\n" },
+      { as:   "lib/web/wiki/blocks.js",
+        text: "var TAG_LINE_RE = /^@([A-Za-z][A-Za-z0-9]*)(?:\\s+(\\S.*))?$/;\n" },
     ],
   },
 
@@ -8656,6 +11541,189 @@ var DETECTORS = [
         text: "<p class=\"hint\">Recorded as the reason against each cancelled message.</p>\n" },
     ],
   },
+
+  {
+    name: "imap-selection-without-permanentflags",
+    description:
+      "An IMAP selection answered with UIDVALIDITY and no PERMANENTFLAGS. RFC 9051 section " +
+      "6.3.2 makes both required OK untagged responses to SELECT and to EXAMINE, and a " +
+      "client that is not sent PERMANENTFLAGS is entitled to assume every flag it sends is " +
+      "kept. It then offers the account holder tags the mailbox will not hold, and offers no " +
+      "way to invent one where the mailbox would have held it, because the same response is " +
+      "what carries the \\* that says new keywords are allowed. The missing response looks " +
+      "like nothing at all on the wire: the selection completes, the mailbox opens, and what " +
+      "the client believes about it is wrong. Write the response beside the UIDVALIDITY one, " +
+      "naming the flags the selection keeps, and an empty list where it keeps none.",
+    dirs: ["lib"],
+    // Anchored on the response code as RFC 9051 section 7.1 spells it,
+    // which is a wire contract rather than a name any refactor here can
+    // change, and bounded by the enclosing function walked as brackets
+    // rather than by a line count. The bracket form is what separates the
+    // response from the word in a sentence, so the anchor is read off the
+    // source; the mask then says whether that offset is code, because a
+    // comment describing the response is not one.
+    scan: function (file) {
+      var mask = _maskOf(file);
+      var out  = [];
+      var re   = /\[UIDVALIDITY\s/g;
+      var m;
+      while ((m = re.exec(file.text)) !== null) {
+        var letter = m.index + 1;
+        if (mask[letter] === " ") continue;
+        var span = _enclosingFunctionSpan(mask, m.index);
+        if (!span) continue;
+        if (mask.slice(span.start, span.end).indexOf("PERMANENTFLAGS") !== -1) continue;
+        out.push(_atOffset(file, m.index,
+          "this selection sends UIDVALIDITY and no PERMANENTFLAGS, so the client is never " +
+          "told which flags the mailbox keeps"));
+      }
+      return out;
+    },
+    red: [
+      "function _select(state, socket, info, tag) {\n" +
+        "  _untagged(socket, info.exists + \" EXISTS\");\n" +
+        "  _untagged(socket, \"FLAGS (\" + info.flags.join(\" \") + \")\");\n" +
+        "  _untagged(socket, \"OK [UIDVALIDITY \" + info.uidvalidity + \"] UIDs valid\");\n" +
+        "  _untagged(socket, \"OK [UIDNEXT \" + info.uidnext + \"] Predicted next UID\");\n" +
+        "  _tagged(socket, tag, \"OK [READ-WRITE] SELECT completed\");\n" +
+        "}\n",
+      // The shape the listeners are written in: the handler is built
+      // inside a factory and returns a closure, so its closing brace is
+      // indented and a matcher anchored at column zero reads past it.
+      "function handlerFor(examine) {\n" +
+        "  return function (state, socket, parsed) {\n" +
+        "    return open(state).then(function (info) {\n" +
+        "      _untagged(socket, \"OK [UIDVALIDITY \" + info.uidvalidity + \"] UIDs valid\");\n" +
+        "      _tagged(socket, parsed.tag, \"OK SELECT completed\");\n" +
+        "    });\n" +
+        "  };\n" +
+        "}\n",
+    ],
+    green: [
+      "function _select(state, socket, info, tag, examine) {\n" +
+        "  _untagged(socket, info.exists + \" EXISTS\");\n" +
+        "  _untagged(socket, \"FLAGS (\" + info.flags.join(\" \") + \")\");\n" +
+        "  _untagged(socket, \"OK [PERMANENTFLAGS (\" +\n" +
+        "    (examine ? [] : info.permanentFlags).join(\" \") + \")] Flags kept\");\n" +
+        "  _untagged(socket, \"OK [UIDVALIDITY \" + info.uidvalidity + \"] UIDs valid\");\n" +
+        "  _tagged(socket, tag, \"OK SELECT completed\");\n" +
+        "}\n",
+      // The word in a sentence, describing what the field holds. A
+      // comment is not a response.
+      "function _next(now) {\n" +
+        "  // The value a client caches against, read back as [UIDVALIDITY n].\n" +
+        "  return Math.floor(now / 1000);\n" +
+        "}\n",
+      // The same word as a key of the STATUS answer, which RFC 9051
+      // section 6.3.11 asks a different question with.
+      "function statusFolder(actor, name) {\n" +
+        "  return { MESSAGES: 2, UIDNEXT: 3, UIDVALIDITY: 17 };\n" +
+        "}\n",
+    ],
+  },
+
+  {
+    name: "jmap-method-served-without-its-argument-refusal",
+    description:
+      "A JMAP method handler whose body does not open by taking a refusal from its arguments " +
+      "and returning it. Every handler runs behind one dispatcher, and that dispatcher skips " +
+      "its cross-account check for a call whose accountId is absent or null: it reads the " +
+      "value, finds nothing, and continues to the handler rather than refusing. What closes " +
+      "that hole is the handler itself, which refuses a call naming no account before it " +
+      "resolves one, so a call that omitted the argument never reaches a store read. A " +
+      "handler added without the opening refusal reopens it, and nothing else in the tree is " +
+      "positioned to notice: no behavioral test can cover a method that does not exist yet, " +
+      "and the dispatcher is vendored and cannot be changed here. Open every handler with " +
+      "the two statements the others open with, a refusal taken from args and an immediate " +
+      "return of it when it is not null, and put any further argument checking after them. " +
+      "The shape is what is required rather than a particular helper, so renaming the " +
+      "helpers changes nothing.",
+    dirs: ["lib"],
+    scan: function (file) {
+      var mask = _maskOf(file);
+      var out  = [];
+      // The key is an RFC 8620 section 5 method name, `Type/verb`, which
+      // is wire vocabulary rather than a name this repository chooses:
+      // it survives every rename a handler or a helper can undergo, and
+      // it disappears only when the method itself is withdrawn.
+      var re = /"([A-Z][A-Za-z0-9]*\/[a-z][A-Za-z0-9]*)"\s*:\s*(?:async\s+)?function\s*\([^)]*\)\s*\{(?!\s*var\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\s*\(\s*args\s*\)\s*;\s*if\s*\(\s*\2\s*!==\s*null\s*\)\s*return\s+\2\s*;)/g;
+      var m;
+      while ((m = re.exec(mask)) !== null) {
+        out.push(_atOffset(file, m.index,
+          "the " + m[1] + " handler does not open by returning a refusal read from its " +
+          "arguments, so a call naming no account reaches it"));
+        if (m.index === re.lastIndex) re.lastIndex += 1;
+      }
+      return out;
+    },
+    red: [
+      // A handler that resolves an account before refusing anything.
+      "var methods = {\n" +
+        "  \"Email/get\": async function (actor, args) {\n" +
+        "    var account = await _account(actor);\n" +
+        "    return { accountId: args.accountId, list: [], state: \"1\" };\n" +
+        "  },\n};\n",
+      // A handler that takes the refusal and then does not act on it.
+      "var methods = {\n" +
+        "  \"Mailbox/set\": async function (actor, args) {\n" +
+        "    var refused = _setRefusal(args);\n" +
+        "    var account = await _account(actor);\n" +
+        "    if (refused !== null) return refused;\n" +
+        "    return { accountId: args.accountId };\n" +
+        "  },\n};\n",
+      // A handler refusing on the wrong condition, which lets a null
+      // answer through exactly where the dispatcher already stopped.
+      "var methods = {\n" +
+        "  \"EmailSubmission/set\": async function (actor, args) {\n" +
+        "    var refused = _setRefusal(args);\n" +
+        "    if (refused === null) return refused;\n" +
+        "    return { accountId: args.accountId };\n" +
+        "  },\n};\n",
+      // A handler reading its refusal from something other than the
+      // arguments, so the call's own accountId is never examined.
+      "var methods = {\n" +
+        "  \"Thread/get\": async function (actor, args) {\n" +
+        "    var refused = _getRefusal(actor);\n" +
+        "    if (refused !== null) return refused;\n" +
+        "    return { accountId: args.accountId, list: [] };\n" +
+        "  },\n};\n",
+    ],
+    green: [
+      // The shape every handler in the tree opens with. The helper name
+      // is read by nothing here, which is the point: rename it and this
+      // stays silent.
+      "var methods = {\n" +
+        "  \"Email/get\": async function (actor, args) {\n" +
+        "    var refused = _jmapGetRefusal(args);\n" +
+        "    if (refused !== null) return refused;\n" +
+        "    var account = await _jmapAccount(actor);\n" +
+        "    return { accountId: args.accountId, list: [], state: \"1\" };\n" +
+        "  },\n" +
+        "  \"Mailbox/query\": async function (actor, args) {\n" +
+        "    var stopped = somethingElseEntirely(args);\n" +
+        "    if (stopped !== null) return stopped;\n" +
+        "    return { accountId: args.accountId, ids: [] };\n" +
+        "  },\n};\n",
+      // A synchronous handler, which is the same shape without `async`.
+      "var methods = {\n" +
+        "  \"Identity/get\": function (actor, args) {\n" +
+        "    var refused = _getRefusal(args);\n" +
+        "    if (refused !== null) return refused;\n" +
+        "    return { accountId: args.accountId, list: [] };\n" +
+        "  },\n};\n",
+      // A key that looks like a method name and holds no handler. A
+      // mapping table is not a dispatch table.
+      "var LABELS = {\n" +
+        "  \"Email/get\": \"read one message\",\n" +
+        "  \"Email/set\": \"change one message\",\n};\n",
+      // The same words in a comment and in a sentence, which are not
+      // keys of anything.
+      "// The Email/get handler answers a list. See also Mailbox/query.\n" +
+        "function describe() {\n" +
+        "  return \"Email/get: function (actor, args) { ... }\";\n" +
+        "}\n",
+    ],
+  },
 ];
 
 // Allow-class registry. Every detector name is a valid class, plus the
@@ -8806,6 +11874,22 @@ function _auditAllowMarkers() {
 function run() {
   _allViolations = [];
 
+  // A file the walk found and the reader could not open must stop the run.
+  // Answering with empty text instead hands every detector a file with
+  // nothing in it, so all 100 report it clean while it still counts toward
+  // the total each one publishes: the count and the verdict agree, and both
+  // are wrong. This tree is held in a synchronizing folder that has taken a
+  // lock on a file mid-run before, so the read fault is reachable here
+  // rather than theoretical.
+  var unreadable = null;
+  try { _readRecord(path.join(REPO_ROOT, "lib", "no-such-file-for-the-read-proof.js")); }
+  catch (e) { unreadable = e; }
+  check("a file the reader cannot open stops the run rather than reading as empty",
+    unreadable !== null);
+  check("and the refusal names the file it could not read",
+    unreadable !== null && String(unreadable.message).indexOf(
+      "no-such-file-for-the-read-proof.js") !== -1);
+
   var names = {};
   DETECTORS.forEach(function (d) {
     check("detector name is unique: " + d.name, !names[d.name]);
@@ -8858,6 +11942,11 @@ function run() {
   console.log("\nself-history-in-source, the shapes read out of comments and string literals:");
   SELF_HISTORY_SHAPES.forEach(function (x) {
     console.log("  " + x.name + ": " + x.what);
+  });
+
+  console.log("\ntemplate-inline-script-or-event-handler, the script types a template body may carry:");
+  TEMPLATE_DATA_BLOCK_TYPES.forEach(function (x) {
+    console.log("  " + x.type + ": " + x.what);
   });
 
   var exempt = Object.keys(TOOLING_TOKEN_EXCEPTIONS);

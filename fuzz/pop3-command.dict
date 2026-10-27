@@ -1,0 +1,30 @@
+# libFuzzer dictionary for the POP3 command reader.
+#
+# The line terminators are here for the reason given in
+# fuzz/smtp-command.dict: a curated seed is a text file and cannot carry
+# a CR byte, so the framing arrives from the dictionary.
+
+crlf="\x0d\x0a"
+bare_cr="\x0d"
+bare_lf="\x0a"
+nul="\x00"
+
+user="USER "
+pass="PASS "
+apop="APOP "
+auth="AUTH PLAIN "
+capa="CAPA"
+stls="STLS"
+stat="STAT"
+list="LIST "
+uidl="UIDL "
+retr="RETR "
+dele="DELE "
+top="TOP "
+noop="NOOP"
+rset="RSET"
+quit="QUIT"
+
+number="1"
+big_number="4294967296"
+at="@"

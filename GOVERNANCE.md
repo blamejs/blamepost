@@ -70,7 +70,7 @@ actually available, not who once was. Coming back is an ask.
 
 - **Technical direction.** Maintainer-final. Operator input arrives through
   Issues and Discussions, and the maintainer weighs it. No formal vote decides
-  the outcome. The capability plan is public in [ROADMAP.md](ROADMAP.md).
+  the outcome. The capability roadmap is public in [ROADMAP.md](ROADMAP.md).
 - **Security triage.** Per [SECURITY.md](SECURITY.md): coordinated disclosure
   through GitHub Security Advisories, fix targets by severity, and a public
   advisory when the fix ships.

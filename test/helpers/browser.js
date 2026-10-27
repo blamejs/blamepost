@@ -24,6 +24,21 @@
  * accepts a CA. Verification stays on: a reader that skipped it would
  * pass against a listener presenting anything at all.
  *
+ * ## The HTTP version is part of what is being measured
+ *
+ * `node:https` speaks HTTP/1.1 and sends a `Host` header. The framework
+ * binds every TLS listener with `http2.createSecureServer` and
+ * `ALPNProtocols: ["h2", "http/1.1"]`, so a browser negotiates h2 and
+ * sends `:authority` and NO `Host` header at all. Those are different
+ * requests, and a gate that derives this server's own origin from
+ * `Host` sees a value over one and `undefined` over the other.
+ *
+ * So `opts.http2` picks the transport, and a reader measuring anything
+ * about origins, hosts or the request lifecycle has to drive both. The
+ * default stays HTTP/1.1 because that is what the existing vectors were
+ * written against; a case about what a BROWSER gets asks for h2, which
+ * is the only version a browser will use here.
+ *
  * Every response comes back as `{ status, body, location, headers,
  * setCookie, tls }`. Nothing is followed and nothing is retried, so a
  * 302 is a value to assert on rather than a hop that hides which route
@@ -35,6 +50,7 @@
 
 var nodeHttp  = require("node:http");
 var nodeHttps = require("node:https");
+var nodeHttp2 = require("node:http2");
 
 var DEFAULT_TIMEOUT_MS = 5000;
 
@@ -121,11 +137,18 @@ function _jar() {
  * address tests the opposite of what it claims: every request looks
  * like the same client.
  *
+ * `opts.http2` speaks HTTP/2, which is the version a browser negotiates
+ * against this server. It sends `:authority` and no `Host` header, which
+ * is the difference that matters to anything reading this server's own
+ * origin. It requires an `https` origin, because the framework offers h2
+ * over ALPN and there is no cleartext upgrade path here.
+ *
  * opts.ca            PEM of the authority that signed the server certificate
  * opts.servername    SNI name, when the origin is an address rather than a name
  * opts.timeoutMs     per request budget, default 5000
  * opts.userAgent     overrides the default browser agent string
  * opts.localAddress  the source address to dial out from, default the host's own
+ * opts.http2         speak HTTP/2 rather than HTTP/1.1, default false
  */
 function browserAt(origin, opts) {
   opts = opts || {};
@@ -162,6 +185,15 @@ function browserAt(origin, opts) {
     throw new TypeError("helpers/browser.browserAt: opts.localAddress must be a non-empty " +
       "string address to dial out from");
   }
+  if (opts.http2 !== undefined && typeof opts.http2 !== "boolean") {
+    throw new TypeError("helpers/browser.browserAt: opts.http2 must be a boolean when supplied");
+  }
+  var http2 = opts.http2 === true;
+  if (http2 && !secure) {
+    throw new TypeError("helpers/browser.browserAt: opts.http2 needs an https origin. The " +
+      "framework offers h2 over ALPN and no cleartext upgrade, so an http origin would " +
+      "silently speak HTTP/1.1 and the reader would report the version it did not ask for.");
+  }
 
   var jar  = _jar();
   var csrf = "";
@@ -175,6 +207,119 @@ function browserAt(origin, opts) {
   // no longer matches its own cookie, and the refusal would read as the
   // gate working when it was the reader that broke.
   function _send(method, path, headers, payload, keepCookies) {
+    return http2
+      ? _sendH2(method, path, headers, payload, keepCookies)
+      : _sendH1(method, path, headers, payload, keepCookies);
+  }
+
+  // HTTP/2, which is what a browser negotiates here. The authority rides
+  // the `:authority` pseudo-header and NO `Host` header is sent, because
+  // that is the request a browser makes and the whole reason this mode
+  // exists. RFC 9113 section 8.3.1 has clients use `:authority` in place
+  // of `Host`, so a reader that sent both would be measuring a shape no
+  // browser produces.
+  //
+  // One session per request, closed on the way out. A pooled session
+  // would be faster and would also mean a refusal on one request could
+  // tear down the next one for a reason that has nothing to do with it.
+  function _sendH2(method, path, headers, payload, keepCookies) {
+    return new Promise(function (resolve, reject) {
+      var connectOpts = { ca: [opts.ca] };
+      if (typeof opts.servername === "string" && opts.servername.length > 0) {
+        connectOpts.servername = opts.servername;
+      }
+      if (localAddress !== undefined) connectOpts.localAddress = localAddress;
+
+      var session = nodeHttp2.connect(origin, connectOpts);
+      var settled = false;
+      function fail(e) {
+        if (settled) return;
+        settled = true;
+        try { session.destroy(); } catch (_e) { /* already closing */ }
+        reject(e);
+      }
+      session.once("error", fail);
+
+      var head = Object.assign({
+        ":method":    method,
+        ":path":      path,
+        ":scheme":    "https",
+        ":authority": parsed.host,
+      }, _lowerCased(headers));
+
+      var req;
+      try { req = session.request(head); }
+      catch (e) { fail(e); return; }
+      req.setTimeout(timeoutMs, function () {
+        fail(new Error(method + " " + path + " on " + origin + " never answered within " +
+          timeoutMs + "ms over HTTP/2"));
+      });
+      req.once("error", fail);
+
+      var body = "";
+      var resHeaders = {};
+      var tlsState = null;
+      req.setEncoding("utf8");
+      req.on("response", function (h) {
+        resHeaders = h;
+        var socket = session.socket;
+        if (socket && typeof socket.getPeerCertificate === "function") {
+          tlsState = {
+            authorized:      socket.authorized === true,
+            authorizedError: String(socket.authorizationError || ""),
+            peerCertificate: socket.getPeerCertificate(),
+            protocol:        typeof socket.getProtocol === "function" ? socket.getProtocol() : "",
+          };
+          lastTls = tlsState;
+        }
+      });
+      req.on("data", function (chunk) { body += chunk; });
+      req.on("end", function () {
+        if (settled) return;
+        settled = true;
+        try { session.close(); } catch (_e) { /* already closing */ }
+        if (keepCookies !== false) jar.absorb(resHeaders["set-cookie"]);
+        resolve({
+          status:    resHeaders[":status"],
+          body:      body,
+          location:  resHeaders.location === undefined ? null : resHeaders.location,
+          headers:   resHeaders,
+          setCookie: resHeaders["set-cookie"] || [],
+          tls:       lastTls,
+        });
+      });
+      if (payload !== undefined && payload !== null) req.write(payload);
+      req.end();
+    });
+  }
+
+  // HTTP/2 refuses an uppercase header name outright, so the names the
+  // rest of this file spells the HTTP/1.1 way are folded here rather than
+  // at every call site.
+  function _lowerCased(headers) {
+    var out = {};
+    var names = Object.keys(headers || {});
+    for (var i = 0; i < names.length; i += 1) {
+      // Connection-specific headers are malformed in HTTP/2 (RFC 9113
+      // section 8.2.2) and Node refuses the stream rather than dropping
+      // them, so a reader carrying one would fail before the route.
+      //
+      // `host` is NOT in that list and is deliberately left through. No
+      // browser sends one over HTTP/2 and nothing here adds one, so it
+      // arrives only when a caller wrote it, and a caller writing a
+      // `host` that disagrees with `:authority` is driving the malformed
+      // pair of RFC 9113 section 8.3.1. Dropping it here would silently
+      // turn that vector into an ordinary request and report the refusal
+      // it was checking for as absent.
+      var lower = names[i].toLowerCase();
+      if (lower === "connection" || lower === "keep-alive" || lower === "transfer-encoding" ||
+          lower === "upgrade" || lower === "proxy-connection") continue;
+      out[lower] = headers[names[i]];
+    }
+    return out;
+  }
+
+  function _sendH1(method, path, headers, payload, keepCookies) {
     return new Promise(function (resolve, reject) {
       var transport = secure ? nodeHttps : nodeHttp;
       var requestOpts = {
@@ -246,6 +391,56 @@ function browserAt(origin, opts) {
   // here, because a second client with its own TLS posture is how two
   // readers come to disagree about what this server does.
   function _head(path, headers) {
+    return http2 ? _headH2(path, headers) : _headH1(path, headers);
+  }
+
+  function _headH2(path, headers) {
+    return new Promise(function (resolve, reject) {
+      var connectOpts = { ca: [opts.ca] };
+      if (typeof opts.servername === "string" && opts.servername.length > 0) {
+        connectOpts.servername = opts.servername;
+      }
+      if (localAddress !== undefined) connectOpts.localAddress = localAddress;
+      var session = nodeHttp2.connect(origin, connectOpts);
+      var settled = false;
+      function fail(e) {
+        if (settled) return;
+        settled = true;
+        try { session.destroy(); } catch (_e) { /* already closing */ }
+        reject(e);
+      }
+      session.once("error", fail);
+      var req;
+      try {
+        req = session.request(Object.assign({
+          ":method":    "GET",
+          ":path":      path,
+          ":scheme":    "https",
+          ":authority": parsed.host,
+        }, _lowerCased(headers)));
+      } catch (e) { fail(e); return; }
+      req.setTimeout(timeoutMs, function () {
+        fail(new Error("GET " + path + " on " + origin + " sent no response head within " +
+          timeoutMs + "ms over HTTP/2"));
+      });
+      req.once("error", fail);
+      req.on("response", function (h) {
+        if (settled) return;
+        settled = true;
+        jar.absorb(h["set-cookie"]);
+        var answer = {
+          status:      h[":status"],
+          headers:     h,
+          contentType: String(h["content-type"] || ""),
+        };
+        try { req.close(); session.close(); } catch (_e) { /* already closing */ }
+        resolve(answer);
+      });
+      req.end();
+    });
+  }
+
+  function _headH1(path, headers) {
     return new Promise(function (resolve, reject) {
       var transport = secure ? nodeHttps : nodeHttp;
       var requestOpts = {
@@ -313,6 +508,30 @@ function browserAt(origin, opts) {
       "X-CSRF-Token":   csrf,
       "Accept":         "text/html",
     }, extra || {})), body);
+  }
+
+  // One request with any method: HEAD, OPTIONS, a method no route
+  // registers, or a method written in lower or mixed case. The cookies
+  // this reader holds are sent, and nothing else is added: no token, no
+  // Origin and no Accept, so the caller writes every header the vector
+  // needs in `extra`.
+  //
+  // The method reaches the server as written only over HTTP/2. The
+  // HTTP/1.1 client in `node:http` converts a method to upper case before
+  // it sends the request line.
+  function request(method, path, extra, payload) {
+    if (typeof method !== "string" || method.length === 0) {
+      throw new TypeError("helpers/browser: request(method, path) needs a method string");
+    }
+    if (typeof path !== "string" || path.charAt(0) !== "/") {
+      throw new TypeError("helpers/browser: request(method, path) needs a path beginning with /");
+    }
+    var body = payload === undefined || payload === null ? null : String(payload);
+    var headers = _headers(extra);
+    if (body !== null && headers["Content-Length"] === undefined) {
+      headers["Content-Length"] = String(Buffer.byteLength(body, "utf8"));
+    }
+    return _send(method, path, headers, body);
   }
 
   // The preflight a browser sends before a cross origin request that is
@@ -406,9 +625,14 @@ function browserAt(origin, opts) {
 
   return {
     origin:    origin,
+    // Which HTTP version this reader speaks, so a case driving both can
+    // name the one that answered rather than assert over a transport it
+    // assumed.
+    http2:     http2,
     get:       get,
     head:      head,
     post:      post,
+    request:   request,
     form:      form,
     preflight: preflight,
     signIn:    signIn,

@@ -1,0 +1,16 @@
+# ClusterFuzzLite / OSS-Fuzz project metadata for blamepost.
+#
+# One language, because the harnesses under fuzz/ are CommonJS and the
+# server has no compiled component: the framework is vendored JavaScript
+# under lib/vendor/blamejs/ and there is nothing to build.
+#
+# No `sanitizers` key. The v1 ClusterFuzzLite action refuses a JavaScript
+# project that names one and refuses an empty list as well, so writing
+# either turns the build step into a failure that says nothing about the
+# harnesses. .clusterfuzzlite/README.md records what that means for the
+# workflows in .github/.
+language: javascript
+homepage: "https://github.com/blamejs/blamepost"
+primary_contact: "security@blamejs.com"
+main_repo: "https://github.com/blamejs/blamepost"
+file_github_issue: true

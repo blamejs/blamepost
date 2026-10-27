@@ -1,5 +1,20 @@
 # Hadolint config: strict by default, with a small set of explicit
 # exceptions for patterns this repository uses intentionally.
+#
+# Run the same version the pipeline runs, which is hadolint 2.15.1, the
+# version hadolint/hadolint-action v3.5.0 carries:
+#
+#   docker run --rm -i -v "$PWD:/repo" -w /repo \
+#     ghcr.io/hadolint/hadolint:v2.15.1 \
+#     hadolint --config .hadolint.yaml Dockerfile
+#
+# Older releases disagree with it on this Dockerfile, and both
+# disagreements are the older release being wrong. 2.12.0 raises DL3006 on
+# `FROM ${BASE_SRC}` because it does not resolve the ARG default, which
+# carries a tag and an `@sha256:` digest; and it raises SC1088 on an exec
+# form RUN, which Docker never passes to a shell. Suppressing either one
+# to satisfy an older release would silence a supply chain rule on the two
+# lines where it matters most.
 
 failure-threshold: warning
 

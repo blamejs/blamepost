@@ -101,6 +101,18 @@
 // `test/integration` all reach anyone who clones the repository, which is this
 // project's test for operator-facing.
 //
+// A DISCOVERED SET IS NOT A READ SET. The walk above answers what this gate
+// HANDED the checker. What the checker OPENED is a second number, and the two
+// come apart in the direction that hides the fault: a checker resolving its
+// reads against the wrong base opens none of the documents, reports no finding,
+// and exits 0, which is the shape a passing run has. Measured directly: handed
+// one document that exists and one that does not, this checker writes the
+// failure to stderr, reports `filesRead: 1`, and still exits 0. So the envelope
+// is asked for on EVERY path that reaches a verdict rather than only on a
+// non-zero exit, its `filesRead` is published beside the discovered count, and
+// a run where the two disagree is refused: the documents it did not open have
+// no verdict, and a verdict covering some of a set is not one covering the set.
+//
 // Environment:
 //   BLAMEPOST_PROSE_CHECKER   path to check_technical_text.mjs, overriding the
 //                       default location. Keeps the gate portable to a machine
@@ -122,7 +134,9 @@
 //       document, or the reconciler raised no objection to a known-bad finding
 //       set. Something that should have reported did not, so its verdict cannot
 //       be trusted
-//   4   the checker did not complete a run, so it returned no verdict at all
+//   4   the checker did not complete a run, so it returned no verdict at all,
+//       or it completed one over fewer documents than it was handed, so its
+//       verdict answers for only part of the set
 //
 // Codes 3 and 4 are failures of the TOOLING. They say nothing about the prose in
 // this repository, and the message on each says so.
@@ -161,7 +175,7 @@ var SKIPPED_DIRS = [
   { dir: "vendor",       reason: "the vendored upstream tree - upstream's prose, refreshed wholesale by scripts/vendor-update.sh and read-only here, so a finding in it names text nobody in this repository may edit" },
   { dir: ".git",         reason: "the object store - no documents, and walking it is slow" },
   { dir: ".claude",      reason: "local agent settings and worktree checkouts - a worktree is a second copy of this repository and would gate every document twice" },
-  { dir: ".references",  reason: "internal research and build plans - gitignored, never in a clone or the tarball" },
+  { dir: ".references",  reason: "internal research and build notes - gitignored, never in a clone or the tarball" },
   { dir: ".scratch",     reason: "internal working notes - gitignored, never in a clone or the tarball" },
   { dir: "memory",       reason: "cross-session working notes - gitignored, never in a clone or the tarball" },
   { dir: "coverage",     reason: "generated coverage report - build output, gitignored" },
@@ -263,11 +277,11 @@ function fail(code, lines) {
 }
 
 /**
- * finish(code) publishes the document count and exits.
+ * finish(code, read) publishes what the run examined and exits.
  *
  * Called on the paths that end CLEAN having assessed the documents, which
  * are the ones where a verdict over an empty set is possible and therefore
- * the ones the count has to speak for. Everything that ends non-zero goes
+ * the ones the counts have to speak for. Everything that ends non-zero goes
  * through `fail`, which already has a finding to report; a refusal added
  * there would bury it under the accounting.
  *
@@ -279,17 +293,28 @@ function fail(code, lines) {
  * act on. What it leaves on the record is the banner, which is the point of
  * requiring the declaration in the first place.
  *
- * The number is the document set, because that is what has to move for this
- * gate to be answering anything. Findings are not a unit and never could
- * be: zero findings is the healthy answer here, so a count of them cannot
- * tell a clean tree from a checker that read none of it. That distinction
- * is the whole reason a count sits beside a canary rather than instead of
- * one. The canary proves the checker still FIRES, and this proves it
- * REACHED the tree.
+ * TWO UNITS, because they fail independently and only the second answers
+ * the question this gate is asked. `operator-documents` is the walk: a
+ * discovery pointed at a directory that moved takes it to zero, and every
+ * rule below then holds over the nothing it found. `checker-read-documents`
+ * is `filesRead` off the checker's own envelope, which is how many of those
+ * documents it actually OPENED. That is the number the first one cannot
+ * carry: a checker resolving its reads against the wrong base leaves the
+ * walk healthy at eighteen and opens none of them, and every other signal
+ * on that run, the exit code, the empty finding list and the passing
+ * sentence, is byte-identical to a clean tree.
+ *
+ * Findings are not a unit and never could be: zero findings is the healthy
+ * answer here, so a count of them cannot tell a clean tree from a checker
+ * that read none of it. That distinction is the whole reason a count sits
+ * beside a canary rather than instead of one. The canary proves the checker
+ * still FIRES, on a document written into the OS temp directory; only the
+ * read count proves it REACHED this tree.
  */
-function finish(code) {
+function finish(code, read) {
   var published = examinedCounts.publish([
-    { unit: "operator-documents", n: docs.length },
+    { unit: "operator-documents",     n: docs.length },
+    { unit: "checker-read-documents", n: read },
   ], { tag: TAG });
   process.exit(code !== 0 ? code : published);
 }
@@ -729,6 +754,19 @@ function completionOf(fileArgs) {
   if (env.ok !== true) {
     return { completed: false, why: "its own report says it examined nothing (ok=" + JSON.stringify(env.ok) + ")" };
   }
+  // How many of the documents it was handed it actually opened. This is the
+  // reach half of the verdict and the gate publishes it, so a report that
+  // carries no such field is a TOOLING incompatibility rather than a prose
+  // defect: the alternative is defaulting it to the handed count, which is the
+  // instrument answering its own question.
+  if (!Number.isInteger(env.filesRead) || env.filesRead < 0) {
+    return {
+      completed: false,
+      why: "its report carries no readable `filesRead` count (this gate publishes how many " +
+        "documents the checker opened, and without that number a clean verdict cannot be " +
+        "told apart from a run that read none of them)"
+    };
+  }
   // Every finding is checked for the four fields the reconciliation reads, because the checker is
   // externally versioned and a renamed or missing one is a TOOLING incompatibility. Left unchecked
   // it would arrive as a prose defect: a finding with no `file` reconciles against nothing and
@@ -752,7 +790,12 @@ function completionOf(fileArgs) {
       };
     }
   }
-  return { completed: true, findings: env.findings.length, list: env.findings };
+  return {
+    completed: true,
+    findings:  env.findings.length,
+    list:      env.findings,
+    read:      env.filesRead,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,6 +1064,63 @@ if (run.signal) {
 }
 
 var code = run.status;
+
+// The envelope of the run above, asked for on EVERY path rather than only on a
+// non-zero exit. Two questions are answered from it and each was previously
+// asked on one path only.
+//
+// A non-zero exit carries two different results, and they ask opposite things
+// of the operator: rewrite a sentence, or repair a tool. That classification
+// has always run here.
+//
+// The other question is the one a CLEAN exit could not answer at all. "OK, no
+// findings in 18 operator-facing document(s)" is what this gate printed whether
+// the checker opened those eighteen documents or none of them, and the number
+// beside it was the size of the list handed over rather than the size of the
+// set read. So the envelope is read on the clean path too, and the count that
+// goes out is the checker's own.
+console.error("");
+var outcome = completionOf(docs);
+
+if (!outcome.completed) {
+  fail(4, [
+    "the checker did not complete a run: " + outcome.why + ".",
+    "It exited " + code + " without producing a report.",
+    "",
+    "  checker:   " + checker,
+    "  documents: " + docs.length + ", none of them assessed",
+    "",
+    "This is a failure of the TOOL. Whatever it printed above is not a verdict on the",
+    "prose in this repository - there is no defect here to go and fix. Repair or",
+    "reinstall the checker and run the gate again."
+  ]);
+}
+
+// The reach half. A verdict covering some of a set is not one covering the set,
+// and the direction that hides the fault is the checker reading FEWER than it
+// was handed: those documents drew no finding because nothing looked at them,
+// which is indistinguishable from a document with nothing wrong in it. Reading
+// MORE than it was handed is refused in the same breath, because it means the
+// number no longer describes the set this gate scoped and cannot be published
+// as though it did.
+if (outcome.read !== docs.length) {
+  fail(4, [
+    "the checker was handed " + docs.length + " document(s) and reports opening " +
+      outcome.read + ".",
+    "",
+    "  checker:   " + checker,
+    "  handed:    " + docs.length,
+    "  opened:    " + outcome.read,
+    "",
+    "A document the checker did not open drew no finding because nothing read it, which",
+    "looks exactly like a document with nothing wrong in it. Its verdict therefore covers",
+    "part of the set and is published for none of it.",
+    "",
+    "This is a failure of the TOOL or of the paths it was given, not a verdict on the prose.",
+    "The checker writes each file it could not read to its own stderr above."
+  ]);
+}
+
 if (code === 0) {
   // A clean run is where a stale acceptance hides. The table is reconciled in BOTH directions, so
   // an entry matching nothing has to fail here as much as it does beside a finding. Otherwise the
@@ -1040,28 +1140,12 @@ if (code === 0) {
     ]));
   }
   console.log("");
-  console.log(TAG + " OK, no findings in " + docs.length + " operator-facing document(s)");
-  finish(0);
+  console.log(TAG + " OK, no findings in " + outcome.read + " operator-facing document(s), " +
+    "which is every one of the " + docs.length + " this run discovered and the checker's own " +
+    "count of what it opened rather than this gate's count of what it handed over");
+  finish(0, outcome.read);
 }
 
-// A non-zero exit carries two different results, and they ask opposite things of
-// the operator: rewrite a sentence, or repair a tool. Classify before reporting.
-console.error("");
-var outcome = completionOf(docs);
-
-if (!outcome.completed) {
-  fail(4, [
-    "the checker did not complete a run: " + outcome.why + ".",
-    "It exited " + code + " without producing a report.",
-    "",
-    "  checker:   " + checker,
-    "  documents: " + docs.length + ", none of them assessed",
-    "",
-    "This is a failure of the TOOL. Whatever it printed above is not a verdict on the",
-    "prose in this repository - there is no defect here to go and fix. Repair or",
-    "reinstall the checker and run the gate again."
-  ]);
-}
 if (outcome.findings === 0) {
   fail(4, [
     "the checker exited " + code + " and then reported zero findings when asked for the same",
@@ -1111,7 +1195,7 @@ if (CHECKS !== null) {
   var problems = reconcile(judged, docCache.lineAt, REVIEWED);
   if (problems.length === 0) {
     console.log("");
-    console.log(TAG + " OK, " + docs.length + " document(s); of the " + outcome.findings +
+    console.log(TAG + " OK, " + outcome.read + " document(s) opened; of the " + outcome.findings +
       " finding(s) above, " + reserved.length + " name" + (reserved.length === 1 ? "s" : "") +
       " a domain RFC 2606 reserves and the other " + judged.length + " " +
       (judged.length === 1 ? "is" : "are") + " recorded in REVIEWED and still");
@@ -1119,7 +1203,7 @@ if (CHECKS !== null) {
       (judged.length === 1 ? "it was" : "they were") + " read on. The checker's own report is " +
       "printed in full above, so nothing here is hidden. What these lines add is that " +
       "somebody read it.");
-    finish(0);
+    finish(0, outcome.read);
   }
   fail(1, [
     "the checker reported " + outcome.findings + " finding(s) across " + docs.length +
@@ -1135,7 +1219,7 @@ if (CHECKS !== null) {
 
 var report = [
   "the checker completed and reported " + outcome.findings + " finding(s) across " +
-    docs.length + " document(s).",
+    outcome.read + " document(s).",
   "This run includes the families that are flag-only by design, which the reviewed-exception",
   "table above was never written for, so its findings are a reading list rather than a",
   "verdict. Read them and fix what is a defect.",
@@ -1146,4 +1230,4 @@ var report = [
 ];
 if (strict) fail(1, report);
 report.forEach(function (l) { console.error(TAG + " " + l); });
-finish(0);
+finish(0, outcome.read);

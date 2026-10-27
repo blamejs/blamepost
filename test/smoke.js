@@ -77,7 +77,7 @@
  *                            reporting a quiet green.
  *   SMOKE_OUTPUT_DIR         where the log is written. Default
  *                            `.test-output/` at the repository root.
- *   SMOKE_LIST               1 to print the plan (which files would run,
+ *   SMOKE_LIST               1 to print the listing (which files would run,
  *                            which would be skipped and why) and exit
  *                            without running anything.
  *
@@ -392,20 +392,41 @@ function _runOne(entry) {
   });
 }
 
-async function _pool(items, worker, concurrency) {
+// `onResult` is called as each item finishes, for progress. The report
+// itself is still printed after every lane has drained, because it groups
+// by layer and completion order does not: with more than one lane the
+// files finish interleaved, so a report written in that order would put a
+// layer's files in several places.
+//
+// The progress is what the report cannot be. A run prints nothing between
+// the discovery line and the report, which on the full suite is minutes of
+// silence, and silence is indistinguishable from a hang: a healthy run was
+// killed during this session for looking stopped.
+async function _pool(items, worker, concurrency, onResult) {
   var results = new Array(items.length);
   var next = 0;
+  var done = 0;
   async function lane() {
     for (;;) {
       var i = next++;
       if (i >= items.length) return;
       results[i] = await worker(items[i], i);
+      done += 1;
+      if (typeof onResult === "function") onResult(results[i], done, items.length);
     }
   }
   var lanes = [];
   for (var k = 0; k < Math.min(concurrency, items.length); k++) lanes.push(lane());
   await Promise.all(lanes);
   return results;
+}
+
+// One line per file as it lands, on STDERR so the report on stdout stays
+// exactly what it was and anything parsing that report is unaffected.
+function _progress(r, done, total) {
+  var status = r.code === 0 ? "ok" : (r.code === null ? "KILL" : "FAIL");
+  process.stderr.write("[smoke] " + done + "/" + total + " " + status + " " +
+    r.entry.name + " (" + r.ms + "ms)\n");
 }
 
 function _qualified(entry) {
@@ -450,7 +471,7 @@ function _qualified(entry) {
   }
 
   if (LIST_ONLY) {
-    console.log("plan: " + files.length + " file(s) to run, " + skipped.length + " to skip");
+    console.log("listing: " + files.length + " file(s) to run, " + skipped.length + " to skip");
     files.forEach(function (e) { console.log("  run   " + _qualified(e)); });
     skipped.forEach(function (e) {
       console.log("  skip  " + _qualified(e) + "  (needs a container engine: " +
@@ -471,7 +492,7 @@ function _qualified(entry) {
 
   console.log("");
   console.log("running " + files.length + " file(s), parallelism " + PARALLEL + " on " + os.type());
-  var results = await _pool(files, _runOne, PARALLEL);
+  var results = await _pool(files, _runOne, PARALLEL, _progress);
 
   var totalChecks  = 0;
   var totalSkips   = 0;

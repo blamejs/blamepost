@@ -261,7 +261,16 @@ function theHealthProbeFollowsThePortVariable(config) {
   count("the health probe reads the port from the environment variable the compose " +
     "file sets, rather than carrying a second copy of the number",
     body.indexOf("BLAMEPOST_HTTP_PORT") !== -1, body.slice(0, 200));
-  count("the health probe asks the readiness endpoint",
+  // The liveness endpoint, and the label says so because the value of this
+  // assertion is which of the two endpoints the probe names. `/healthz`
+  // answers 200 for every degraded reading, so a certificate inside its
+  // expiry window and a fresh volume with no hosted domain both leave the
+  // container healthy. `/readyz` refuses for a listener that took no port,
+  // and pointing the container probe there would restart the process for
+  // two conditions a restart cannot address. lib/web/index.js sets
+  // livenessPath and readinessPath to the two paths.
+  count("the health probe asks the liveness endpoint rather than the readiness one, so a " +
+    "degraded reading leaves the container healthy instead of restarting it",
     body.indexOf("/healthz") !== -1, body.slice(0, 200));
   count("the health probe waits before its first verdict counts, so a boot that " +
     "unseals a vault is not restarted underneath itself",

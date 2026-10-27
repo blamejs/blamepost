@@ -58,7 +58,8 @@ var HELD_ADDRESS = "held@" + DOMAIN;
 // Separate from the one above because the erasure vectors count the mail
 // they destroy, and a third message in that mailbox would change a count
 // those vectors are about.
-var DATED_ADDRESS = "dated@" + DOMAIN;
+var DATED_ADDRESS  = "dated@" + DOMAIN;
+var ESCAPE_ADDRESS = "escaped@" + DOMAIN;
 
 // The date that message asks to show, years before any run of this file.
 // RFC 9051 section 6.3.12 lets an APPEND carry it and this server keeps
@@ -582,6 +583,72 @@ function theMessageListingSeparatesArrivalFromTheClientsDate(run, objectId, arri
     JSON.stringify(record));
 }
 
+// A `Subject` is written by whoever sent the message, and this listing
+// prints it to an operator's terminal while they decide which records a
+// court order covers.
+//
+// U+009B is CSI, the single-byte form of the escape sequence the C0
+// range spells as ESC `[`. A terminal printing it acts on the bytes
+// after it rather than showing them, so a subject carrying one can move
+// the cursor over the row above, clear the line, or repaint the `HELD`
+// marker on a different message. The screen this listing already runs
+// leaves the C1 range alone, which is the range that reads as ordinary
+// text to a check written for C0.
+//
+// The byte is built rather than written, because a raw C1 octet does
+// not survive being written into a source file.
+var CSI_BYTE = String.fromCharCode(0x9b);
+
+// The other half of the same question, and the one a check written for
+// escape sequences alone does not ask. A tab is ordinary in free text,
+// which is why the framework's screen keeps it, and it is not ordinary in
+// a column that a heading is sitting over: an inventory row carrying one
+// pushes the identifier and the two dates out from under their headings,
+// so the operator matching a record to a court order reads the wrong
+// column. Written from its code point for the same reason CSI_BYTE is.
+var TAB_BYTE = String.fromCharCode(0x09);
+var C1_RANGE = /[-]/;
+var ESCAPING_SUBJECT_MARKER = "escaping-subject";
+
+function theListingPrintsASubjectWithoutCarryingATerminalCommand(run) {
+  var listed = run(["account", "messages", ESCAPE_ADDRESS,
+    "--reason", "identifying the records a preservation order covers"]);
+  count("an operator can list the mail of the account whose message carries an escape in " +
+    "its subject",
+    listed.status === 0, "exit " + listed.status + " " + listed.both.slice(0, 300));
+
+  count("and nothing the listing prints carries a C1 control, so the row reads as a row " +
+    "rather than acting on the terminal that prints it",
+    !C1_RANGE.test(listed.stdout), JSON.stringify(listed.stdout.slice(0, 400)));
+
+  // The subject is still shown. A screen that dropped the text would
+  // leave the operator unable to match the row to the message somebody
+  // described to them, which is what the column is for.
+  count("and the subject is still there to match a record against",
+    listed.stdout.indexOf(ESCAPING_SUBJECT_MARKER) !== -1,
+    listed.stdout.slice(0, 400));
+
+  // The column question. The listing pads each column to the width of
+  // the widest value in it, and a tab inside a value moves everything
+  // after it to the next tab stop of whatever is printing the line, so
+  // the heading no longer names the column under it.
+  count("and no row carries a tab, so every value stays under the heading that names it",
+    listed.stdout.indexOf(TAB_BYTE) === -1,
+    JSON.stringify(listed.stdout.slice(0, 400)));
+
+  // The machine-readable shape as well, because a script writes what it
+  // reads into a report somebody opens.
+  var records = parseJson(run(["account", "messages", ESCAPE_ADDRESS, "--json",
+    "--reason", "reading the same listing a script would"]).stdout);
+  var carried = (Array.isArray(records) ? records : []).filter(function (r) {
+    return C1_RANGE.test(String(r.subject || "")) || C1_RANGE.test(String(r.from || "")) ||
+      String(r.subject || "").indexOf(TAB_BYTE) !== -1 ||
+      String(r.from || "").indexOf(TAB_BYTE) !== -1;
+  });
+  count("and the JSON listing carries none either",
+    carried.length === 0, JSON.stringify(carried).slice(0, 300));
+}
+
 // ---- runner ----------------------------------------------------------------
 
 // ---- erasing an account names what it could not erase ----------------------
@@ -712,6 +779,17 @@ async function run() {
     var seedFrom = Date.now();
     var backdated = identity.mailbox.appendMessage("INBOX",
       mailFrom("client-dated"), { actor: datedHolder, internalDate: CLIENT_DATE_MS });
+
+    // One account holding a message whose subject carries the byte a
+    // terminal acts on, so the listing that prints it is driven for
+    // real rather than the screen being asserted on its own.
+    var escaped = await identity.accounts.create({
+      address: ESCAPE_ADDRESS, password: ALICE_PASSWORD });
+    identity.mailbox.appendMessage("INBOX",
+      mailFrom(ESCAPING_SUBJECT_MARKER + CSI_BYTE + "2K" + CSI_BYTE + "1;31m" +
+        TAB_BYTE + "held"),
+      { actor: { id: escaped.id, address: escaped.address, domain: escaped.domain,
+        roles: ["account"] } });
     var arrivalDays = [isoDay(seedFrom), isoDay(Date.now())].filter(
       function (day, at, all) { return all.indexOf(day) === at; });
     count("the fixture holds a message whose client-set date is years before this run, so " +
@@ -749,6 +827,7 @@ async function run() {
     aDomainCanBeTurnedOffWithoutLosingIt(cli);
     answeringAPreservationOrderAtTheCommandLine(cli, underOrder.objectid);
     theMessageListingSeparatesArrivalFromTheClientsDate(cli, backdated.objectid, arrivalDays);
+    theListingPrintsASubjectWithoutCarryingATerminalCommand(cli);
     erasingAnAccountNamesWhatItKept(cli);
     liftingAPreservationOrderAtTheCommandLine(cli, underOrder.objectid);
     await abandoningAQueuedMessageIsCheckedAndRecorded(cli, dataDir);

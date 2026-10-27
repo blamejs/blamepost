@@ -10,7 +10,7 @@ Thanks for running blamepost. This page points you at the right channel.
 | Fix a delivery problem | [docs/operator-guide.md](docs/operator-guide.md), then `blamepost doctor` |
 | Understand how it is built | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | See what changed between versions | [CHANGELOG.md](CHANGELOG.md) |
-| See what is planned | [ROADMAP.md](ROADMAP.md) |
+| See what is targeted or accepted | [ROADMAP.md](ROADMAP.md) |
 | Ask a usage question or propose a feature | [GitHub Discussions](https://github.com/blamejs/blamepost/discussions) |
 | Report a reproducible bug | [GitHub Issues](https://github.com/blamejs/blamepost/issues) |
 | Report a security vulnerability | **Privately.** See [SECURITY.md](SECURITY.md). Never in an issue or a discussion. |

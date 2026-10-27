@@ -15,8 +15,9 @@ var nodeFs   = require("node:fs");
 var nodeOs   = require("node:os");
 var nodePath = require("node:path");
 
-var helpers = require("../helpers");
-var certs   = require("../helpers/certs");
+var helpers   = require("../helpers");
+var certs     = require("../helpers/certs");
+var cliHelper = require("../helpers/cli");
 var b      = require("../../lib/vendor/blamejs");
 var config = require("../../lib/config");
 var store  = require("../../lib/store");
@@ -131,6 +132,36 @@ function testConfigCoercion(root, dataDir) {
   count("blamepost.config.load folds the hostname", cfg.hostname === "mx.example.com", cfg.hostname);
 }
 
+// The shared secret met where an operator meets it: a command run
+// against an environment holding the same string in both settings.
+//
+// The loader is what refuses, and every subcommand calls it before it
+// does anything else, so the operator sees this at the first command
+// they run rather than at the first sign-in. Spawned, because the
+// question is whether the process stops: a refusal raised inside a
+// function nobody called is a different guarantee from a command that
+// exits non-zero and says which two settings collide.
+function testASharedSecretStopsACommand(dataDir, workDir) {
+  var run = cliHelper.create({
+    dataDir:         dataDir,
+    workDir:         workDir,
+    vaultPassphrase: VAULT_PASSPHRASE,
+    env: {
+      BLAMEPOST_ADMIN_EMAIL:    "operator@example.com",
+      BLAMEPOST_ADMIN_PASSWORD: VAULT_PASSPHRASE,
+    },
+  });
+  var result = run(["account", "list"]);
+  count("a command started with one secret in both settings refuses rather than running",
+    result.status !== 0, "exit " + result.status + " " + result.both.slice(0, 300));
+  count("and the refusal names both settings, so the operator changes the right one",
+    result.both.indexOf("BLAMEPOST_ADMIN_PASSWORD") !== -1 &&
+      result.both.indexOf("BLAMEPOST_VAULT_PASSPHRASE") !== -1,
+    result.both.slice(0, 400));
+  count("and it says what sharing them costs rather than only that it is refused",
+    /sealed store|key for everything at rest/i.test(result.both), result.both.slice(0, 400));
+}
+
 async function testConfigRefusals(root, dataDir) {
   await refuses("blamepost.config.load refuses a missing hostname", "config/missing-required",
     function () {
@@ -174,6 +205,35 @@ async function testConfigRefusals(root, dataDir) {
         cwd: root,
       });
     });
+
+  // One secret protecting two things. The vault passphrase unseals the
+  // DKIM private keys and every sealed field in the store; the
+  // administrator password signs somebody in to a mailbox. An operator
+  // who pastes the same string into both has given the sealed volume the
+  // exposure of a login, and this refusal is the only thing that tells
+  // them so.
+  await refuses("blamepost.config.load refuses an administrator password that is the vault " +
+    "passphrase", "config/reused-secret", function () {
+      config.load({
+        env: withEnv(dataDir, {
+          BLAMEPOST_ADMIN_EMAIL:    "operator@example.com",
+          BLAMEPOST_ADMIN_PASSWORD: VAULT_PASSPHRASE,
+        }),
+        cwd: root,
+      });
+    });
+
+  // And the near miss, so the check above is reading the values rather
+  // than the presence of both settings.
+  var distinct = config.load({
+    env: withEnv(dataDir, {
+      BLAMEPOST_ADMIN_EMAIL:    "operator@example.com",
+      BLAMEPOST_ADMIN_PASSWORD: VAULT_PASSPHRASE + " and one word more",
+    }),
+    cwd: root,
+  });
+  count("an administrator password that merely resembles the passphrase still loads",
+    distinct.adminEmail === "operator@example.com", String(distinct.adminEmail));
 
   await refuses("blamepost.config.load refuses a certificate named with no key",
     "config/incomplete-tls-pair", function () {
@@ -358,14 +418,12 @@ function checkStructured(where, cfg) {
     cfg.outboundRetry.maxAttempts === 7 && cfg.outboundRetry.backoffMs.length === 2);
   count("the outbound timeouts are honored from " + where,
     cfg.outboundTimeouts.mxLookupMs === 5000 && cfg.outboundTimeouts.perHostMs === 30000);
-  // REQUIRETLS is deliberately absent from the fixture above. Its only
-  // non-default value is refused by the loader, because this server
-  // cannot put the parameter on the wire, so asking for it here would
-  // stop the load rather than round-trip. Its origin handling is not
-  // untested: require-tls-refusal drives the refusal through the
-  // environment, the configuration file and a composition object, and a
-  // refusal that names the origin can only fire on a value the loader
-  // read from that origin. The default is asserted below.
+  // REQUIRETLS is deliberately absent from the fixture above, and its
+  // origin handling is not untested: require-tls-posture round-trips it
+  // through the environment, the configuration file and a composition
+  // object, in both spellings, because a posture that is read from one
+  // origin and dropped from another is one an operator cannot rely on.
+  // The default is asserted below.
   count("the security contact is honored from " + where,
     cfg.securityContact.length === 1 && cfg.securityContact[0] === "mailto:security@example.com");
   count("the disclosure policy page is honored from " + where,
@@ -1337,6 +1395,7 @@ async function run() {
     testConfigDefaults(root, dataDir);
     testConfigCoercion(root, dataDir);
     await testConfigRefusals(root, dataDir);
+    testASharedSecretStopsACommand(dataDir, workDir);
     testConfigFileOverlay(root, dataDir);
     testStructuredFromEnvironment(root, dataDir);
     testStructuredFromFile(root, dataDir);

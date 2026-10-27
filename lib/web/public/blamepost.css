@@ -661,6 +661,8 @@ select { max-width: 100%; }
 }
 .mark-flag { background: var(--warn-soft); color: var(--warn); }
 .mark-hold { background: var(--bad-soft); color: var(--bad); }
+.mark-files { background: var(--accent-soft); color: var(--accent); }
+.mark-files-unknown { border: 1px dashed var(--line); }
 
 .pager { display: flex; gap: var(--s2); margin-top: var(--s4); }
 
@@ -796,6 +798,37 @@ select { max-width: 100%; }
   border-left: 3px solid var(--line-strong);
   padding-left: var(--s3);
 }
+
+/* The files a message carries, listed under its body. The name is the
+   only stranger-chosen value here, and it wraps rather than being cut:
+   a name shortened in the middle hides the extension, which is the part
+   of it the reader is deciding on. */
+.partbar {
+  padding: var(--s4) var(--s5);
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.parts-head {
+  margin: 0 0 var(--s3);
+  font-size: var(--t-sm);
+  font-weight: 640;
+  color: var(--ink-2);
+}
+.part-list { list-style: none; margin: 0; padding: 0; }
+.part-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s2) var(--s3);
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--t-sm);
+}
+.part-row:last-child { border-bottom: 0; }
+.part-link { flex: 1 1 18ch; min-width: 0; }
+.part-name { overflow-wrap: anywhere; }
+.part-type, .part-size { color: var(--ink-3); font-size: var(--t-xs); white-space: nowrap; }
+.partbar .fineprint { margin-top: var(--s3); }
 
 /* ---------------------------------------------------------------- *
  * Cards

@@ -1,0 +1,30 @@
+Authentication-Results: mx.example.com; spf=pass smtp.mailfrom=dmarc-noreply@reporter.example; dkim=pass header.d=reporter.example; dmarc=pass header.from=reporter.example
+From: dmarc-noreply@reporter.example
+To: dmarc-reports@example.com
+Subject: Report Domain: example.com Submitter: reporter.example
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="bnd-report"
+
+--bnd-report
+Content-Type: text/plain; charset=utf-8
+
+This is an aggregate report from reporter.example.
+
+--bnd-report
+Content-Type: application/zip
+Content-Disposition: attachment; filename="reporter.example!example.com!1750000000!1750086400.zip"
+Content-Transfer-Encoding: base64
+
+UEsDBBQAAAgIABlWMV3ArKN9fgEAADsDAAA2AAAAcmVwb3J0ZXIuZXhhbXBsZSFleGFtcGxlLmNv
+bSExNzUwMDAwMDAwITE3NTAwODY0MDAueG1sfVPLUuswDN3zFZnuGydweSxUcVf3C7jrjGurrSF+
+jOzw+nrGVWjKwJCNpSMd+Rw7hvtXPzbPxNnFsFn1bbdqKJhoXdhvVv8f/q3vVs09XsCOyG61ecKL
+pgGmFLkMnoq2uuiKNQ1E3g9Be0IpE7f0qn0aCdSpJJ3ktRvRes1mHSJTGt/+fidJlzDmHZ3Fd5fW
+Xdf1oBZMeqwuNLAOe0LY0t4F7G+vO/lACQIUrMB3N38qXHNQZ9TqT/1gEFIcnXkb0rQdXT7Qadfo
+tQs4q25N9KBmDLR9ch4ZlASgc9od07oKPSHTI5kCKiHkJcsJIZmCfRVZg6OunzQAk4n8KYfjC0KO
+ExsaXMLL7qrt2r6/avsO1IKDiVMoeAtKgiN5MUnPepx0IYtgXU4xu+JiwBADgTpH4Ggs6ZxBicdq
+TfIanSQvE0WnqkIldJZCcTtHnBEOpC3xsOPov57peQHUOUem6KkcBqY8jSWLil+vRjpnpXPyKfnL
+qPl/kCMGtbyDD1BLAQI/AxQAAAgIABlWMV3ArKN9fgEAADsDAAA2AAAAAAAAAAAAAAAAAAAAAABy
+ZXBvcnRlci5leGFtcGxlIWV4YW1wbGUuY29tITE3NTAwMDAwMDAhMTc1MDA4NjQwMC54bWxQSwUG
+AAAAAAEAAQBkAAAA0gEAAAAA
+
+--bnd-report--

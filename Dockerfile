@@ -77,12 +77,12 @@
 #
 #   docker run --rm --entrypoint /usr/bin/node <image>@<digest> -p process.version
 #
-# node: 26.3.1 on linux/amd64 in sha256:b165c3da2bc85bb4d7a4749854a087996bf51f540bc0655689ab5c43409bb741
-# node: 26.3.1 on linux/arm64 in sha256:b165c3da2bc85bb4d7a4749854a087996bf51f540bc0655689ab5c43409bb741
-ARG BASE_SRC=cgr.dev/chainguard/node:latest-dev@sha256:b165c3da2bc85bb4d7a4749854a087996bf51f540bc0655689ab5c43409bb741
-# node: 26.3.1 on linux/amd64 in sha256:05d2ed6a0b3e6d3b9ca1d7f0b76e88dd06b91fa95c4f1e849f99bba7bd5a21b8
-# node: 26.3.1 on linux/arm64 in sha256:05d2ed6a0b3e6d3b9ca1d7f0b76e88dd06b91fa95c4f1e849f99bba7bd5a21b8
-ARG BASE_RUNTIME=cgr.dev/chainguard/node:latest@sha256:05d2ed6a0b3e6d3b9ca1d7f0b76e88dd06b91fa95c4f1e849f99bba7bd5a21b8
+# node: 26.12.1 on linux/amd64 in sha256:1ac2b87f6683faf0b4df19431bf73d0a40c5bcaa0da2073cad9f815571f593e4
+# node: 26.12.1 on linux/arm64 in sha256:1ac2b87f6683faf0b4df19431bf73d0a40c5bcaa0da2073cad9f815571f593e4
+ARG BASE_SRC=cgr.dev/chainguard/node:latest-dev@sha256:1ac2b87f6683faf0b4df19431bf73d0a40c5bcaa0da2073cad9f815571f593e4
+# node: 26.12.1 on linux/amd64 in sha256:efa14a42578e5931c351eb562ee2bed3e9c55e9abbfd683e218c88ab3889bcba
+# node: 26.12.1 on linux/arm64 in sha256:efa14a42578e5931c351eb562ee2bed3e9c55e9abbfd683e218c88ab3889bcba
+ARG BASE_RUNTIME=cgr.dev/chainguard/node:latest@sha256:efa14a42578e5931c351eb562ee2bed3e9c55e9abbfd683e218c88ab3889bcba
 
 FROM ${BASE_SRC} AS src
 WORKDIR /home/node
@@ -151,9 +151,9 @@ COPY --from=src /usr/lib/libatomic.so.1* /usr/lib/
 #      is the host's own 1024 and where the flag above is refused rather
 #      than applied: a namespaced sysctl cannot be set for a namespace
 #      the container is sharing. Note that mapped ports rewrite the peer
-#      address unless the
-#      host network is used, which affects RBL and rate-limit accuracy.
-#      The operator guide covers the trade-off.
+#      address unless the host network is used, so every per-peer budget
+#      the listeners keep counts the runtime's own address instead of the
+#      sender's. The operator guide covers the trade-off.
 #
 # Available environment variables (operator-set at runtime):
 #
@@ -198,23 +198,30 @@ COPY --from=src /usr/lib/libatomic.so.1* /usr/lib/
 #
 #                                 IMAP and POP3 negotiate TLS in band, so
 #                                 nothing binds 993 or 995 and there is no
-#                                 variable for either. A client that needs
-#                                 implicit TLS on those ports wants a
-#                                 terminator in front of 143 and 110.
+#                                 variable for either. A terminator in
+#                                 front of 143 or 110 does not supply
+#                                 them: the listener is handed a
+#                                 plaintext connection and refuses every
+#                                 credential offered over it. A client
+#                                 that can only do implicit TLS has no
+#                                 route to a mailbox on this image.
 #
 #   docs/operator-guide.md carries the full settings reference. Every
 #   variable this server reads is in the table there, with its default.
 #
 #   BLAMEPOST_TLS_CERT            certificate chain path      (REQUIRED by serve)
 #   BLAMEPOST_TLS_KEY             matching private key path   (REQUIRED by serve)
-#                                 Every listener requires TLS and none has a
-#                                 plaintext mode, so serve refuses to start
+#                                 Every mail listener requires TLS and none
+#                                 has a plaintext mode, so serve refuses to start
 #                                 without the pair. Issuing and renewing it is
 #                                 the operator's job; mount it into
 #                                 /var/lib/blamepost/tls or bind a host path.
 #
 #   BLAMEPOST_LOG_LEVEL           debug | info | warn | error | fatal
 #                                                             (default: info)
+#                                 Only debug changes what is written. It adds
+#                                 the entries about what this server recovered
+#                                 from. The levels above info remove nothing.
 ENV NODE_ENV=production \
     BLAMEPOST_DATA_DIR=/var/lib/blamepost \
     BLAMEPOST_HTTP_PORT=8080 \
@@ -250,6 +257,11 @@ COPY --from=src --chown=65532:65532 /home/node/data-skeleton /var/lib/blamepost
 # binary is the one interpreter the image is guaranteed to carry: it is
 # the entry point. Both directories are owned by the runtime user, so no
 # step here needs root.
+# hadolint shell-checks the argument even in exec form, where Docker runs
+# the binary directly and the string is never shell-interpreted. shellcheck
+# reads the parentheses of `require('node:fs')` as shell syntax and stops
+# there.
+# hadolint ignore=SC1088
 RUN ["/usr/bin/node", "-e", "var fs=require('node:fs');fs.chmodSync('/app',0o755);fs.chmodSync('/var/lib/blamepost',0o750);"]
 
 # Mail listeners. 110 is declared because POP3 binds it once the operator
@@ -260,25 +272,34 @@ EXPOSE 8080 8443
 
 VOLUME ["/var/lib/blamepost"]
 
-# The endpoint reports the store and the listener inventory, not just
-# that a process is running. It answers ok when every listener that was
-# meant to take a port has one, and degraded when this server is holding
-# one shut on purpose and can say why. A fresh volume hosts no domain,
-# so port 25 has nothing to receive for until `blamepost init` runs.
-# Both of those are a container that is up and serving. A listener that
-# was supposed to bind and did not is the failing case, and it fails
-# /readyz rather than this endpoint, because no restart frees a port
-# something else is holding.
+# The endpoint reports the store, the listener inventory, the certificate
+# and the outbound queue, not just that a process is running. It answers
+# ok when every one of those passes, and degraded when this server is
+# holding a listener shut on purpose and can say why. A fresh volume
+# hosts no domain, so port 25 has nothing to receive for until
+# `blamepost init` runs. Both of those are a container that is up and
+# serving.
+#
+# A listener that was supposed to take a port and could not is not a
+# reading this endpoint produces. The start refuses on that listener,
+# releases every port it had already taken, and the process exits, so
+# what you get is an exited container and the bind error in
+# `docker logs`. The check that covers it lives on /readyz, where it
+# refuses with a 503 rather than reducing the verdict.
 #
 # Two other checks answer degraded and are not startup conditions: the
 # certificate inside its expiry window, and the outbound queue no longer
 # moving mail. Both answer 200, so this probe calls the container healthy
 # for either, and both are slow failures that arrive weeks after the
-# thing that caused them. Neither is critical on either tier on purpose,
+# thing that caused them. Neither is critical on either probe on purpose,
 # because a restart neither renews a certificate nor drains a queue, so
 # failing here would ask a supervisor for the one action that cannot
 # help. That puts the burden on whoever watches this container: alert on
 # a degraded reading from /readyz, not only on an unhealthy container.
+#
+# A 503 from this endpoint means the message store did not answer. It is
+# the one check that refuses here rather than reducing the verdict, and
+# it is the one condition a restart can address.
 # compose.yml carries the same note beside its copy of this probe.
 #
 # The probe writes what it read before it exits. A failing streak beside

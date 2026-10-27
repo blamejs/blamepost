@@ -65,6 +65,10 @@ var ANSWERING_RESOLVER = {
     return Promise.reject(new Error("no mail exchanger for " + name));
   },
   queryTxt: function () { return Promise.resolve([]); },
+  // The posture checker asks every hosted domain for a TLSA record and
+  // refuses a handle that cannot answer, so a fixture standing in for a
+  // resolver carries this reader whether or not its own subject is DANE.
+  queryTlsa: function () { return Promise.resolve({ rrs: [] }); },
   queryPtr: function () { return Promise.resolve([]); },
   query:    function () { return Promise.resolve([]); },
 };

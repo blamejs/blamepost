@@ -4,7 +4,6 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <meta name="referrer" content="no-referrer">
   <title>{% block title %}blamepost{% endblock %}</title>
   <link rel="stylesheet" href="/static/blamepost.css">
   <link rel="icon" type="image/svg+xml" href="/static/assets/favicon.svg">
@@ -30,7 +29,7 @@
     <nav class="topnav" aria-label="Account">
       {{> theme-switch }}
       {% if account %}
-      <a class="topnav-link" href="{{ inboxHref }}">Mail</a>
+      <a class="topnav-link" href="/{{ inboxHref }}">Mail</a>
       {% if isAdmin %}<a class="topnav-link" href="/admin">Admin</a>{% endif %}
       <span class="whoami" title="{{ account.address }}">{{ accountName }}</span>
       <form method="post" action="/sign-out" class="inline-form">

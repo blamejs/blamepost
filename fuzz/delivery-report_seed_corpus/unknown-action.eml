@@ -1,0 +1,21 @@
+From: MAILER-DAEMON@relay.example.net
+To: postmaster@example.com
+Subject: Delivery Status Notification
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=delivery-status; boundary="rpt-4"
+
+--rpt-4
+Content-Type: text/plain; charset=us-ascii
+
+The recipient group carries an action RFC 3464 does not define.
+
+--rpt-4
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns; relay.example.net
+
+Final-Recipient: rfc822; bob@example.net
+Action: vanished
+Status: 5.0.0
+
+--rpt-4--

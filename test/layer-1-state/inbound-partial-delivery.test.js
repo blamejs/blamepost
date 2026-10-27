@@ -31,16 +31,21 @@
  *   - the recipient who could not take it has nothing, which is the
  *     condition a report to the sender exists for.
  *
- * A full mailbox is the door that reaches the handoff, and it is the
- * only door left. An address with no mailbox behind it never gets that
- * far: the listener answers a name it does not hold with `550 5.1.1` at
- * RCPT, so the peer withdraws that recipient before it opens DATA and
- * there is nothing for the handoff to collect. That split is on purpose
- * and it runs on the status the condition carries. A mailbox that is
- * full or an account that is suspended is temporary, the owner can
- * clear it, and a permanent refusal on the wire would bounce their mail
- * for a condition that ends by itself, so those are still met at the
- * handoff exactly as before.
+ * A full mailbox is the ordinary door to the handoff. An address with
+ * no mailbox behind it never gets that far: the listener answers a name
+ * it does not hold with `550 5.1.1` at RCPT, so the peer withdraws that
+ * recipient before it opens DATA and there is nothing for the handoff to
+ * collect. That split is on purpose and it runs on the status the
+ * condition carries. A mailbox that is full or an account that is
+ * suspended is temporary, the owner can clear it, and a permanent
+ * refusal on the wire would bounce their mail for a condition that ends
+ * by itself, so those are still met at the handoff exactly as before.
+ *
+ * The other door is the message. A structure the parser will not walk
+ * is refused after DATA like a full mailbox and is nothing like one: no
+ * attempt reads it, so the peer is told `554 5.6.0` and stops. This run
+ * drives both doors and the case where one message meets both, where
+ * the single reply covering both recipients has to be the temporary one.
  *
  * Which leaves partial delivery with a second half to hold, and it is
  * the half a mailing list depends on. A refusal at RCPT is a verdict
@@ -104,16 +109,43 @@ var ZONE = Object.freeze({
 var CAP_BYTES = 4096;
 var BODY_PAD  = 8192;
 
+// One level past the nesting depth THREAT-MODEL.md publishes, which is
+// the shortest way to a message this server refuses for what it is
+// rather than for who it was sent to.
+var PAST_THE_STRUCTURE_CAP = 17;
+
 var SHUTDOWN_TIMEOUT_MS = 5000;
 
-function peerMessage(recipient) {
-  var body = new Array(BODY_PAD).join("x");
-  return "Message-ID: <partial-delivery-1@partner.example.net>\r\n" +
+// The message the peer sends. With `nesting`, the body is wrapped in
+// that many multipart boundaries, so the message crosses the parser's
+// structure cap instead of a mailbox's quota.
+//
+// Every boundary token is the same width and none of them is a prefix
+// of another. RFC 2046 section 5.1.1 matches a boundary on the start of
+// a line, so a run named b1 also matches the delimiter of a run named
+// b10: a fixture numbered without padding collapses at the tenth level
+// and stops nesting there, while still looking like the message it was
+// written to be.
+function peerMessage(recipient, opts) {
+  var nesting = (opts && opts.nesting) || 0;
+  var headers = "Message-ID: <partial-delivery-1@partner.example.net>\r\n" +
     "From: Sender <" + SENDER + ">\r\n" +
     "To: <" + recipient + ">\r\n" +
     "Subject: One message for two mailboxes\r\n" +
-    "Date: Sat, 22 Aug 2026 09:00:00 +0000\r\n" +
-    "\r\n" + body + "\r\n";
+    "Date: Sat, 22 Aug 2026 09:00:00 +0000\r\n";
+  var body = new Array(BODY_PAD).join("x");
+  if (nesting === 0) return headers + "\r\n" + body + "\r\n";
+
+  var part = "Content-Type: text/plain\r\n\r\n" + body + "\r\n";
+  for (var i = nesting; i >= 1; i -= 1) {
+    var boundary = "nest" + String(i + 100).slice(1) + "x";
+    part = "Content-Type: multipart/mixed; boundary=\"" + boundary + "\"\r\n" +
+      "\r\n" +
+      "--" + boundary + "\r\n" +
+      part +
+      "--" + boundary + "--\r\n";
+  }
+  return headers + "MIME-Version: 1.0\r\n" + part;
 }
 
 function held(identity, account) {
@@ -123,7 +155,7 @@ function held(identity, account) {
 // One inbound message from a peer, over a real socket, to whatever
 // recipients it is given. Returns what the peer was told at each step,
 // which is the whole of what a real peer decides its next move from.
-async function deliverFromAPeer(port, caPem, rcpts, label) {
+async function deliverFromAPeer(port, caPem, rcpts, label, messageOpts) {
   var peer = await Wire.mx(port, {
     caPem: caPem, servername: HOSTNAME, helo: PEER_NAME, label: label,
   });
@@ -140,7 +172,7 @@ async function deliverFromAPeer(port, caPem, rcpts, label) {
     // RFC 5321 section 4.5.2 dot stuffing. The body here carries no
     // leading dot, and doing it anyway keeps this reader honest about
     // what it is sending.
-    var payload = peerMessage(rcpts[0]).replace(/\r\n\./g, "\r\n..");
+    var payload = peerMessage(rcpts[0], messageOpts).replace(/\r\n\./g, "\r\n..");
     peer.sendRaw(payload + "\r\n.\r\n", "<the message>");
     var data = await peer.read(/^\d{3} /m, "DATA answered");
     return { mail: mail.trim(), rcpts: rcptReplies, data: data.trim() };
@@ -257,6 +289,41 @@ async function testWhenNothingLandsThePeerIsToldToRetry(port, caPem, identity, f
     (held(identity, full) + held(identity, alsoFull)) + " against " + before);
 }
 
+// Which of the two answers a peer gets runs on what the condition is,
+// not on where in the delivery it was met.
+//
+// A message that declares more structure than the parser walks is
+// refused by its own bytes, so it meets the same answer on every
+// attempt and the peer is told to stop. A full mailbox is emptied by
+// its owner, so the peer is told to keep the message and come back.
+// RFC 5321 section 4.2.1 is what makes the difference act: the peer
+// reads the first digit and either retries or reports to its sender.
+//
+// One message that meets both at once still gets one reply, and it has
+// to be the temporary one. A permanent answer covering a recipient
+// whose condition clears returns mail that was going to be deliverable,
+// which is the direction of this classification that cannot be taken
+// back.
+async function testTheAnswerRunsOnWhatTheConditionIs(port, caPem, identity, taker, full) {
+  var before = held(identity, taker);
+  var nested = { nesting: PAST_THE_STRUCTURE_CAP };
+
+  var alone = await deliverFromAPeer(port, caPem, [taker.address], "mx-nested", nested);
+  count("a message whose structure this server will not walk is refused permanently, " +
+    "carrying the RFC 3463 content status rather than a code that asks for it again",
+    alone.data.indexOf("554 5.6.0") === 0, alone.data);
+  count("and nothing was stored, so the sender is told once", held(identity, taker) === before,
+    held(identity, taker) + " against " + before);
+
+  var mixed = await deliverFromAPeer(port, caPem, [taker.address, full.address],
+    "mx-nested-and-full", nested);
+  count("the same message addressed to a full mailbox as well is answered temporarily, " +
+    "because the one reply covers a recipient whose condition clears",
+    mixed.data.indexOf("451 4.3.0") === 0, mixed.data);
+  count("and still nothing was stored", held(identity, taker) === before,
+    held(identity, taker) + " against " + before);
+}
+
 // ---- runner ----------------------------------------------------------------
 
 async function run() {
@@ -339,6 +406,10 @@ async function run() {
     // count arithmetic readable.
     await testWhenNothingLandsThePeerIsToldToRetry(mxPort, material.caPem,
       identity, full, alsoFull);
+    // Stores nothing either, so it runs before the two cases whose
+    // arithmetic reads the taker's count.
+    await testTheAnswerRunsOnWhatTheConditionIs(mxPort, material.caPem,
+      identity, taker, full);
     await testOneClosedAddressDoesNotCostTheRestOfTheMessage(mxPort, material.caPem,
       identity, taker);
     await testOneFullMailboxDoesNotCostTheOtherRecipient(mxPort, material.caPem,

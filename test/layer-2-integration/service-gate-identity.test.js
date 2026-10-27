@@ -117,7 +117,7 @@ function startFixture(specs, tlsFiles) {
       if (!m || settled) return;
       settled = true;
       clearTimeout(ceiling);
-      resolve({ ports: JSON.parse(m[1]), stop: function () {
+      resolve({ ports: JSON.parse(m[1]), pid: child.pid, stop: function () {
         try { child.kill("SIGKILL"); } catch (_e) { /* already gone */ }
       } });
     });
@@ -142,7 +142,7 @@ function startFixture(specs, tlsFiles) {
 // scenario is about. The port override is the same one an operator uses
 // for a deployment that moved a port, so nothing here reaches a code
 // path a real run does not.
-async function runGate(names, ports) {
+async function runGate(names, ports, extra) {
   var pairs = names.map(function (n, i) { return n + "=" + ports[i]; }).join(",");
   var env = Object.assign({}, process.env, {
     BLAMEPOST_SERVICE_HOST:             "127.0.0.1",
@@ -151,9 +151,14 @@ async function runGate(names, ports) {
   });
   // The gate reads these for the browser surface, and a machine that has
   // them set for a real server would otherwise move the row out from
-  // under the fixture the scenario just bound.
+  // under the fixture the scenario just bound. The same goes for the
+  // process pin and the declaration that turns the attribution off:
+  // a scenario that did not ask for either has to run without one.
   delete env.BLAMEPOST_HTTP_PORT;
   delete env.BLAMEPOST_HTTPS_PORT;
+  delete env.BLAMEPOST_SERVICE_PID;
+  delete env.BLAMEPOST_SERVICE_PROCESS_CHECK;
+  Object.assign(env, extra || {});
   return await spawnRun.runNodeScript([CHECK_SERVICES].concat(names), {
     cwd:       helpers.REPO_ROOT,
     env:       env,
@@ -244,6 +249,95 @@ async function aStaleBuildOfThisServerIsRefused() {
     listeners: [{ kind: "http",
       body: JSON.stringify({ status: "ok", version: "0.0.0-stale" }) }],
   });
+}
+
+// What this server puts on the wire, as one listener set. Two processes
+// serving it are indistinguishable to every probe the gate makes: the
+// same greetings, the same protocol words, the same build reported at
+// the health path.
+function thisServersSignals() {
+  return [
+    { kind: "line", text: "220 " + HOSTNAME + " ESMTP blamepost ready\r\n" },
+    { kind: "line", text: "* OK [CAPABILITY IMAP4rev2 STARTTLS AUTH=PLAIN] " +
+      HOSTNAME + " IMAP4rev2 blamepost\r\n" },
+    { kind: "http", body: JSON.stringify({ status: "ok", version: pkg.version }) },
+  ];
+}
+
+// The case neither signal above can see.
+//
+// A greeting says which SOFTWARE answered and a version says which
+// BUILD. Two processes running the same build have neither to separate
+// them, and that pair is the ordinary state of a developer machine: a
+// server started for an earlier session is still holding the mail ports
+// while the one under test binds what is left. Measured on this
+// machine, with a blamepost from a previous week on 25, 143, 465, 587
+// and 4190 and no version bump between them, the gate reported five
+// endpoints answering as this server and exited zero.
+//
+// So the gate is shown two processes emitting the same bytes and asked
+// which one it is talking to. Both are started for every case here
+// rather than one being reused, because the whole assertion is about
+// telling apart two things a probe cannot.
+async function aSecondInstanceOfThisSoftwareIsRefused() {
+  var underTest = await startFixture(thisServersSignals());
+  var other     = null;
+  try {
+    other = await startFixture(thisServersSignals());
+
+    // Canary first. The two are byte-identical on the wire, so a gate
+    // that refused both would satisfy every assertion below while
+    // failing the stack it exists to admit.
+    var alone = await runGate(["mx", "imap", "http"], underTest.ports);
+    count("two instances: the one under test is still accepted on its own",
+      alone.code === 0, "exit " + alone.code + ": " + tail(alone.out, 3));
+
+    // The measured shape: the browser surface is the process under test
+    // and the mail ports are the older one. This is the combination that
+    // used to pass, and the one that would have run the whole interop
+    // suite against a build nobody was testing.
+    var mixed = await runGate(["mx", "imap", "http"],
+      [other.ports[0], other.ports[1], underTest.ports[2]]);
+    count("two instances: mail ports held by the other process are refused",
+      mixed.code !== 0, "exit " + mixed.code + ": " + tail(mixed.out, 4));
+    count("two instances: and the refusal names both process ids",
+      /DIFFERENT PROCESS/.test(mixed.out) &&
+      mixed.out.indexOf("pid " + other.pid) !== -1 &&
+      mixed.out.indexOf("pid " + underTest.pid) !== -1,
+      tail(mixed.out, 4));
+
+    // The other half. Every row is the other process, coherently, so
+    // nothing in the probe set disagrees with anything else and only the
+    // caller naming what it started can say this is the wrong server.
+    var pinned = await runGate(["mx", "imap", "http"], other.ports,
+      { BLAMEPOST_SERVICE_PID: String(underTest.pid) });
+    count("two instances: a whole coherent stack that is the wrong process is refused",
+      pinned.code !== 0, "exit " + pinned.code + ": " + tail(pinned.out, 4));
+    count("two instances: and the refusal names the pin it was measured against",
+      /BLAMEPOST_SERVICE_PID/.test(pinned.out), tail(pinned.out, 4));
+
+    // Without the pin, that same coherent stack passes, and the reason
+    // is worth pinning here rather than discovering later: a run with no
+    // caller to name the process derives one from the rows it has, so a
+    // stack entirely served by the wrong process agrees with itself.
+    // The pin is what closes that, and this case is what says so.
+    var coherent = await runGate(["mx", "imap", "http"], other.ports);
+    count("two instances: with no pin, a wholly coherent wrong stack is not separable",
+      coherent.code === 0, "exit " + coherent.code + ": " + tail(coherent.out, 3));
+
+    // The declaration, which is the only way past the attribution and
+    // says so in the transcript rather than silently.
+    var off = await runGate(["mx", "imap", "http"],
+      [other.ports[0], other.ports[1], underTest.ports[2]],
+      { BLAMEPOST_SERVICE_PROCESS_CHECK: "off" });
+    count("two instances: the declaration turns the attribution off",
+      off.code === 0, "exit " + off.code + ": " + tail(off.out, 3));
+    count("two instances: and the transcript says no row was attributed",
+      /no row below is attributed to a process/.test(off.out), tail(off.out, 4));
+  } finally {
+    underTest.stop();
+    if (other !== null) other.stop();
+  }
 }
 
 // Canary. Every case above would also be reported by a gate that
@@ -385,6 +479,7 @@ async function run() {
 
     await aForeignListenerIsRefused(tls);
     await aStaleBuildOfThisServerIsRefused();
+    await aSecondInstanceOfThisSoftwareIsRefused();
     await whatThisServerSaysIsAccepted(tls);
     return helpers.getChecks();
   } finally {

@@ -34,7 +34,6 @@
  */
 
 var nodeFs   = require("node:fs");
-var nodeNet  = require("node:net");
 var nodePath = require("node:path");
 
 var helpers   = require("../helpers");
@@ -60,24 +59,6 @@ var UNRESOLVED_MARK = "  ?     ";
 
 function parseJson(text) {
   try { return JSON.parse(text); } catch (_e) { return null; }
-}
-
-// Whether the address the fault points at is genuinely closed. A machine
-// with something listening there would be measuring a different failure,
-// and reporting that as a pass is what `skip` exists to prevent.
-function portIsClosed(host, port) {
-  return new Promise(function (resolve) {
-    var socket = nodeNet.connect({ host: host, port: port });
-    var settled = false;
-    function done(closed) {
-      if (settled) return;
-      settled = true;
-      try { socket.destroy(); } catch (_e) { /* the verdict is already decided */ }
-      resolve(closed);
-    }
-    socket.once("connect", function () { done(false); });
-    socket.once("error", function () { done(true); });
-  });
 }
 
 // The rows of one domain's block, as the operator reads them: the lines
@@ -233,7 +214,7 @@ async function run() {
     });
     await populate(cfg);
 
-    if (!(await portIsClosed(quiet.HOST, quiet.PORT))) {
+    if (!(await quiet.endpointIsRefusing())) {
       helpers.skip("something is listening on " + quiet.HOST + ":" + quiet.PORT + ", so a " +
         "lookup sent there would fail differently from a resolver that has gone quiet");
       return helpers.getChecks();

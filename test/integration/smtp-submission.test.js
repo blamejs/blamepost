@@ -38,13 +38,21 @@
  *
  * `From` is the address a person reads, and it is the one an
  * impersonation is written into. It is bound at the relay handoff rather
- * than at a command, so its refusal reaches the client as the
- * framework's `451 4.3.0 Local delivery error` at the end of the message
- * body. That text says nothing about authors and a transient code is a
- * poor fit for a permanent verdict; it is what the wire carries, so it
- * is what this file checks. Reading the intent out of the source and
- * calling that the client's experience is the error this whole layer
- * exists to stop making.
+ * than at a command, so its refusal reaches the client at the end of the
+ * message body rather than beside the header that caused it.
+ *
+ * The refusal is permanent and it says which kind it is. `550 5.6.0`
+ * means the header block could not be read as a single author, which the
+ * sending client can correct. `550 5.7.1` means the header is well formed
+ * and names an address this account does not hold, which needs the
+ * operator to grant it or the writer to stop claiming it. Each case below
+ * names the one it expects, because a refusal arriving under the other
+ * status is still a refusal and would satisfy a check that only asked
+ * whether the message was refused.
+ *
+ * What the wire carries is what this file checks. Reading the intent out
+ * of the source and calling that the client's experience is the error
+ * this whole layer exists to stop making.
  *
  * The message is carried BOTH ways a client can carry one. The listener
  * advertises CHUNKING, so `BDAT` is a second door into the same handoff,
@@ -61,10 +69,11 @@
  * which is the on-behalf-of shape RFC 5322 section 3.6.2 describes.
  *
  * The subaddress is the one worth reading twice. `From` accepts a
- * subaddress of the account and `MAIL FROM` refuses the identical
- * string, so the two halves of one identity disagree about one address.
- * Both cases below are written as the measurement rather than as a
- * verdict on it.
+ * subaddress of the account and `MAIL FROM` accepts the identical
+ * string, because the envelope half folds the RFC 5233 tag against the
+ * mailbox the address is delivered to, so the two halves of one identity
+ * answer the same way about one address. Both cases below are written as
+ * the measurement rather than as a verdict on it.
  *
  * ## Two clients, and what each can answer
  *
@@ -105,8 +114,9 @@
  *   - A survival case that fails means the listener now drops the
  *     connection on a refused envelope, and every client that retries
  *     with a second identity has to reconnect and re-authenticate.
- *   - The subaddress pair failing means the two halves of the identity
- *     agreed, which is the good outcome and retires the pair.
+ *   - The subaddress cases failing means the two halves of the identity
+ *     stopped agreeing, and a client configured with a subaddress as its
+ *     identity can no longer send at all.
  *
  * ## What this file does not do
  *
@@ -185,6 +195,7 @@ var nodePath   = require("node:path");
 
 var helpers = require("../helpers");
 var foreign = require("../helpers/foreign-client");
+var clients = require("./clients");
 
 var count = helpers.count;
 
@@ -217,11 +228,22 @@ var ENVELOPE_REFUSAL_CODE = 553;
 var ENVELOPE_REFUSAL_TEXT =
   "5.7.1 Sender address rejected: not owned by authenticated identity";
 
-// The reply a refused relay handoff produces. There is one for every
-// reason, which is the point of checking it: whatever the author binding
-// rejected a message for, this is the whole of what the client is told.
-var AUTHOR_REFUSAL_CODE = 451;
-var AUTHOR_REFUSAL_TEXT = "4.3.0 Local delivery error";
+// The replies a refused relay handoff produces. There are two, and which
+// one a client is told is the point of checking them.
+//
+// A refusal is permanent, so a conforming MTA bounces it to its own
+// sender instead of retrying a message that will be refused identically
+// until its queue lifetime runs out (RFC 5321 section 4.2.1). The two
+// enhanced statuses separate a client bug from an operator one: 5.6.0
+// says the header block could not be read as a single author, which the
+// sending client can fix, and 5.7.1 says the header is well formed and
+// names an address this account does not hold, which needs the operator
+// to grant it or the writer to stop claiming it.
+var AUTHOR_REFUSAL_CODE = 550;
+var AUTHOR_HEADER_TEXT  = "5.6.0 Message rejected: From or Sender header cannot be read " +
+  "as a single author";
+var AUTHOR_POLICY_TEXT  = "5.7.1 Message rejected: author address not owned by " +
+  "authenticated identity";
 
 // The reply a completed submission draws.
 var ACCEPTED_CODE = 250;
@@ -424,6 +446,7 @@ function authorCases() {
               "signature over somebody else's name",
       fields: ["From: " + ID.unownedHosted],
       accept: false,
+      status: "5.7.1",
     },
     {
       key:    "own-address-again-on-the-same-session",
@@ -440,6 +463,7 @@ function authorCases() {
               "one and this server will not sign a message whose author it cannot read",
       fields: [],
       accept: false,
+      status: "5.6.0",
     },
     {
       key:    "two-authors",
@@ -447,6 +471,7 @@ function authorCases() {
               "recipient is shown would depend on which mail program opened it",
       fields: ["From: " + ID.own, "From: " + ID.unownedHosted],
       accept: false,
+      status: "5.6.0",
     },
     {
       key:    "two-addresses-in-one-author",
@@ -454,6 +479,7 @@ function authorCases() {
               "a second name cannot ride along beside a permitted one",
       fields: ["From: " + ID.own + ", " + ID.unownedHosted],
       accept: false,
+      status: "5.7.1",
     },
     {
       key:    "author-nobody-here-can-be-named-for",
@@ -461,6 +487,7 @@ function authorCases() {
               "because nothing in it is attributable to the account that signed in for it",
       fields: ["From: " + ID.unownedOutside],
       accept: false,
+      status: "5.7.1",
     },
     {
       key:    "sender-does-not-license-a-local-author",
@@ -469,6 +496,7 @@ function authorCases() {
               "would have been refused for",
       fields: ["From: " + ID.unownedOutside, "Sender: " + ID.unownedHosted],
       accept: false,
+      status: "5.7.1",
     },
     {
       key:    "on-behalf-of-an-outside-author",
@@ -506,6 +534,7 @@ function authorCases() {
                  "the binding",
       fields:    ["From: " + ID.unownedHosted],
       accept:    false,
+      status:    "5.7.1",
       carriedBy: "bdat",
     },
     {
@@ -526,35 +555,27 @@ function authorCases() {
 // Python's smtplib is asked for the capability rather than for the name:
 // an interpreter built without it answers `--version` perfectly well and
 // cannot open a submission session.
-var PYTHON = {
-  name:            "python",
-  envVar:          "BLAMEPOST_PYTHON_BIN",
-  candidates:      ["python3", "python", "py"],
-  probeArgs:       ["-c", "import smtplib;print('SMTPLIB ' + smtplib.__name__)"],
-  requireInOutput: /^SMTPLIB smtplib/m,
-  timeoutMs:       CLIENT_TIMEOUT_MS,
-};
+//
+// Both are claimed from the suite's table rather than written out here,
+// because scripts/test-integration.js reads that table to say how many
+// of the clients this file needs it actually located. A specification
+// kept here as well would let the runner report on a different program
+// than the one this file went on to drive.
+var PYTHON = clients.spec("python-smtplib");
 
 // curl reports the protocols its build was compiled with in its own
 // version banner. A curl without SMTP is on the path, answers
 // `--version`, and cannot submit anything, so the capability is read out
 // of what it says about itself rather than assumed from the name.
-var CURL = {
-  name:            "curl",
-  envVar:          "BLAMEPOST_CURL_BIN",
-  candidates:      ["curl"],
-  probeArgs:       ["--version"],
-  requireInOutput: /^Protocols:.*\bsmtps?\b/m,
-  timeoutMs:       CLIENT_TIMEOUT_MS,
-};
+var CURL = clients.spec("curl-smtp");
 
-// The driver runs a plan and reports every reply as data. A step that
+// The driver runs a list of steps and reports every reply as data. A step that
 // threw is reported too, and as a different kind of line, because a
 // session that died and a session that answered are the two outcomes one
 // case here is written to tell apart, and folding them together is
 // exactly the mistake that case exists to catch.
 //
-// The plan arrives in a file rather than on the command line: it carries
+// The steps arrive in a file rather than on the command line: they carry
 // whole messages and a command line has a length its author cannot see.
 // The credential stays on the command line, which is where the curl half
 // of this file already puts it.
@@ -565,7 +586,7 @@ var DRIVER_SOURCE = [
   "import ssl",
   "import sys",
   "",
-  "ca, host, address, password, planFile = sys.argv[1:6]",
+  "ca, host, address, password, stepsFile = sys.argv[1:6]",
   "",
   // The CHAIN is verified, against the authority this run was pointed
   // at. Only the name check is off, and only because this client dials
@@ -582,8 +603,8 @@ var DRIVER_SOURCE = [
   "untrusted = ssl.create_default_context()",
   "untrusted.check_hostname = False",
   "",
-  "with open(planFile, 'r', encoding='utf-8') as fh:",
-  "    plan = json.load(fh)",
+  "with open(stepsFile, 'r', encoding='utf-8') as fh:",
+  "    steps = json.load(fh)",
   "",
   "def sasl(a, p):",
   "    nul = chr(0)",
@@ -613,7 +634,7 @@ var DRIVER_SOURCE = [
   "            pass",
   "    session = None",
   "",
-  "for step in plan:",
+  "for step in steps:",
   "    label = step['label']",
   "    try:",
   "        op = step['op']",
@@ -664,18 +685,18 @@ var DRIVER_SOURCE = [
   "        say(label, 'RAISED', type(e).__name__, str(e))",
   "",
   "shut()",
-  "print('PLAN-END %d' % len(plan))",
+  "print('STEPS-END %d' % len(steps))",
   "",
 ].join("\n");
 
 // ---------------------------------------------------------------------------
-// Building the plan
+// Building the steps
 // ---------------------------------------------------------------------------
 
-function Plan() {
+function StepList() {
   this.steps = [];
 }
-Plan.prototype.open = function (label, port, implicit, trusted) {
+StepList.prototype.open = function (label, port, implicit, trusted) {
   this.steps.push({
     op:       "open",
     label:    label,
@@ -687,21 +708,21 @@ Plan.prototype.open = function (label, port, implicit, trusted) {
   });
   return this;
 };
-Plan.prototype.auth = function (label) {
+StepList.prototype.auth = function (label) {
   this.steps.push({ op: "auth", label: label });
   return this;
 };
-Plan.prototype.command = function (label, command, argument) {
+StepList.prototype.command = function (label, command, argument) {
   this.steps.push({ op: "command", label: label, command: command, argument: argument || "" });
   return this;
 };
-Plan.prototype.mailFrom = function (label, address) {
+StepList.prototype.mailFrom = function (label, address) {
   return this.command(label, "MAIL", "FROM:<" + address + ">");
 };
-Plan.prototype.rcptTo = function (label, address) {
+StepList.prototype.rcptTo = function (label, address) {
   return this.command(label, "RCPT", "TO:<" + address + ">");
 };
-Plan.prototype.body = function (label, carriedBy, text) {
+StepList.prototype.body = function (label, carriedBy, text) {
   this.steps.push({ op: carriedBy === "bdat" ? "bdat" : "data", label: label, message: text });
   return this;
 };
@@ -709,51 +730,59 @@ Plan.prototype.body = function (label, carriedBy, text) {
 // One complete submission: envelope, recipient, message. The recipient
 // is always the account itself, so nothing this file sends leaves for
 // the internet and no case depends on a domain resolving.
-Plan.prototype.submit = function (prefix, carriedBy, text) {
+StepList.prototype.submit = function (prefix, carriedBy, text) {
   this.mailFrom(prefix + ".mail", ID.own);
   this.rcptTo(prefix + ".rcpt", ID.own);
   this.body(prefix + ".end", carriedBy, text);
   return this;
 };
 
-function buildPlan(cfg, cases) {
-  var plan = new Plan();
+function buildSteps(cfg, cases) {
+  var list = new StepList();
 
   // A session opened without the run's authority, first, so everything
   // after it is known to have been verified against something.
-  plan.open("untrusted", cfg.submission, false, false);
+  list.open("untrusted", cfg.submission, false, false);
 
   // The envelope binding, and whether the session outlives it.
-  plan.open("inband", cfg.submission, false, true);
-  plan.auth("inband.auth");
-  plan.mailFrom("envelope.hosted", ID.unownedHosted);
+  list.open("inband", cfg.submission, false, true);
+  list.auth("inband.auth");
+  list.mailFrom("envelope.hosted", ID.unownedHosted);
   // Immediately, with no recovery in between: a refusal that let a
   // recipient be named would have accepted the transaction it was
   // supposed to have stopped.
-  plan.rcptTo("envelope.hosted.rcpt", ID.own);
-  plan.mailFrom("envelope.outside", ID.unownedOutside);
-  plan.mailFrom("envelope.subaddress", ID.subaddress);
+  list.rcptTo("envelope.hosted.rcpt", ID.own);
+  list.mailFrom("envelope.outside", ID.unownedOutside);
   // Still no RSET. This is the survival claim.
-  plan.submit("envelope.recovered", "data", message("recovered", ["From: " + ID.own]));
+  list.submit("envelope.recovered", "data", message("recovered", ["From: " + ID.own]));
+  // The subaddress comes after the recovery rather than before it. This half
+  // of the identity accepts the address now, and an accepted MAIL FROM opens
+  // a transaction, so a step here between the refusals and the recovery left
+  // one open across the submission that followed. The listener answered that
+  // submission's MAIL FROM with 503, which is the correct refusal of a second
+  // MAIL in one transaction and not a session that failed to survive
+  // anything. The submission above completes and closes its own transaction,
+  // so the envelope this step opens is the only one on the session.
+  list.mailFrom("envelope.subaddress", ID.subaddress);
 
   // The author binding, every shape, down one session.
-  plan.open("author", cfg.submission, false, true);
-  plan.auth("author.auth");
+  list.open("author", cfg.submission, false, true);
+  list.auth("author.auth");
   cases.forEach(function (c) {
-    plan.submit("author." + c.key, c.carriedBy || "data", c.message);
+    list.submit("author." + c.key, c.carriedBy || "data", c.message);
   });
 
   // The implicit-TLS submission listener, which is a second profile of
   // the same listener and not a second copy of the rule.
-  plan.open("implicit", cfg.submissions, true, true);
-  plan.auth("implicit.auth");
-  plan.mailFrom("implicit.hosted", ID.unownedHosted);
-  plan.submit("implicit.recovered", "data", message("implicit", ["From: " + ID.own]));
+  list.open("implicit", cfg.submissions, true, true);
+  list.auth("implicit.auth");
+  list.mailFrom("implicit.hosted", ID.unownedHosted);
+  list.submit("implicit.recovered", "data", message("implicit", ["From: " + ID.own]));
 
   // No closing step: the driver ends whatever session is open with QUIT
-  // when the plan runs out, so a step here would be a second one and its
+  // when the steps run out, so a step here would be a second one and its
   // reply would be a refusal of a command sent after goodbye.
-  return plan.steps;
+  return list.steps;
 }
 
 // ---------------------------------------------------------------------------
@@ -780,7 +809,7 @@ function readTranscript(text) {
       seen.steps[raised[1]] = { kind: "raised", code: null, text: raised[2] + ": " + raised[3] };
       return;
     }
-    var end = /^PLAN-END (\d+)$/.exec(line);
+    var end = /^STEPS-END (\d+)$/.exec(line);
     if (end !== null) seen.end = Number(end[1]);
   });
   return seen;
@@ -911,7 +940,7 @@ function theEnvelopeBindingRefuses(seen) {
 // identical to one that did not, everywhere except here.
 function theSessionSurvivesTheRefusal(seen) {
   count("the account's own address is accepted on the same connection that just carried " +
-    "three refused ones, with no RSET in between, so a client that guessed wrong can " +
+    "two refused ones, with no RSET in between, so a client that guessed wrong can " +
     "correct itself rather than reconnect",
     codeOf(seen, "envelope.recovered.mail") === ACCEPTED_CODE,
     said(seen, "envelope.recovered.mail"));
@@ -926,14 +955,24 @@ function theSessionSurvivesTheRefusal(seen) {
 }
 
 // The pair. Both halves of one identity are asked about one address, and
-// they answer differently.
-function theTwoHalvesOfTheIdentityDisagreeAboutASubaddress(seen) {
-  count("MAIL FROM naming a subaddress of the account is refused, so the envelope half of the " +
-    "identity folds case but not the RFC 5233 tag",
-    codeOf(seen, "envelope.subaddress") === ENVELOPE_REFUSAL_CODE,
+// they have to answer the same way.
+//
+// They did not always. The envelope half compared MAIL FROM against a
+// fixed list built when the session authenticated, and an RFC 5233 tag
+// is chosen by whoever writes the address, so it could not be enumerated
+// in advance and the envelope refused what the author half permitted. A
+// client configured with a subaddress as its identity puts that address
+// in both places and so could not send at all, while the same address
+// was accepted as a recipient and delivered. The envelope half now
+// resolves the address per request, folding the tag against the form
+// routing folds it against, so one address gets one answer.
+function theTwoHalvesOfTheIdentityAgreeAboutASubaddress(seen) {
+  count("MAIL FROM naming a subaddress of the account is accepted, so the envelope half folds " +
+    "the RFC 5233 tag the way the author half and the routing layer already do",
+    codeOf(seen, "envelope.subaddress") === ACCEPTED_CODE,
     said(seen, "envelope.subaddress") +
-      " -- an acceptance here means the two halves agreed, which retires this case and its " +
-      "partner in the author section rather than needing either rewritten");
+      " -- a refusal here means the envelope half stopped resolving the address per request " +
+      "and went back to the fixed list, which no tag can appear in");
 }
 
 function theAuthorBindingAnswersEachShape(seen, cases) {
@@ -954,12 +993,19 @@ function theAuthorBindingAnswersEachShape(seen, cases) {
         codeOf(seen, prefix + ".end") === ACCEPTED_CODE, said(seen, prefix + ".end"));
       return;
     }
+    // Every case names the reply it expects, because a refusal that
+    // reached the wire under the other status would still be a refusal
+    // and would still satisfy a check that only asked whether the
+    // message was refused.
+    var expectedText = c.status === "5.6.0" ? AUTHOR_HEADER_TEXT : AUTHOR_POLICY_TEXT;
     count(c.key + ": " + c.claim,
       codeOf(seen, prefix + ".end") === AUTHOR_REFUSAL_CODE, said(seen, prefix + ".end"));
-    count(c.key + ": and the client is told " + AUTHOR_REFUSAL_CODE + " " +
-      AUTHOR_REFUSAL_TEXT + ", which is the whole of what a refused handoff can say",
-      textOf(seen, prefix + ".end") === AUTHOR_REFUSAL_TEXT,
-      said(seen, prefix + ".end") + ", expected " + JSON.stringify(AUTHOR_REFUSAL_TEXT));
+    count(c.key + ": and the refusal is permanent, so the client bounces it rather than " +
+      "retrying a message that will be refused identically",
+      String(codeOf(seen, prefix + ".end")).charAt(0) === "5", said(seen, prefix + ".end"));
+    count(c.key + ": and the client is told " + AUTHOR_REFUSAL_CODE + " " + expectedText,
+      textOf(seen, prefix + ".end") === expectedText,
+      said(seen, prefix + ".end") + ", expected " + JSON.stringify(expectedText));
   });
 }
 
@@ -975,11 +1021,11 @@ function theImplicitTlsListenerEnforcesTheSameRule(seen) {
     said(seen, "implicit.recovered.end"));
 }
 
-function theDriverRanEveryStepItWasGiven(seen, planned) {
-  count("the driver reached the end of the plan, so a case that reported nothing is a listener " +
+function theDriverRanEveryStepItWasGiven(seen, given) {
+  count("the driver reached the end of its steps, so a case that reported nothing is a listener " +
     "that said nothing rather than a client that stopped early",
-    seen.end === planned,
-    "reported " + seen.end + " of " + planned + " steps");
+    seen.end === given,
+    "reported " + seen.end + " of " + given + " steps");
 }
 
 // ---------------------------------------------------------------------------
@@ -1118,10 +1164,15 @@ async function aSecondImplementationReadsTheSameReplies(cfg, client, workDir) {
   });
   count("a second implementation is refused " + AUTHOR_REFUSAL_CODE + " for an author the " +
     "account may not write, after an envelope it may",
-    echoed(refusedAuthor.text, AUTHOR_REFUSAL_CODE, AUTHOR_REFUSAL_TEXT),
+    echoed(refusedAuthor.text, AUTHOR_REFUSAL_CODE, AUTHOR_POLICY_TEXT),
     curlSaid(refusedAuthor));
-  count("and what it makes of that reply is an unexpected one rather than a transient one, so " +
-    "the transient code buys the client nothing it could act on",
+  // What the client makes of the reply, which is the half a server
+  // cannot see. A 550 at the end of DATA is a permanent refusal of a
+  // message the client has already sent in full, and curl answers it
+  // with CURLE_WEIRD_SERVER_REPLY rather than with the send error it
+  // reports for the refused envelope above, so a script wrapping it can
+  // tell a refused author from a refused sender by the exit code alone.
+  count("and the client treats the reply as one it cannot proceed from",
     refusedAuthor.rv.code === CURLE_WEIRD_SERVER_REPLY,
     curlSaid(refusedAuthor) + ", expected exit " + CURLE_WEIRD_SERVER_REPLY);
 }
@@ -1130,25 +1181,25 @@ async function aSecondImplementationReadsTheSameReplies(cfg, client, workDir) {
 // Runner
 // ---------------------------------------------------------------------------
 
-async function driveThePlan(cfg, client, workDir, cases) {
+async function driveTheSteps(cfg, client, workDir, cases) {
   var program = nodePath.join(workDir, "submission-driver.py");
-  var planFile = nodePath.join(workDir, "submission-plan.json");
-  var steps = buildPlan(cfg, cases);
+  var stepsFile = nodePath.join(workDir, "submission-steps.json");
+  var steps = buildSteps(cfg, cases);
   nodeFs.writeFileSync(program, DRIVER_SOURCE, "utf8");
-  nodeFs.writeFileSync(planFile, JSON.stringify(steps), "utf8");
+  nodeFs.writeFileSync(stepsFile, JSON.stringify(steps), "utf8");
 
   var rv = await foreign.run(client.bin, [
-    program, cfg.caFile, cfg.host, cfg.address, cfg.password, planFile,
+    program, cfg.caFile, cfg.host, cfg.address, cfg.password, stepsFile,
   ], { timeoutMs: CLIENT_TIMEOUT_MS });
   var text = rv.stdout.toString("utf8") + rv.stderr.toString("utf8");
 
   var seen = readTranscript(text);
   if (seen.end === null) {
-    throw new Error("interop: the driver did not reach the end of its plan, so there is no " +
+    throw new Error("interop: the driver did not reach the end of its steps, so there is no " +
       "transcript for the cases to read. exit " + rv.code + (rv.timedOut ? " (timed out)" : "") +
       ": " + text.replace(/[\r\n]+/g, " ").trim().slice(0, 600));
   }
-  return { seen: seen, planned: steps.length, text: text };
+  return { seen: seen, given: steps.length, text: text };
 }
 
 async function run() {
@@ -1190,17 +1241,17 @@ async function run() {
   try {
     if (driver.found) {
       console.log("  driver:     " + driver.bin + " -- " + driver.detail);
-      var drove = await driveThePlan(cfg, driver, workDir, cases);
+      var drove = await driveTheSteps(cfg, driver, workDir, cases);
       theDriverVerifiedTheChainItConnectedOver(drove.seen);
       theSessionReachedAnAuthenticatedState(drove.seen, "inband", "in band");
       theEnvelopeBindingRefuses(drove.seen);
       theSessionSurvivesTheRefusal(drove.seen);
-      theTwoHalvesOfTheIdentityDisagreeAboutASubaddress(drove.seen);
+      theTwoHalvesOfTheIdentityAgreeAboutASubaddress(drove.seen);
       theSessionReachedAnAuthenticatedState(drove.seen, "author", "author session");
       theAuthorBindingAnswersEachShape(drove.seen, cases);
       theSessionReachedAnAuthenticatedState(drove.seen, "implicit", "implicit TLS");
       theImplicitTlsListenerEnforcesTheSameRule(drove.seen);
-      theDriverRanEveryStepItWasGiven(drove.seen, drove.planned);
+      theDriverRanEveryStepItWasGiven(drove.seen, drove.given);
     } else {
       helpers.skip("the sessions need an interpreter with smtplib, and there is not one here: " +
         driver.reason + ". What did not run is every claim that needs a client which stays on " +

@@ -6,7 +6,7 @@ backports are not promised.
 
 | Version | First release | Security patches through | Minimum runtime | Signature posture |
 |---|---|---|---|---|
-| `v0.x` (pre-1.0) | not yet released | until v1.0 ships | Node >= 24.19.0 | Ed25519 + RSA-SHA256 dual DKIM selectors; ML-DSA-65 release signing |
+| `v0.x` (pre-1.0) | not yet released | until v1.0 ships | Node >= 24.22.1 | Ed25519 + RSA-SHA256 dual DKIM selectors; ML-DSA-65 release signing |
 | `v1.x` | not yet scheduled | first release + 24 months | the Node active LTS at that release | Ed25519 + RSA-SHA256 dual DKIM selectors; ML-DSA-65 release signing |
 
 ## Pre-1.0: only the latest tag is supported

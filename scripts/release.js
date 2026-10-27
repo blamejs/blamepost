@@ -18,7 +18,8 @@
  *   node scripts/release.js watch       # gh pr checks --watch + flag review threads
  *   node scripts/release.js merge       # squash-merge if CLEAN + zero unresolved threads
  *   node scripts/release.js tag         # signed tag + push tag + verify
- *   node scripts/release.js publish     # watch npm-publish workflow
+ *   node scripts/release.js publish     # watch both publish workflows, then read the
+ *                                       #   npm version and the image digest back
  *   node scripts/release.js all         # prepare -> ... -> publish
  *
  *   node scripts/release.js help        # this banner
@@ -73,7 +74,27 @@ function _repoSlug() {
   return { owner: owner, name: name };
 }
 
+// The published container image for a version, in the form
+// `.github/workflows/release-container.yml` pushes: the repository owner,
+// the repository name, and the version as the tag. The tag carries no `v`,
+// because the git tag is `vX.Y.Z` and the image published from it is
+// `X.Y.Z`, which is the form compose.yml and the quick start both use.
+function _containerImageRef(version) {
+  var slug = _repoSlug();
+  return "ghcr.io/" + slug.owner + "/" + slug.name + ":" + version;
+}
+
 // ---- Helpers -------------------------------------------------------------
+
+// The last line a command printed, with blank trailing lines dropped. A
+// tool that prints a warning before its answer would otherwise be read as
+// having answered the warning.
+function _lastLine(text) {
+  var lines = String(text || "").split(/\r?\n/)
+    .map(function (l) { return l.trim(); })
+    .filter(function (l) { return l !== ""; });
+  return lines.length === 0 ? "" : lines[lines.length - 1];
+}
 
 // Windows resolves `npm` / `npx` as `npm.cmd` / `npx.cmd` shims, which
 // child_process.spawn can only invoke through a shell. Everything else in
@@ -225,6 +246,15 @@ var DETECTOR_GATE = "test/layer-0-primitives/codebase-patterns.test.js";
 // a release.
 var examinedCounts = require("./examined-counts.js");
 
+// The runner that executes the declared chain, required here for the two things
+// it owns: the count words a gate may answer in, and the reader of
+// `scripts.gates` in package.json. Both are read rather than restated, because
+// a second copy of either is a second thing to keep in step and the copy that
+// drifts is the one nobody watches run. That has already happened in this
+// file: its battery was a hand-written list and three gates in the chain were
+// missing from it.
+var runGates = require("./run-gates.js");
+
 // Run one gate for its verdict AND for the count behind it. Every gate in the
 // battery that publishes a count comes through here, so the rule is written
 // once: five copies of "read the last line, refuse a zero" is five places for
@@ -233,14 +263,17 @@ var examinedCounts = require("./examined-counts.js");
 // The output is captured and written through rather than inherited, which costs
 // the live progress of the gate and buys the ability to read what it published.
 //
-// `token` names the count line the gate publishes and `verb` the word its
-// refusal uses, because a suite that asserted nothing and a walk that examined
-// nothing are the same defect described in the vocabulary of two different
-// jobs, and the operator reading the refusal is looking at one of them.
+// Both count words are accepted from every gate, exactly as the chain runner
+// accepts them: `CHECKS <n>` is the detector suite's, frozen in that spelling
+// because test/smoke.js reads it, and which word a gate answers in is a
+// property of the gate rather than something a caller should have to know. What
+// IS chosen per gate is `verb`, the word the refusal uses, because a suite that
+// asserted nothing and a walk that examined nothing are the same defect
+// described in the vocabulary of two different jobs, and the operator reading
+// the refusal is looking at one of them.
 function _runCountedGate(relScriptPath, opts) {
   opts = opts || {};
-  var token = opts.token || "EXAMINED";
-  var verb  = opts.verb  || "examined";
+  var verb = opts.verb || "examined";
   _requireGateScript(relScriptPath);
   var rv = _capture("node", [relScriptPath].concat(opts.args || []));
   if (rv.stdout) console.log(rv.stdout);
@@ -248,12 +281,12 @@ function _runCountedGate(relScriptPath, opts) {
   if (rv.status !== 0) {
     throw new Error("release: " + relScriptPath + " failed with status " + rv.status);
   }
-  var counts = examinedCounts.publishedCounts(rv.stdout, [token]);
+  var counts = examinedCounts.publishedCounts(rv.stdout, runGates.ACCEPTED_TOKENS);
   if (counts.length === 0) {
     throw new Error(
       "release: " + relScriptPath + " exited clean having " + verb + " nothing: its output " +
-      "carries no " + token + " count. A gate that will not say what it looked at reports " +
-      "nothing about any rule it carries, and that is not a pass.");
+      "carries no " + runGates.ACCEPTED_TOKENS.join(" or ") + " count. A gate that will not say " +
+      "what it looked at reports nothing about any rule it carries, and that is not a pass.");
   }
   var empty = examinedCounts.emptyUnits(counts);
   if (empty.length > 0) {
@@ -563,24 +596,56 @@ function cmdInterop(opts) {
 // gated one, and it covers the cut shape that skips `prepare`. A feature
 // already in the working tree cannot satisfy prepare's clean-main requirement,
 // so prepare-only gating leaves that shape resting on the operator's memory.
+//
+// WHICH GATES IT RUNS IS NOT DECIDED HERE. The list is `scripts.gates` in
+// package.json, read through scripts/run-gates.js, which is the same authority
+// `npm run gates` and the pull-request workflow execute. This file used to
+// spell the battery out by hand and the copy had drifted: three gates the chain
+// runs were missing from it, so a release cut ran a WEAKER battery than a
+// developer typing `npm run gates`, which is backwards. A gate added to the
+// chain now runs here with no second edit, and there is no second list to fall
+// behind.
+//
+// The commands BESIDE the chain are the ones the chain deliberately does not
+// carry, and they are listed here because this is the caller that wants them:
+// a linter that takes its own file arguments, and the two release-artifact
+// round-trips, which compare a generated document against the notes it derives
+// from rather than sweeping a set of the tree.
 function _staticGates() {
   _section("static gates");
   _run("npx", ["--yes", "eslint@10.8.1", "--max-warnings", "0", "."]);
-  _runCountedGate(DETECTOR_GATE, { token: "CHECKS", verb: "asserted" });
-  _runCountedGate("scripts/validate-source-comment-blocks.js");
-  _runCountedGate("scripts/check-api-snapshot.js");
-  _runCountedGate("scripts/check-spelling-consistency.js");
-  _runCountedGate("scripts/check-status-lifecycle.js");
+
+  // A chain that cannot be read, or that reads as empty, throws out of here
+  // rather than running the gates that happened to parse. Shrinking the battery
+  // silently is the one outcome none of this may produce.
+  var declared = runGates.declaredGates(path.join(ROOT, "package.json"));
+  console.log("declared gate chain: " + declared.length + " gate(s) from package.json " +
+    "scripts." + runGates.CHAIN_KEY);
+  declared.forEach(function (gate) {
+    // The detector suite answers in `CHECKS <n>`, frozen in that spelling
+    // because test/smoke.js reads it, and a suite that asserted nothing and a
+    // walk that examined nothing are the same defect in two vocabularies. Both
+    // words are accepted from every gate, as run-gates.js accepts them, because
+    // which one a gate uses is a property of the gate; only the refusal's
+    // wording is chosen per gate, and that is what an operator reads.
+    _runCountedGate(gate.script, {
+      args: gate.args.slice(1),
+      verb: gate.script === DETECTOR_GATE ? "asserted" : "examined",
+    });
+  });
+
   // The notes gate publishes what it verified, so the battery reads it here
   // rather than taking the exit code alone. The gate refuses its own empty set
   // too, which is what covers the workflow steps and the npm hook that run it
   // bare; this is the other side of the same contract, and it is what notices a
   // gate that stopped publishing rather than one that published a zero.
   _runCountedGate("scripts/consolidate-release-notes.js", { args: ["--check"], verb: "verified" });
-  _run("node", ["scripts/generate-changelog-entry.js", "--check"]);
-  _run("node", ["scripts/pin-all.js", "--check"]);
-  _ok("eslint + codebase-patterns + source-comment-blocks + api-snapshot + spelling + " +
-      "status-lifecycle + release notes + CHANGELOG + lockfile pin currency clean");
+  // The CHANGELOG round-trip publishes too, in both of its units, and its count
+  // was being discarded here. A gate that says what it looked at and a caller
+  // that throws the number away is the same hole as a gate that says nothing.
+  _runCountedGate("scripts/generate-changelog-entry.js", { args: ["--check"], verb: "rendered" });
+  _ok("eslint + the declared gate chain (" + declared.length + " gate(s)) + release notes + " +
+      "CHANGELOG round-trip clean");
 }
 
 function cmdPrepare(opts) {
@@ -754,7 +819,7 @@ function cmdPush(opts) {
   // gitleaks ran above; smoke runs in its own phase and CI re-verifies, so
   // its box (and CI's) stay open for the reviewer. An interop gate that did
   // not run is published with the reason it did not, never as a pass.
-  var summaryLines = ["## Summary", "", rn.summary, "", "## Test plan", ""];
+  var summaryLines = ["## Summary", "", rn.summary, "", "## Verification", ""];
   summaryLines.push("- [ ] `node test/smoke.js`: runs in the smoke phase; CI re-verifies");
   if (interop.ran) {
     summaryLines.push("- [x] `node scripts/test-integration.js`: interop clean");
@@ -1237,23 +1302,57 @@ function cmdPublish() {
         "(gh run view " + containerRunId + ").");
     }
   } else {
-    console.log("no release-container run found (the container image builds on tag)");
+    console.log("no release-container run found; the registry check below is what " +
+                "answers for the image");
   }
 
   // Verify path: the exit code is the verdict. A registry answer that
   // mismatches, or no answer at all, is a failed verification, never a
   // warning that exits 0 (publish is the last step of `all`, so its exit
   // code is the whole flow's verdict).
+  //
+  // Both artifacts are read back from the registry that serves them, and
+  // neither reading is conditional on having found a workflow run. An empty
+  // `gh run list` is what a renamed workflow, a token without the scope to
+  // list runs and an API timeout all produce, so treating it as evidence
+  // about the artifact answers a question nobody asked. The watch above says
+  // a workflow concluded; only the registry says the bytes are there.
+  //
+  // Both are read before either refusal, so one pass says what is wrong with
+  // the release rather than two rounds.
   _section("verify");
+  var failures = [];
+
   var npmVersion = _capture("npm", ["view", pkg.name, "version"]).stdout;
   console.log("npm " + pkg.name + ": " + (npmVersion || "(unable to query)") +
               "  (expected: " + next + ")");
   if (npmVersion !== next) {
-    throw new Error("release: npm reports " + (npmVersion || "(unable to query)") +
+    failures.push("npm reports " + (npmVersion || "(unable to query)") +
       " but this release expected " + next + ". The registry may still be " +
       "propagating; re-run `node scripts/release.js publish` to re-verify.");
+  } else {
+    _ok("npm matches " + next);
   }
-  _ok("npm matches " + next);
+
+  var imageRef = _containerImageRef(next);
+  var inspected = _capture("docker", ["buildx", "imagetools", "inspect", imageRef,
+                                      "--format", "{{.Manifest.Digest}}"]);
+  var imageDigest = _lastLine(inspected.stdout);
+  console.log("ghcr " + imageRef + ": " + (imageDigest || "(unable to query)"));
+  if (!/^sha256:[0-9a-f]{64}$/.test(imageDigest)) {
+    failures.push(imageRef + " did not answer with an image digest. " +
+      "`docker buildx imagetools inspect` exited " + inspected.status + " and gave " +
+      JSON.stringify(imageDigest || inspected.stderr.split("\n").pop() || "") + ". " +
+      "Operators who pull the image get the previous release while npm reports this one. " +
+      "A container engine is required here: this reading is the only thing that says the " +
+      "image is served, so it cannot be skipped on a machine that has none.");
+  } else {
+    _ok("container image published at " + imageRef + " (" + imageDigest + ")");
+  }
+
+  if (failures.length > 0) {
+    throw new Error("release: " + failures.join("\n\nrelease: "));
+  }
 }
 
 function cmdAll(opts) {
@@ -1306,7 +1405,9 @@ function cmdHelp() {
               WATCH_EXIT_BOTH + " on both");
   console.log("  node scripts/release.js merge               # squash-merge if CLEAN");
   console.log("  node scripts/release.js tag                 # signed tag + push tag");
-  console.log("  node scripts/release.js publish             # watch npm-publish workflow");
+  console.log("  node scripts/release.js publish             # watch both publish workflows, then");
+  console.log("                                              #   read the npm version and the");
+  console.log("                                              #   image digest back off the registries");
   console.log("  node scripts/release.js all [--minor]       # prepare -> ... -> publish");
   console.log("  node scripts/release.js status              # current branch + version state");
   console.log("  node scripts/release.js help                # this banner");

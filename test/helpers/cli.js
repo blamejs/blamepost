@@ -35,6 +35,7 @@ var nodePath = require("node:path");
 var nodeProc = require("node:child_process");
 
 var helpers = require("./index");
+var spawnHelper = require("./spawn");
 
 var BIN = nodePath.join(helpers.REPO_ROOT, "bin", "blamepost.js");
 
@@ -92,17 +93,25 @@ function withoutBootLines(text) {
  * default to nothing, so an ordinary caller is unaffected and a broken
  * run is visibly a second runner beside the working one.
  */
-function create(opts) {
+// The environment one runner binds, settled in one place because two
+// runners bind it. A second copy would let the blocking runner and the
+// non-blocking one disagree about which volume a run reads, which is the
+// one thing about a run that must not depend on how it was started.
+function _envFor(label, opts) {
   if (!opts || typeof opts.dataDir !== "string" || typeof opts.workDir !== "string") {
-    throw new TypeError("helpers/cli.create: dataDir and workDir are required");
+    throw new TypeError("helpers/cli." + label + ": dataDir and workDir are required");
   }
-  var env = Object.assign({
+  return Object.assign({
     BLAMEPOST_HOSTNAME:         opts.hostname || "mx.example.com",
     BLAMEPOST_DATA_DIR:         opts.dataDir,
     BLAMEPOST_VAULT_PASSPHRASE: opts.vaultPassphrase ||
       "a long enough vault passphrase for one test run",
     BLAMEJS_TMPDIR:             opts.workDir,
   }, opts.env || {});
+}
+
+function create(opts) {
+  var env = _envFor("create", opts);
   var execArgv = opts.execArgv || [];
   return function run(args) {
     var result = nodeProc.spawnSync(process.execPath, execArgv.concat([BIN]).concat(args), {
@@ -116,6 +125,57 @@ function create(opts) {
       stdout: stdout,
       stderr: stderr,
       both:   stdout + "\n" + stderr,
+      // The same two streams with the framework's log lines still in
+      // them. Nearly every caller wants them gone, for the reason in the
+      // header above, but a caller asserting on the logging itself needs
+      // the lines the filter exists to remove, and reaching for a private
+      // spawner to get them is how two transcripts start disagreeing
+      // about what a run looks like.
+      rawStdout: String(result.stdout || ""),
+      rawStderr: String(result.stderr || ""),
+    };
+  };
+}
+
+/**
+ * The same runner, awaited rather than blocking.
+ *
+ * `create` above uses `spawnSync`, which stops this process's event loop
+ * until the child exits. That is the right shape for every case whose
+ * fixture is on disk, and the wrong one for a case whose fixture answers
+ * a socket in THIS process: the child asks, the parent cannot reply
+ * because it is blocked in the spawn, and the run deadlocks until
+ * something kills it. A stand-in server bound on loopback is exactly
+ * that fixture.
+ *
+ * The two differ in what they can hand back, and the difference is
+ * reported rather than papered over. `runNodeScript` merges the child's
+ * streams in arrival order, which is what a caller wants from a run
+ * whose verdict and detail are split across the two, so there is no
+ * separate `stdout` here to offer. Callers that need the streams apart
+ * take `create`.
+ *
+ * The ceiling is the caller's own, so a command that hangs is reported
+ * as a run that never finished rather than waiting for whatever budget
+ * the binary carries.
+ */
+function createAsync(opts) {
+  var env = _envFor("createAsync", opts);
+  var execArgv = opts.execArgv || [];
+  var ceilingMs = opts.ceilingMs;
+  return async function run(args) {
+    var result = await spawnHelper.runNodeScript(execArgv.concat([BIN]).concat(args), {
+      env:       Object.assign({}, process.env, env),
+      ceilingMs: ceilingMs,
+    });
+    return {
+      status:     result.code,
+      ceilingHit: result.ceilingHit,
+      both:       withoutBootLines(result.out),
+      // The transcript with the framework's own lines still in it, for a
+      // caller asserting on the logging rather than on what the operator
+      // read.
+      raw:        result.out,
     };
   };
 }
@@ -123,7 +183,15 @@ function create(opts) {
 module.exports = {
   BIN:              BIN,
   create:           create,
+  createAsync:      createAsync,
   withoutBootLines: withoutBootLines,
+  // The prefix the filter above matches on, exported for the callers
+  // that want the boot lines rather than the transcript without them. A
+  // test asserting on the logging itself has to select those lines, and
+  // spelling the prefix a second time is the thing this module exists to
+  // prevent: two spellings that disagree let a log line satisfy a check
+  // about what the operator was told.
+  BOOT_LINE_PREFIX: BOOT_LINE_PREFIX,
   // A check whose failure message carries the output that produced it.
   // It is not specific to the command line, so it lives with the other
   // assertions and is re-exported here for the files that reach for it

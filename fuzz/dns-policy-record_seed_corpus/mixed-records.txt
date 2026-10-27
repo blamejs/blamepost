@@ -1,0 +1,4 @@
+v=spf1 mx -all
+v=DMARC1; p=none; rua=mailto:dmarc-reports@example.com
+site-verification=a1b2c3d4e5
+v=TLSRPTv1; rua=mailto:tls-reports@example.com

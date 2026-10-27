@@ -1,0 +1,9 @@
+alice@example.com
+sales@example.com
+Alice+News@Example.com
+@example.com
+#postmaster@example.com
+!abuse
+postmaster@example.com
+abuse@example.com
+bob@example.net

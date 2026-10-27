@@ -91,7 +91,12 @@ var ANSWERING_RESOLVER = {
 // file about how much the spool will hold.
 var RETRY_WITH_ROOM = { maxAttempts: 5 };
 
-function handleFor(dataDir, spool) {
+// `maxMessageBytes` is what one message costs, and the spool floor is
+// measured against it: a ceiling that cannot hold one message is
+// refused. A caller that names none is a server running the shipped
+// ceiling, so a fixture wanting a spool smaller than that has to say
+// which listeners it is describing.
+function handleFor(dataDir, spool, maxMessageBytes) {
   return blamepost.mail.delivery.create({
     hostname: HOSTNAME,
     dataDir:  dataDir,
@@ -99,6 +104,7 @@ function handleFor(dataDir, spool) {
     policy:   { mtaSts: "off", dane: "off" },
     retry:    RETRY_WITH_ROOM,
     spool:    spool,
+    maxMessageBytes: maxMessageBytes,
   });
 }
 
@@ -155,6 +161,22 @@ async function anUnusableCeilingIsRefusedAtCreate(dataDir) {
   count("and the refusal says what the ceiling has to clear",
     tooSmall !== null && /one message/i.test(String(tooSmall.message)),
     tooSmall === null ? "" : String(tooSmall.message).slice(0, 240));
+
+  // And it follows the shipped ceiling when the caller says nothing,
+  // which is the case a running server presents: the composition facade
+  // resolves an unset `limits.maxMessageBytes` to the shipped number and
+  // hands it in, so a spool this module would have to refuse for a
+  // configured server is refused for a default one too. A floor at the
+  // configuration schema's own minimum instead would take this, because
+  // a mebibyte clears sixty-four kibibytes, and the spool would be a
+  // fiftieth of one message on every default install.
+  var underShipped = null;
+  try { handleFor(dataDir, { maxBytes: b.constants.BYTES.mib(1) }); }
+  catch (e) { underShipped = e; }
+  count("a spool that cannot hold one message at the SHIPPED ceiling is refused from a " +
+    "caller that named no ceiling of its own",
+    underShipped !== null,
+    underShipped === null ? "accepted" : String(underShipped.message).slice(0, 200));
 
   // And the floor follows what the listeners actually accept when the
   // caller says so, rather than a number this module chose.
@@ -222,11 +244,13 @@ async function aFullSpoolRefusesRatherThanGrowing(dataDir) {
 
 async function aByteCeilingBindsBeforeTheDepthDoes(dataDir) {
   // Room for two messages by bytes and a hundred by count, so the byte
-  // ceiling is the one that has to answer.
+  // ceiling is the one that has to answer. The listeners this describes
+  // accept one message of the fixture's size, which is what lets the
+  // spool ceiling sit at two of them.
   var handle = handleFor(dataDir, {
     maxMessages: 100,
     maxBytes:    MESSAGE_BYTES * 2 + b.constants.BYTES.kib(8),
-  });
+  }, MESSAGE_BYTES);
   await sendOne(handle, 0, "submission");
   await sendOne(handle, 1, "submission");
   var refused = await refusalFrom(function () { return sendOne(handle, 2, "submission"); });

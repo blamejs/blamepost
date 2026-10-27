@@ -1,0 +1,51 @@
+{% extends "site-layout" %}
+{% block title %}{{ wiki.documentTitle }}{% endblock %}
+{% block content %}
+
+<section class="band">
+  {% if wiki.crumbs.length %}<p class="crumb">{% for s in wiki.crumbs %}{% if s.wikiHref %}<a href="/{{ s.wikiHref }}">{% endif %}{% if s.code %}<code>{{ s.text }}</code>{% else %}{{ s.text }}{% endif %}{% if s.wikiHref %}</a>{% endif %}{% endfor %}</p>{% endif %}
+  <p class="eyebrow">{{ wiki.eyebrow }}</p>
+  <h1 class="band-title">{{ wiki.title }}</h1>
+  {% if wiki.lead.length %}<p class="band-lead">{% for s in wiki.lead %}{% if s.wikiHref %}<a href="/{{ s.wikiHref }}">{% endif %}{% if s.code %}<code>{{ s.text }}</code>{% else %}{{ s.text }}{% endif %}{% if s.wikiHref %}</a>{% endif %}{% endfor %}</p>{% endif %}
+</section>
+
+{% for sec in wiki.sections %}
+<section class="band"{% if sec.id %} id="{{ sec.id }}"{% endif %}>
+  {% if sec.heading %}<h2 class="band-title">{{ sec.heading }}</h2>{% endif %}
+  {% for blk in sec.blocks %}
+  {% if blk.kind == "paragraph" %}<p>{% for s in blk.spans %}{% if s.wikiHref %}<a href="/{{ s.wikiHref }}">{% endif %}{% if s.pill %}<span class="pill pill-{{ s.pill }}">{{ s.text }}</span>{% else %}{% if s.code %}<code>{{ s.text }}</code>{% else %}{{ s.text }}{% endif %}{% endif %}{% if s.wikiHref %}</a>{% endif %}{% endfor %}</p>{% endif %}
+  {% if blk.kind == "heading" %}<h3>{% for s in blk.spans %}{% if s.code %}<code>{{ s.text }}</code>{% else %}{{ s.text }}{% endif %}{% endfor %}</h3>{% endif %}
+  {% if blk.kind == "list" %}{% if blk.ordered %}<ol>{% for item in blk.items %}<li>{% for s in item %}{% if s.wikiHref %}<a href="/{{ s.wikiHref }}">{% endif %}{% if s.code %}<code>{{ s.text }}</code>{% else %}{{ s.text }}{% endif %}{% if s.wikiHref %}</a>{% endif %}{% endfor %}</li>{% endfor %}</ol>{% else %}<ul>{% for item in blk.items %}<li>{% for s in item %}{% if s.wikiHref %}<a href="/{{ s.wikiHref }}">{% endif %}{% if s.code %}<code>{{ s.text }}</code>{% else %}{{ s.text }}{% endif %}{% if s.wikiHref %}</a>{% endif %}{% endfor %}</li>{% endfor %}</ul>{% endif %}{% endif %}
+  {% if blk.kind == "pre" %}<pre class="codeblock">{{ blk.text }}</pre>{% endif %}
+  {% if blk.kind == "code" %}<pre class="codeblock"><code>{{ blk.text }}</code></pre>{% endif %}
+  {% if blk.kind == "facts" %}
+  <div class="tablewrap">
+    <table class="sitetable">
+      <tbody>
+        {% for row in blk.rows %}
+        <tr><th scope="row">{{ row.label }}</th><td>{% for s in row.spans %}{% if s.wikiHref %}<a href="/{{ s.wikiHref }}">{% endif %}{% if s.pill %}<span class="pill pill-{{ s.pill }}">{{ s.text }}</span>{% else %}{% if s.code %}<code>{{ s.text }}</code>{% else %}{{ s.text }}{% endif %}{% endif %}{% if s.wikiHref %}</a>{% endif %}{% endfor %}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  {% if blk.kind == "table" %}
+  <div class="tablewrap">
+    <table class="sitetable">
+      <caption class="visually-hidden">{{ blk.caption }}</caption>
+      <thead>
+        <tr>{% for h in blk.head %}<th scope="col">{{ h }}</th>{% endfor %}</tr>
+      </thead>
+      <tbody>
+        {% for row in blk.rows %}
+        <tr>{% for cell in row.cells %}<td>{% for s in cell %}{% if s.wikiHref %}<a href="/{{ s.wikiHref }}">{% endif %}{% if s.pill %}<span class="pill pill-{{ s.pill }}">{{ s.text }}</span>{% else %}{% if s.code %}<code>{{ s.text }}</code>{% else %}{{ s.text }}{% endif %}{% endif %}{% if s.wikiHref %}</a>{% endif %}{% endfor %}</td>{% endfor %}</tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  {% endfor %}
+</section>
+{% endfor %}
+
+{% endblock %}

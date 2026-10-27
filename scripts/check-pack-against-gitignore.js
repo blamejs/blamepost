@@ -287,6 +287,13 @@ function _checkNotGitignored(packed) {
 
 // ---------------------------------------------------------------------------
 
+// The separator inside the dedup key below, built rather than typed so
+// this file carries no control byte of its own. A control character
+// cannot appear in a line index or in a link target, so a key joined on
+// one cannot collide with a target that happens to contain the
+// separator.
+var KEY_SEPARATOR = String.fromCharCode(0);
+
 // Every link target a document names, with the line it sits on, so a
 // finding points at the sentence rather than at the file.
 function _targetsIn(text) {
@@ -315,8 +322,8 @@ function _targetsIn(text) {
         // no space in it matches the permissive form and the inline one
         // alike. Counting it twice would inflate what this run says it
         // examined, and report one broken link as two.
-        if (seen.has(i + " " + target)) continue;
-        seen.add(i + " " + target);
+        if (seen.has(i + KEY_SEPARATOR + target)) continue;
+        seen.add(i + KEY_SEPARATOR + target);
         out.push({ target: target, line: i + 1 });
       }
     });

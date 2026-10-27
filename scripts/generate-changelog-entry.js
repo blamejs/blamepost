@@ -100,11 +100,14 @@ var PREAMBLE = [
 // LEAK_PATTERNS holds the tokens that signal internal-process narrative
 // instead of operator-facing description. The `claude`-file token is
 // assembled from char codes so the literal string doesn't appear in this
-// validator's own source either.
+// validator's own source either. The numbered-label word is assembled from
+// parts for the same reason: the forbidden-vocabulary gate refuses it in
+// every file, this one included.
 function _leakPatterns() {
   var cfg = [67, 76, 65, 85, 68, 69]
     .map(function (c) { return String.fromCharCode(c); })
     .join("");
+  var numberedLabel = ["ti", "er"].join("");
   return [
     new RegExp("\\b" + cfg + "\\.md\\b"),
     new RegExp("\\bper\\s+" + cfg + "\\b"),
@@ -112,7 +115,7 @@ function _leakPatterns() {
     /\bper\s+rule\s+§\d/,
     /\bphase\s+\d/i,
     /\bsweep\s+\d/i,
-    /\btier[- ]?[abc]\b/i,
+    new RegExp("\\b" + numberedLabel + "[- ]?[abc]\\b", "i"),
     /\bbatch\s+\d/i,
     /\bgroup\s+[a-h]\b/i,
     /\bslice\s+\d/i,
@@ -594,16 +597,28 @@ function rebuildChangelog(stats) {
 // ---------------------------------------------------------------------------
 
 /**
- * _publishCounts(stats, stream) publishes what this run read, and exits
- * non-zero when either number came back empty.
+ * _publishCounts(stats, stream) publishes what this run read and produced,
+ * and exits non-zero when any of the numbers came back empty.
  *
- * Two units, because they fail apart. `rendered-releases` is what was
- * loaded: a discovery pointed at a directory that moved takes it to zero
- * while every rendering rule still holds over the nothing it read.
- * `swept-prose-strings` is what the leak sweep reached inside them: a
- * walker that stopped descending takes THAT to zero while the release count
- * stays healthy, and the operator-facing check reports a clean tree having
- * read no sentence in it.
+ * Three units, because they fail apart.
+ *
+ * `rendered-releases` is what was loaded: a discovery pointed at a directory
+ * that moved takes it to zero while every rendering rule still holds over the
+ * nothing it read.
+ *
+ * `swept-prose-strings` is what the leak sweep reached inside them: a walker
+ * that stopped descending takes THAT to zero while the release count stays
+ * healthy, and the operator-facing check reports a clean tree having read no
+ * sentence in it.
+ *
+ * `rendered-artifact-lines` is the document that came out the other end, and
+ * it is the unit the first one cannot carry in the three single-release
+ * modes. There `rendered-releases` is one, because exactly one release is
+ * loaded and a missing one throws before this is reached, so that unit has no
+ * way to refuse anything; a renderer that produced an empty entry, an empty
+ * release page or an empty headline would publish a healthy 1 beside an
+ * artifact with nothing in it. The workflow that redirects this stdout into a
+ * release body would then publish the empty file.
  *
  * `stream` is stdout in the modes that write no artifact there, and stderr
  * in the three that do. Under `--release-page` and `--headline` the stdout
@@ -613,10 +628,21 @@ function rebuildChangelog(stats) {
  */
 function _publishCounts(stats, stream) {
   var code = examinedCounts.publish([
-    { unit: "rendered-releases",   n: stats.releases },
-    { unit: "swept-prose-strings", n: stats.swept },
+    { unit: "rendered-releases",       n: stats.releases },
+    { unit: "swept-prose-strings",     n: stats.swept },
+    { unit: "rendered-artifact-lines", n: stats.lines },
   ], { stream: stream, tag: "[generate-changelog-entry]" });
   if (code !== 0) process.exit(1);
+}
+
+// The size of what a mode actually produced, in lines, so an artifact that
+// came out empty is a number rather than a silence. A run that writes no
+// document of its own answers with the document it compared against, which is
+// the thing that had to be read for its verdict to mean anything.
+function _lines(text) {
+  return String(text).replace(/\n+$/, "").split(/\r?\n/).filter(function (l) {
+    return l.trim().length > 0;
+  }).length;
 }
 
 function main() {
@@ -651,6 +677,7 @@ function main() {
     fs.writeFileSync(CHANGELOG, rebuilt, "utf8");
     process.stderr.write("[generate-changelog-entry] OK, rebuilt CHANGELOG.md (" +
       rebuilt.length + " bytes) from release-notes/\n");
+    rebuildStats.lines = _lines(rebuilt);
     _publishCounts(rebuildStats, process.stdout);
     return;
   }
@@ -669,6 +696,10 @@ function main() {
     }
     if (expected.replace(/\r\n/g, "\n") === actual.replace(/\r\n/g, "\n")) {
       process.stderr.write("[generate-changelog-entry] OK, CHANGELOG.md matches the rebuild from release-notes/\n");
+      // The document the comparison was made against. Two empty files match
+      // each other, so a verdict of "matches the rebuild" says nothing until
+      // this number says there was something to match.
+      checkStats.lines = _lines(actual);
       _publishCounts(checkStats, process.stdout);
       return;
     }
@@ -690,6 +721,7 @@ function main() {
     process.stdout.write(loaded.notes.headline + "\n");
     process.stderr.write("[generate-changelog-entry] OK, v" + version +
       " headline from " + loaded.source + "\n");
+    oneStats.lines = _lines(loaded.notes.headline);
     _publishCounts(oneStats, process.stderr);
     return;
   }
@@ -699,6 +731,7 @@ function main() {
     process.stdout.write(page);
     process.stderr.write("[generate-changelog-entry] OK, rendered the v" + version +
       " release page (" + page.length + " chars) from " + loaded.source + "\n");
+    oneStats.lines = _lines(page);
     _publishCounts(oneStats, process.stderr);
     return;
   }
@@ -709,6 +742,7 @@ function main() {
     " entry (" + block.length + " chars) from " + loaded.source +
     ". Use --rebuild to write CHANGELOG.md, --check to gate drift, " +
     "--release-page for release-page markdown.\n");
+  oneStats.lines = _lines(block);
   _publishCounts(oneStats, process.stderr);
 }
 

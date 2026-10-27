@@ -42,10 +42,11 @@
             {% if a.reason %}<span class="cell-detail">{{ a.reason }}</span>{% endif %}
           </td>
           <td>
-            {{ a.quotaLabel }}
+            {{ a.usedLabel }} of {{ a.quotaLabel }}
             {% if a.usedBucket %}
             <span class="meter meter-inline"><span class="meter-fill w{{ a.usedBucket }}"></span></span>
             {% endif %}
+            <span class="cell-detail">{{ a.usedCount }} stored</span>
           </td>
           <td>{{ a.created }}</td>
           <td class="row-actions">
@@ -75,8 +76,8 @@
   </div>
 
   <nav class="pager" aria-label="More accounts">
-    {% if prevHref %}<a class="btn btn-quiet" href="{{ prevHref }}">Previous</a>{% endif %}
-    {% if nextHref %}<a class="btn btn-quiet" href="{{ nextHref }}">Next</a>{% endif %}
+    {% if prevHref %}<a class="btn btn-quiet" href="/{{ prevHref }}">Previous</a>{% endif %}
+    {% if nextHref %}<a class="btn btn-quiet" href="/{{ nextHref }}">Next</a>{% endif %}
   </nav>
 
   <h2 class="section-title">Create an account</h2>
@@ -110,12 +111,10 @@
         <p class="hint">Zero leaves the account uncapped.</p>
       </div>
     </div>
-    <div class="field">
-      <label class="checkline" for="isAdmin">
-        <input id="isAdmin" name="isAdmin" type="checkbox">
-        Give this account the operator console
-      </label>
-    </div>
+    <p class="hint">
+      The account is created without the operator console. To give it the console, press
+      Give it the console on its row once it exists, which asks for a reason.
+    </p>
     <button type="submit" class="btn btn-primary">Create account</button>
   </form>
 

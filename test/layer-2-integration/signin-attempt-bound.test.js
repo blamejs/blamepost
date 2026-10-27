@@ -97,14 +97,56 @@ var NO_MAILBOX = "nobody@" + DOMAIN;
 // small and an ordinary sign in would meet it; too large and it is a
 // formality rather than a ceiling. The range is deliberately wide: this
 // is a sanity check on the advertised number, not a second copy of it.
+//
+// It is not the whole of what the advertised number is held to, and on
+// its own it was not enough. A range this wide is satisfied by a bound
+// anywhere between five posts and two hundred, while two shipped
+// documents tell an operator the number is fifty, so a limit that moved
+// a long way inside the range left both of them describing a server
+// that was refusing at some other point. The exact number is taken from
+// those documents below.
 var SMALLEST_DEFENSIBLE_LIMIT = 5;
 var LARGEST_DEFENSIBLE_LIMIT  = 200;
 
-// The longest wait a five minute window can name, which is the window
-// itself. The window is aligned to the clock rather than opened by the
-// first post, so a refusal names the time to the next boundary and any
-// value up to this one is ordinary.
-var LONGEST_WINDOW_WAIT_SECONDS = 300;
+// The documents that promise the bound, and the sentence they promise it
+// in. Both carry it, so both are read: a change landing in one and not
+// the other is the drift this is here to catch, and a document edited to
+// say something else fails here rather than leaving the operator with a
+// number nothing answers for.
+var BOUND_REFERENCES = ["SECURITY.md", "docs/operator-guide.md"];
+// Written to span line breaks, because both documents wrap the sentence
+// and a pattern that only matched it on one line would report a promise
+// that is plainly there as one nobody made.
+var BOUND_PROMISE_RE =
+  /(\w+)\s+posts\s+to\s+the\s+sign-in\s+form\s+in\s+any\s+(\w+)-minute\s+slot/i;
+
+// The number words a bound of this shape can be written with. A word
+// outside this set is reported rather than passed over, so a document
+// rewritten to spell the number some other way stops the run instead of
+// quietly reading as no promise at all.
+var NUMBER_WORDS = {
+  five: 5, ten: 10, fifteen: 15, twenty: 20, twentyfive: 25, thirty: 30,
+  forty: 40, fifty: 50, sixty: 60, seventyfive: 75, eighty: 80, hundred: 100,
+  "one hundred": 100, "two hundred": 200,
+};
+
+function _wordToNumber(word) {
+  var key = String(word).toLowerCase().replace(/[\s-]/g, "");
+  return Object.prototype.hasOwnProperty.call(NUMBER_WORDS, key)
+    ? NUMBER_WORDS[key]
+    : null;
+}
+
+// What one document promises, as { posts, windowMinutes }, or null when
+// the sentence is not in it.
+function promisedBound(rel) {
+  var text    = nodeFs.readFileSync(nodePath.join(helpers.REPO_ROOT, rel), "utf8");
+  var matched = BOUND_PROMISE_RE.exec(text);
+  if (matched === null) return null;
+  return { posts: _wordToNumber(matched[1]), windowMinutes: _wordToNumber(matched[2]) };
+}
+
+var SECONDS_PER_MINUTE = 60;
 
 // How long the run waits before asking a standing refusal again. Long
 // enough that a bound refilling several posts a second would have handed
@@ -249,6 +291,36 @@ async function run() {
     await server.start();
     running = true;
 
+    // 0. What the operator was told, before anything is asked of the
+    //    server. Both documents carry the same sentence, so they are
+    //    read against each other first: a bound that is right in one
+    //    document and wrong in the other is still a bound an operator
+    //    can act on incorrectly.
+    var promised = BOUND_REFERENCES.map(promisedBound);
+    count("every document that promises this bound still states it, so this is comparing " +
+      "something",
+      promised.every(function (p) {
+        return p !== null && p.posts !== null && p.windowMinutes !== null;
+      }),
+      BOUND_REFERENCES.map(function (rel, i) {
+        return rel + " -> " + JSON.stringify(promised[i]);
+      }).join("; "));
+    count("and they promise the same number of posts over the same window as each other",
+      promised.every(function (p) {
+        return p !== null && promised[0] !== null &&
+          p.posts === promised[0].posts && p.windowMinutes === promised[0].windowMinutes;
+      }),
+      JSON.stringify(promised));
+
+    var documentedPosts   = promised[0] === null ? null : promised[0].posts;
+    var documentedMinutes = promised[0] === null ? null : promised[0].windowMinutes;
+    // The longest wait the documented window can name, which is the
+    // window itself. It is aligned to the clock rather than opened by
+    // the first post, so a refusal names the time to the next boundary
+    // and any value up to this one is ordinary.
+    var longestWindowWaitSeconds = documentedMinutes === null
+      ? null : documentedMinutes * SECONDS_PER_MINUTE;
+
     // 1. The run, from one machine, at the form.
     var burst = await burstAt(httpPort, FLOOD_SOURCES[0], null);
     if (burst.rolledOver && burst.limit !== null) {
@@ -266,6 +338,12 @@ async function run() {
       burst.limit >= SMALLEST_DEFENSIBLE_LIMIT &&
       burst.limit <= LARGEST_DEFENSIBLE_LIMIT,
       "limit " + String(burst.limit));
+
+    count("and it is the number the documents print, so an operator relying on the " +
+      "documented bound is relying on the one this server keeps",
+      documentedPosts !== null && burst.limit === documentedPosts,
+      "the form advertises " + String(burst.limit) + " and the documents promise " +
+        String(documentedPosts));
 
     count("the remaining count falls by one for every post and reaches zero exactly at the " +
       "advertised limit, so what is advertised is what is being counted",
@@ -304,12 +382,13 @@ async function run() {
     // Which algorithm is running is settled below instead, by waiting long
     // enough for a bucket to have refilled several posts and asking again.
     // That is a behavioral difference and it does not move with the clock.
-    count("the wait it names falls inside the window the console describes, so a reader is " +
+    count("the wait it names falls inside the window the documents describe, so a reader is " +
       "told a moment that belongs to this bound rather than an arbitrary number",
       retryAfter !== null && retryAfter > 0 &&
-      retryAfter <= LONGEST_WINDOW_WAIT_SECONDS,
-      "Retry-After " + String(retryAfter) + "s against a " +
-      LONGEST_WINDOW_WAIT_SECONDS + "s window, refused after spending " +
+      longestWindowWaitSeconds !== null &&
+      retryAfter <= longestWindowWaitSeconds,
+      "Retry-After " + String(retryAfter) + "s against the documented " +
+      String(longestWindowWaitSeconds) + "s window, refused after spending " +
       (burst.spentSec === null ? "an unknown time" : burst.spentSec.toFixed(1) + "s"));
 
     // The claim behind the wait. A bound that hands back a share of the

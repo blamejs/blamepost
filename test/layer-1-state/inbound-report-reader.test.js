@@ -47,6 +47,11 @@ var POSTMASTER = "postmaster@" + DOMAIN;
 var VAULT_PASSPHRASE = "a long enough vault passphrase for one test run";
 var ALICE_PASSWORD   = "quiet lantern bicycle 4291";
 
+// The C1 range, which carries the single-byte forms of the escape
+// sequences a terminal acts on. Built from its numbers so this file's own
+// bytes stay ASCII.
+var C1_CONTROL_RE = new RegExp("[\\u0080-\\u009f]");
+
 // The reader never asks a resolver anything, and the handle refuses to
 // build without one, so this answers nothing and is never called.
 var IDLE_RESOLVER = {
@@ -219,6 +224,38 @@ function aReportCarryingOctetsThatAreNotUtf8IsRefused(dataDir) {
   count("and nothing it appeared to say is counted",
     reportsOf(delivery).byAction.failed === 0 && reportsOf(delivery).unreadable === 1,
     JSON.stringify(reportsOf(delivery)));
+}
+
+// A refusal quotes the far side's own bytes back at an operator, and it
+// is read in a terminal and in the browser. The C1 range carries the
+// single-byte forms of the escape sequences the C0 range spells with two
+// bytes: U+009B is CSI, the one that introduces a cursor movement or a
+// color change, so a report that puts one in a header line writes the
+// rest of that line into a terminal as a command rather than as text.
+//
+// The message is refused either way. What is measured here is the
+// reason the refusal is recorded and printed under, on the verdict the
+// caller is handed and on the row kept for reading back.
+function aRefusalQuotingAControlTheTerminalActsOnIsScreened(dataDir) {
+  var delivery = deliveryOn(dataDir, POSTMASTER);
+  // Written from its number so this file's own bytes stay ASCII.
+  var CSI = String.fromCharCode(0x9b);
+  var report = "From: MAILER-DAEMON@relay.example.net\r\n" +
+    "To: " + POSTMASTER + "\r\n" +
+    "Conte" + CSI + "nt-Type multipart/report\r\n\r\nnot a readable structure\r\n";
+
+  var verdict = delivery.reports.receive(Buffer.from(report, "utf8"),
+    { arrivedFor: POSTMASTER });
+  count("a report whose structure will not read is refused",
+    verdict.read === false && verdict.reason === "unreadable", JSON.stringify(verdict.reason));
+  count("and the reason it is refused under carries no C1 control",
+    !C1_CONTROL_RE.test(String(verdict.detail)), JSON.stringify(verdict.detail));
+
+  var recent = delivery.reports.recent();
+  var row = recent[recent.length - 1];
+  count("the row kept for reading back carries none either",
+    row.unreadable === true && !C1_CONTROL_RE.test(String(row.reason)),
+    JSON.stringify(row.reason));
 }
 
 // RFC 3464 section 2.3.3 names five actions and only two of them are
@@ -430,6 +467,7 @@ async function readerCases() {
     aReportThatNamesNoAddressAtAllIsRefused(freshDir("rpt-none"));
     aDeliveryStatusPartUnderTheWrongTopLevelTypeIsRefused(freshDir("rpt-wrong-type"));
     aReportCarryingOctetsThatAreNotUtf8IsRefused(freshDir("rpt-not-utf8"));
+    aRefusalQuotingAControlTheTerminalActsOnIsScreened(freshDir("rpt-c1-reason"));
     everyActionIsCountedUnderTheTokenItArrivedAs(freshDir("rpt-actions"));
     ordinaryMailIsNotARecordOfAnything(freshDir("rpt-plain"));
     readingAReportTouchesNothingOnDisk(freshDir("rpt-no-write"));

@@ -50,12 +50,12 @@ operator-supplied endpoint when you want one.
 |---|---|---|
 | Inbound MX, `:25` | `b.mail.server.mx` | The RFC 5321 state machine, SMTP-smuggling defense at the wire layer, and the gate cascade. blamepost arms HELO discipline, envelope screening, and SPF / DKIM / DMARC / ARC evaluation at DATA, after which the primitive writes the `Authentication-Results` header (RFC 8601) on the way in. Only the first three reach the disposition; the ARC result is written down and nothing else. The RBL and greylisting gates are wiring points the primitive accepts and this release passes nothing to |
 | Submission, `:587` / `:465` | `b.mail.server.submission` | RFC 6409 submission and RFC 8314 implicit TLS, SASL AUTH (RFC 4954) offering PLAIN, and the binding of the authenticated account to `MAIL FROM` |
-| IMAP, `:143` | `b.mail.server.imap` | IMAP4rev2 (RFC 9051), CONDSTORE and QRESYNC modseq synchronization (RFC 7162), literal-framing and command-shape refusal |
+| IMAP, `:143` | `b.mail.server.imap` | IMAP4rev2 (RFC 9051), CONDSTORE modseq synchronization (RFC 7162), METADATA and METADATA-SERVER annotations (RFC 5464), literal-framing and command-shape refusal. The capability line names those and `AUTH=PLAIN`, plus `STARTTLS` until the session is encrypted; QRESYNC, NOTIFY and CATENATE are removed from it because none of the three is served |
 | POP3, `:110` | `b.mail.server.pop3` | RFC 1939 with STLS (RFC 2595). Off by default; a fallback for clients that cannot speak IMAP |
 | ManageSieve, `:4190` | `b.mail.server.managesieve` | RFC 5804 script upload, activation and listing, with validation before storage |
 | JMAP, `/jmap` on the web app | `b.mail.server.jmap` | JMAP Core (RFC 8620) and JMAP Mail (RFC 8621) as an HTTP-mounted handler |
 | Webmail and admin, `:8080` / `:8443` | the blamejs web app | Routing, session handling, the security middleware chain, and server-rendered HTML |
-| Outbound delivery | `b.mail.send.deliver` | MX resolution, MTA-STS enforcement (RFC 8461), DANE (RFC 7672), retry scheduling, and DSN generation (RFC 3464). REQUIRETLS (RFC 8689) is carried as far as the transport and no further, so it is refused rather than advertised |
+| Outbound delivery | `b.mail.send.deliver` | MX resolution, MTA-STS enforcement (RFC 8461), DANE (RFC 7672) once the operator states that their resolver validates DNSSEC, REQUIRETLS when the operator asks for it (RFC 8689), retry scheduling, and DSN generation (RFC 3464) |
 | Filtering | `b.mail.sieve` | The RFC 5228 interpreter that produces the action list the delivery step applies |
 
 Every protocol's mailbox verb arrives at one adapter,
@@ -94,10 +94,12 @@ nothing in the directory can be read without them.
 none is always there.** `blamepost.lock` names the process holding the volume
 and exists only while one does. `audit.tip` records where the audit chain stood
 when it was last anchored, as a counter and a row hash in plaintext, and is
-written each time a checkpoint is. `audit.disputed` is written only when that
-record disagrees with the rows, and while it exists the volume refuses to open
-at all, so a rewritten trail is not appended to while somebody works out what
-happened.
+written each time a checkpoint is. `audit.disputed` is written when that record
+disagrees with the rows, and while such a finding stands the volume refuses to
+open at all, so a rewritten trail is not appended to while somebody works out
+what happened. The same file carries the one finding that is reported rather
+than raised, a range a purge removed and this server did not read, and a volume
+carrying that one goes on running and says so on every later run.
 
 **One passphrase opens the mail and signs the audit trail, and that sets the
 boundary the trail's guarantee stands on.** `audit-sign.key.sealed` is the key
@@ -281,24 +283,27 @@ tolerance.
 ## Outbound: a message leaving
 
 1. **Submission.** `b.mail.server.submission` requires AUTH before `MAIL FROM`
-   and then checks that the authenticated account actually owns the envelope
-   sender. A mismatch is refused at the wire with `553 5.7.1 Sender address
+   and then checks the envelope sender against the set the authenticated
+   account may write: its own address plus every active alias landing in its
+   mailbox, canonical so a subaddress folds, and never a catch-all. An address
+   outside the set is refused at the wire with `553 5.7.1 Sender address
    rejected: not owned by authenticated identity`, before any recipient is
    accepted, which stops a compromised credential from being used to forge
-   another account's identity. The `From` header is bound separately, against a
-   wider set: the account's own address plus every active alias landing in its
-   mailbox, canonical so a subaddress folds, and never a catch-all. The webmail
-   and JMAP surfaces compose their own envelope and read that same set, so an
-   account can write an alias as the author there; a client on the submission
-   port puts the alias in both places and is stopped by the envelope binding.
+   another account's identity. `From` and `Sender` are checked on the finished
+   message against that same set, so neither half permits an address the other
+   refuses. An author outside it is refused `550 5.7.1`, and a header block
+   that names no single readable author `550 5.6.0`. The webmail and JMAP
+   surfaces compose their own envelope from the account's own address and read
+   the same set for the author, so a bounce reaches whoever pressed send.
 2. **Signing.** The message is signed in-process, as the DKIM section below
    describes.
 3. **Spool.** The envelope enters `queue/`, durable across restarts.
 4. **Delivery.** `b.mail.send.deliver` resolves the recipient's MX, applies the
    MTA-STS policy for that domain, checks TLSA records when the zone is signed,
-   and delivers over TLS. REQUIRETLS (RFC 8689) is not requested: the parameter
-   does not reach the wire, so the setting that asks for it is refused at boot
-   rather than reporting a protection no receiver is ever asked to apply.
+   and delivers over TLS. With `requireTls` set, the REQUIRETLS keyword
+   (RFC 8689) goes on `MAIL FROM` for a peer that advertises the extension, and
+   a peer that does not advertise it is permanently failed rather than delivered
+   to in the clear, which RFC 8689 §4.1 requires. It is off by default.
 5. **Retry and DSN.** Temporary failures back off and retry; permanent failures
    and expired retries generate a DSN back to the sender.
 
@@ -441,8 +446,9 @@ cannot come back somewhere else.
 ## Repository layout
 
 ```text
-bin/blamepost.js       CLI: serve, init, account, domain, dkim, queue, doctor,
-                       blobs, audit, backup, restore
+bin/blamepost.js       CLI: serve, init, account, domain, dkim, zone,
+                       credential, reports, dmarc, queue, blobs, attachments,
+                       doctor, audit, backup, restore
 lib/index.js           the composition facade over the vendored framework
 lib/config/            config loading, schema validation, environment merge
 lib/mail/              listener composition, delivery, DKIM, Sieve, auth

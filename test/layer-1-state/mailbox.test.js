@@ -118,8 +118,14 @@ function testTheStoreTakesTheFrameworkDatabaseDirectly() {
 
 function testTables() {
   var names = mailbox.TABLES.map(function (t) { return t.name; });
-  count("blamepost.mail.mailbox.TABLES declares the four mailbox tables",
-    names.length === 4, names.join(","));
+  // Named rather than counted. A bare number says a table went missing
+  // and not which one, and it reads as a pass for a table swapped for
+  // another.
+  var wanted = [mailbox.FOLDERS, mailbox.MESSAGES, mailbox.SCRIPTS, mailbox.METADATA,
+    mailbox.SUBSCRIBED, mailbox.COUNTERS];
+  var absent = wanted.filter(function (name) { return names.indexOf(name) === -1; });
+  count("blamepost.mail.mailbox.TABLES declares every mailbox table",
+    absent.length === 0 && names.length === wanted.length, names.join(","));
   count("blamepost.mail.mailbox.TABLES seals the folder name",
     mailbox.TABLES[0].sealedFields.indexOf("wireName") !== -1);
   count("blamepost.mail.mailbox.TABLES carries a derived hash for the sealed folder name, " +
@@ -128,6 +134,30 @@ function testTables() {
   var sieveTable = mailbox.TABLES.filter(function (t) { return t.name === mailbox.SCRIPTS; })[0];
   count("blamepost.mail.mailbox.TABLES seals the Sieve script body",
     sieveTable.sealedFields.indexOf("body") !== -1);
+
+  // A subscribed name is a mailbox its owner reads often, so the set is
+  // sealed the same way the folder names are, and it carries no folder
+  // column: RFC 9051 section 6.3.8 keeps the entry after the mailbox has
+  // gone, so a name is what the row holds.
+  var subs = mailbox.TABLES.filter(function (t) {
+    return t.name === mailbox.SUBSCRIBED;
+  })[0];
+  count("blamepost.mail.mailbox.TABLES seals the subscribed name",
+    subs.sealedFields.indexOf("wireName") !== -1, subs.sealedFields.join(","));
+  count("and anchors its lookup on a derived hash of that name",
+    subs.derivedHashes.wireNameKey.from === "wireName");
+  count("and binds a subscribed name to an account rather than to a mailbox row",
+    Object.prototype.hasOwnProperty.call(subs.columns, "account") &&
+      !Object.prototype.hasOwnProperty.call(subs.columns, "folder"),
+    Object.keys(subs.columns).join(","));
+
+  // The mailbox row records nothing about the subscribed set. Two
+  // records of one fact is the pair that comes apart, and the one on the
+  // mailbox row is the one RFC 9051 section 6.3.8 forbids: it would go
+  // with the row when DELETE takes it.
+  count("the mailbox row carries no subscribed column",
+    !Object.prototype.hasOwnProperty.call(mailbox.TABLES[0].columns, "subscribed"),
+    Object.keys(mailbox.TABLES[0].columns).join(","));
 }
 
 // ---- listener construction ----
@@ -259,9 +289,18 @@ async function testAppendAndIsolation(handle, alice, bob) {
 
   // Flags cannot ride along with the store's append, so the adapter
   // sets them afterwards. This is the check that the second step ran.
+  //
+  // Membership rather than the whole list, because the same step writes
+  // the mark saying whether the message carries files and the store
+  // answers the two in no particular order. The client's flag being
+  // there is what this is about, and it still fails if the step is
+  // dropped.
   var flagged = handle.mailbox.fetchRange(alice, "INBOX", "1", "FLAGS", {});
   count("APPEND flags are on the message, set as their own step",
-    flagged[0].payload === "FLAGS (\\Seen)", flagged[0].payload);
+    flagged[0].payload.indexOf("\\Seen") !== -1, flagged[0].payload);
+  count("and the same step recorded that this message carries no files",
+    flagged[0].payload.indexOf(mailbox.ATTACHMENT_KEYWORDS.absent) !== -1,
+    flagged[0].payload);
 }
 
 // A literal announces an octet count and is followed by exactly that
@@ -295,9 +334,14 @@ function testFetch(handle, alice) {
     "(UID FLAGS RFC822.SIZE INTERNALDATE)", { useUid: false });
   count("FETCH returns one row per message in the set", rows.length === 2);
   count("FETCH numbers messages from one", rows[0].seq === 1 && rows[1].seq === 2);
+  // The flag list is matched loosely and the attributes around it are
+  // not. What this is about is that each attribute is rendered, in the
+  // order the client named them; which flags the message holds is a
+  // question the checks above answer, and the list carries the mark
+  // saying whether the message carries files beside the client's own.
   count("FETCH renders the attributes the client asked for",
-    /^UID 1 FLAGS \(\\Seen\) RFC822\.SIZE \d+ INTERNALDATE "\d\d-[A-Z][a-z][a-z]-\d{4} /
-      .test(rows[0].payload),
+    /^UID 1 FLAGS \([^)]*\) RFC822\.SIZE \d+ INTERNALDATE "\d\d-[A-Z][a-z][a-z]-\d{4} /
+      .test(rows[0].payload) && rows[0].payload.indexOf("\\Seen") !== -1,
     rows[0].payload);
 
   var uidRows = handle.mailbox.fetchRange(alice, "INBOX", "2", "FLAGS", { useUid: true });
@@ -333,11 +377,43 @@ function testFetch(handle, alice) {
     envelope[0].payload.indexOf("(\"Sender\" NIL \"sender\" \"example.net\")") !== -1,
     envelope[0].payload);
 
+  // The ENVELOPE cuts each address at the LAST pair of angle brackets in
+  // the entry, and the pair does not have to end it. RFC 5322 §3.2.2
+  // lets a comment follow the address and §3.4 lets a quoted display
+  // name carry angle brackets of its own, so both of these are ordinary
+  // mail. An end-anchored reading answers the first with the whole entry
+  // as the mailbox name, and a first-match reading answers the second
+  // with the display name as the address; both spellings are one line
+  // away in `b.codepointClass`, and neither answers this question.
+  //
+  // Filed in Archive rather than INBOX so the message counts INBOX is
+  // asserted on further down do not move.
+  var commented = handle.mailbox.appendMessage("Archive", Buffer.from(
+    "From: Alice <alice@example.net> (out of office)\r\n" +
+    "To: \"R <x>\" <recipient@example.org>\r\n" +
+    "Subject: address shapes\r\n" +
+    "Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n" +
+    "Message-Id: <addressshapes@example.net>\r\n" +
+    "\r\nbody\r\n", "utf8"), { actor: alice, flags: [] });
+  count("the message carrying the two address shapes is filed", commented.uid >= 1);
+  var shapes = handle.mailbox.fetchRange(alice, "Archive", "1", "ALL", {});
+  count("an address followed by a comment is cut at its angle brackets",
+    shapes[0].payload.indexOf("(\"Alice\" NIL \"alice\" \"example.net\")") !== -1,
+    shapes[0].payload);
+  count("a quoted display name holding angle brackets does not become the address",
+    shapes[0].payload.indexOf("\"recipient\" \"example.org\"") !== -1,
+    shapes[0].payload);
+
   var peeked = handle.mailbox.fetchRange(alice, "INBOX", "2", "FLAGS", {});
-  count("a peeking fetch left the message unread", peeked[0].payload === "FLAGS ()");
+  // `\Seen` is the flag this is about. The list is not empty, because
+  // filing records whether the message carries files, and that mark says
+  // nothing about whether anybody has read it.
+  count("a peeking fetch left the message unread",
+    peeked[0].payload.indexOf("\\Seen") === -1, peeked[0].payload);
   handle.mailbox.fetchRange(alice, "INBOX", "2", "BODY[]", {});
+  var afterRead = handle.mailbox.fetchRange(alice, "INBOX", "2", "FLAGS", {})[0].payload;
   count("a fetch that is not peeking records the read (RFC 9051 section 6.4.5)",
-    handle.mailbox.fetchRange(alice, "INBOX", "2", "FLAGS", {})[0].payload === "FLAGS (\\Seen)");
+    afterRead.indexOf("\\Seen") !== -1, afterRead);
 }
 
 async function testWireRefusals(handle, alice) {
@@ -377,7 +453,8 @@ function testStatusAndFlags(handle, alice) {
   count("STORE removes a flag", removed.rows[0].flags.indexOf("\\Flagged") === -1,
     removed.rows[0].flags.join(" "));
   var replaced = handle.mailbox.storeFlags(alice, "INBOX", "1", "replace", ["\\Answered"], {});
-  count("STORE replaces the whole set", replaced.rows[0].flags.join(" ") === "\\Answered",
+  count("STORE replaces the whole set a client sets and keeps the derived attachment mark",
+    replaced.rows[0].flags.join(" ") === "\\Answered $HasNoAttachment",
     replaced.rows[0].flags.join(" "));
 
   var conditional = handle.mailbox.storeFlags(alice, "INBOX", "1:*", "add", ["\\Draft"],

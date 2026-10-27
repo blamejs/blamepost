@@ -234,7 +234,7 @@ function countingAgent(agent, tally) {
 // messages: a short one is the last window's row count showing through,
 // and an old one is the first window's.
 async function testTheNewestPageSurvivesAPurge(reader) {
-  var page = await reader.get("/mail/INBOX");
+  var page = await reader.get("/mail?folder=INBOX");
   count("the folder renders", page.status === 200, page.status);
   count("a full page of messages is shown",
     rowsOn(page.body) === web.PAGE_SIZE,
@@ -255,8 +255,8 @@ async function testTheNewestPageSurvivesAPurge(reader) {
 // row's sequence number rather than the folder's mark, so this is the
 // read the gap does not reach, and it has to keep working.
 async function testThePageBeforeItStillReads(reader) {
-  var first = await reader.get("/mail/INBOX");
-  var older = /href="(\/mail\/INBOX\?before=[0-9]+)"/.exec(first.body);
+  var first = await reader.get("/mail?folder=INBOX");
+  var older = /href="(\/mail\?folder=INBOX&amp;before=[^"]+)"/.exec(first.body);
   count("the folder offers a way back through older mail",
     older !== null, first.body.indexOf("before=") === -1 ? "no cursor rendered" : "");
 
@@ -279,11 +279,11 @@ async function testThePageBeforeItStillReads(reader) {
 // be a request that orders up every widening step behind it.
 async function testACursorPastTheFolderReadsAsTheNewestPage(reader, tally) {
   tally.reads = 0;
-  var plain = await reader.get("/mail/INBOX");
+  var plain = await reader.get("/mail?folder=INBOX");
   var plainReads = tally.reads;
 
   tally.reads = 0;
-  var beyond = await reader.get("/mail/INBOX?before=" + Number.MAX_SAFE_INTEGER);
+  var beyond = await reader.get("/mail?folder=INBOX&before=" + Number.MAX_SAFE_INTEGER);
   count("a cursor past everything renders", beyond.status === 200, beyond.status);
   count("and shows the newest page rather than nothing",
     rowsOn(beyond.body) === web.PAGE_SIZE &&
@@ -294,6 +294,37 @@ async function testACursorPastTheFolderReadsAsTheNewestPage(reader, tally) {
     rowsOn(beyond.body) + " against " + rowsOn(plain.body));
   count("and costs no more folder reads than that one did",
     tally.reads <= plainReads, tally.reads + " reads against " + plainReads);
+}
+
+// One STORE over many messages gives every one of them the same
+// mod-sequence, which RFC 7162 permits. Walking the folder page by page
+// from the newest has to reach every message exactly once even when a
+// page boundary falls inside that run of equal numbers.
+async function testEveryMessageIsReachedAfterABulkStore(reader, identity, readerId, expected) {
+  var flagged = identity.mailbox.storeFlags({ id: readerId }, "INBOX",
+    (expected - 59) + ":*", "add", ["\\Flagged"], {});
+  var shared = flagged.rows.map(function (r) { return r.modseq; });
+  count("the bulk STORE gave its messages one shared mod-sequence",
+    shared.length === 60 && shared.every(function (m) { return m === shared[0]; }),
+    JSON.stringify(shared.slice(0, 3)) + " of " + shared.length);
+
+  var seen = Object.create(null);
+  var duplicates = 0;
+  var path = "/mail?folder=INBOX";
+  for (var page = 0; page < 40 && path; page += 1) {
+    var got = await reader.get(path);
+    var subjects = (got.body.match(/Paging note [0-9]+ of/g) || [])
+      .filter(function (v, i, all) { return all.indexOf(v) === i; });
+    for (var s = 0; s < subjects.length; s += 1) {
+      if (seen[subjects[s]]) duplicates += 1;
+      seen[subjects[s]] = true;
+    }
+    var older = /href="(\/mail\?folder=INBOX&amp;before=[^"]+)"/.exec(got.body);
+    path = older ? older[1].replace(/&amp;/g, "&") : null;
+  }
+  count("walking every page reaches every message in the folder",
+    Object.keys(seen).length === expected, Object.keys(seen).length + " of " + expected);
+  count("and shows none of them twice", duplicates === 0, duplicates + " repeated");
 }
 
 // ---- the drive ----
@@ -335,7 +366,7 @@ async function driveTheSurface(identity, wiring) {
     // it runs before every read below rather than being one of them. The
     // oldest message goes, so the newest page is untouched by it and any
     // change to that page is the read getting it wrong.
-    var purged = await client.post("/mail/INBOX/actions",
+    var purged = await client.post("/mail/actions?folder=INBOX",
       "action=purge&objectId=" + encodeURIComponent(stored[0].objectid));
     count("the oldest message is purged", purged.status === 302,
       purged.status + " " + purged.body.slice(0, 200));
@@ -349,6 +380,8 @@ async function driveTheSurface(identity, wiring) {
     await testTheNewestPageSurvivesAPurge(client);
     await testThePageBeforeItStillReads(client);
     await testACursorPastTheFolderReadsAsTheNewestPage(client, tally);
+    await testEveryMessageIsReachedAfterABulkStore(client, identity, reader.id,
+      TOTAL_NOTES - 1);
   } finally {
     await listener.stop({ timeoutMs: HTTP_TIMEOUT_MS });
   }

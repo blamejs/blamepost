@@ -384,8 +384,8 @@ function theContextIsTheSizeOfTheSourceTree(paths, scratchRoot) {
   }, 0);
   var ceilingBytes = 48 * 1024 * 1024;
   count("the build context stays within a bound set well above the source tree, so a " +
-    "directory that starts being carried by accident is reported rather than paid for " +
-    "on every build",
+    "directory that starts being carried by accident is reported rather than copied into " +
+    "every build",
     bytes <= ceilingBytes,
     Math.round(bytes / 1048576) + " MiB against a " +
       Math.round(ceilingBytes / 1048576) + " MiB ceiling");

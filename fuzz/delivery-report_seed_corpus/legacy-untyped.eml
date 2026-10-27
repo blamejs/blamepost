@@ -1,0 +1,22 @@
+From: MAILER-DAEMON@relay.example.net
+To: postmaster@example.com
+Subject: Returned mail
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=delivery-status; boundary="rpt-6"
+
+--rpt-6
+Content-Type: text/plain; charset=us-ascii
+
+Relayed onward.
+
+--rpt-6
+Content-Type: message/delivery-status
+
+Reporting-MTA: relay.example.net
+
+Final-Recipient: bob@example.net
+Action: Relayed
+Status: 2.0.0
+Diagnostic-Code: relayed to a server that does not send reports
+
+--rpt-6--

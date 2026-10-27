@@ -287,6 +287,31 @@ var ORPHAN_BYTES = 60000;
 // timestamp resolution is coarse cannot land the file back inside it.
 var WELL_SETTLED_MS = blamepost.mail.delivery.SPOOL_SETTLE_MS + 60000;
 
+// How long a body has to have been on the volume before the
+// reconciliation will name it, as the operator guide promises it.
+//
+// Written here rather than taken from the module, which is what the
+// margin above does and what the cases either side of the boundary
+// cannot do. A fixture aged at the module's own window plus a minute
+// moves with the window, so a window narrowed to half a minute leaves
+// every case in this file passing while `blamepost doctor` starts
+// naming bodies that are still being written as ones to delete, and a
+// window widened to a day leaves them passing too while an operator
+// hears about spent queue capacity a day after the queue began refusing
+// mail over it.
+var DOCUMENTED_SETTLE_MS = helpers.b.constants.TIME.minutes(5);
+
+// The sentence that promises it, so a document edited to say something
+// else fails here rather than leaving the number above describing
+// nothing.
+var SETTLE_PROMISE_RE = /A body\s+written in the last five minutes is left out/;
+var SETTLE_REFERENCE  = "docs/operator-guide.md";
+
+// Either side of the documented window by a minute, which is coarse
+// enough that a filesystem storing timestamps to the second cannot round
+// a fixture across the boundary it was placed on.
+var SETTLE_MARGIN_MS = 60000;
+
 function plantOrphanBody(dataDir, id, bytes, ageMs) {
   var dir = path.join(dataDir, "queue");
   fs.mkdirSync(dir, { recursive: true });
@@ -301,9 +326,13 @@ function plantOrphanBody(dataDir, id, bytes, ageMs) {
 
 async function aBodyWithNoDescriptorIsFoundRatherThanOnlyWeighed(dataDir) {
   // A ceiling one message wide, so the orphan alone is the difference
-  // between accepting mail for forwarding and refusing it.
+  // between accepting mail for forwarding and refusing it. The message
+  // size goes in beside it, because the spool floor is measured against
+  // what the listeners accept and a caller naming none describes a
+  // server running the shipped ceiling, which is far above this.
   var delivery = handleOn(dataDir, UNREACHABLE_MX, {
-    spool: { maxMessages: 4, maxBytes: 65536 },
+    spool:           { maxMessages: 4, maxBytes: 65536 },
+    maxMessageBytes: 65536,
   });
 
   plantOrphanBody(dataDir, ORPHAN_ID, ORPHAN_BYTES, WELL_SETTLED_MS);
@@ -393,6 +422,48 @@ async function aBodyStillBeingWrittenIsNotCalledAnOrphan(dataDir) {
   count("a body that has its descriptor is never an orphan, however old",
     delivery.queue.orphans().length === 0,
     JSON.stringify(delivery.queue.orphans()));
+}
+
+// The width of that wait, driven from both sides.
+//
+// The two cases above place their fixtures relative to the module's own
+// window, so between them they prove only that the boundary is
+// somewhere above zero. The guide tells an operator where it is, and
+// both errors it rules out are real: a window that is too narrow turns
+// `blamepost doctor` into a list of messages to delete that are
+// arriving normally, and one that is too wide leaves the queue refusing
+// mail over room nothing accounts for until long after an operator
+// needed to know.
+async function theSettleWindowIsTheWidthTheGuidePromises(dataDir) {
+  var guide = fs.readFileSync(
+    path.join(helpers.REPO_ROOT, SETTLE_REFERENCE), "utf8");
+  count("the operator guide promises a settle window, so this is comparing something",
+    SETTLE_PROMISE_RE.test(guide), SETTLE_REFERENCE);
+
+  var delivery = handleOn(dataDir, UNREACHABLE_MX);
+
+  count("the window the queue reports is the five minutes the guide promises, so an " +
+    "operator reading why a body was left out is reading the number they were given",
+    delivery.queue.capacity().orphaned.settleMs === DOCUMENTED_SETTLE_MS,
+    "reports " + delivery.queue.capacity().orphaned.settleMs + "ms against the documented " +
+      DOCUMENTED_SETTLE_MS + "ms");
+
+  var inside = "1a2b3c4d5e6f708192a3b4c5";
+  plantOrphanBody(dataDir, inside, 4096, DOCUMENTED_SETTLE_MS - SETTLE_MARGIN_MS);
+  count("a body a minute inside the window is not named, so a pair that is legitimately " +
+    "half on disk is not reported as one to delete",
+    delivery.queue.orphans().length === 0,
+    JSON.stringify(delivery.queue.orphans()));
+
+  var past = "607f8e9dacbb0c1d2e3f4051";
+  plantOrphanBody(dataDir, past, 4096, DOCUMENTED_SETTLE_MS + SETTLE_MARGIN_MS);
+  var named = delivery.queue.orphans();
+  count("and one a minute past it is, so the wait ends when the guide says it ends rather " +
+    "than at some later width nobody was told about",
+    named.length === 1 && named[0].id === past, JSON.stringify(named));
+
+  fs.rmSync(path.join(dataDir, "queue", inside + ".eml"), { force: true });
+  fs.rmSync(path.join(dataDir, "queue", past + ".eml"), { force: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +572,8 @@ async function run() {
       function () { return aBodyWithNoDescriptorIsFoundRatherThanOnlyWeighed(freshDir("dlv-spool-body")); });
     await helpers.withTestTimeout("delivery spool: a body still being written is not an orphan",
       function () { return aBodyStillBeingWrittenIsNotCalledAnOrphan(freshDir("dlv-spool-settle")); });
+    await helpers.withTestTimeout("delivery spool: the settle window is the documented width",
+      function () { return theSettleWindowIsTheWidthTheGuidePromises(freshDir("dlv-spool-width")); });
     await helpers.withTestTimeout("delivery spool: a body is taken back when its descriptor fails",
       function () { return aBodyIsTakenBackWhenItsDescriptorCannotBeWritten(freshDir("dlv-spool-undo")); });
     await helpers.withTestTimeout("delivery spool: a peer's words are kept as they arrived",

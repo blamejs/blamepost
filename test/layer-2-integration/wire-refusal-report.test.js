@@ -179,10 +179,33 @@ function identityAnswering() {
         }
         return { ok: false, reason: "credentials-rejected" };
       },
+      // The same one account, read again. A credential is verified once
+      // and the session it opens outlives the answer, so every message a
+      // submission session hands over re-reads the account behind it.
+      // Answered synchronously, because the shipped store answers this
+      // one off a row and a promise here would read as an account with no
+      // status at all.
+      get: function (idOrAddress) {
+        var asked = String(idOrAddress).toLowerCase();
+        if (asked !== "acct_alice" && asked !== KNOWN) return null;
+        return {
+          id: "acct_alice", address: KNOWN, domain: DOMAIN,
+          status: "active", isAdmin: false,
+        };
+      },
     },
-    domains:  { list: async function () {
-      return [{ domain: DOMAIN, status: "active", dnsAcknowledged: true }];
-    } },
+    domains:  {
+      list: async function () {
+        return [{ domain: DOMAIN, status: "active", dnsAcknowledged: true }];
+      },
+      // The second half of that re-read: an account in service on a
+      // domain the operator has withdrawn is not one this server serves.
+      get: function (domain) {
+        return String(domain).toLowerCase() === DOMAIN
+          ? { domain: DOMAIN, status: "active", dnsAcknowledged: true }
+          : null;
+      },
+    },
     // The submission listener reads the aliases that land in an
     // account's mailbox to decide which authors it may write. This
     // deployment has none, so the only address the one account here may
@@ -201,37 +224,10 @@ function failingSigner() {
   };
 }
 
-// A row's metadata arrives as the JSON text it went in as, so a test
-// reading a field off it has to parse first. Reading it without parsing
-// yields `undefined` for every field, which quietly satisfies any
-// assertion phrased as an upper bound. So this refuses rather than
-// returning an empty object when the text will not parse.
-function metadataOf(row) {
-  var raw = row && row.metadata;
-  if (raw && typeof raw === "object") return raw;
-  if (typeof raw !== "string" || raw.length === 0) {
-    throw new Error("audit row carries no metadata to read: " + JSON.stringify(row));
-  }
-  return JSON.parse(raw);
-}
-
-// Audit rows, captured where they are written rather than read back out
-// of a database this run does not open. `replaceChain` hands the row
-// straight here, so the capture does not need one.
-function auditCapture() {
-  var rows = [];
-  b.audit.useStore({
-    replaceChain: true,
-    record: async function (row) { rows.push(row); },
-  });
-  return {
-    rows:    function () { return rows.slice(); },
-    forAction: function (action) {
-      return rows.filter(function (row) { return row && row.action === action; });
-    },
-    release: function () { b.audit.useStore(null); },
-  };
-}
+// The metadata reader and the audit capture both live in
+// `test/helpers`, so every file that reads a row reads it the same way.
+var metadataOf   = helpers.metadataOf;
+var auditCapture = helpers.auditCapture;
 
 // The message store, recording what was appended and nothing more. No
 // Sieve script, so delivery files into INBOX by the ordinary path.

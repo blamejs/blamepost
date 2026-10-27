@@ -121,6 +121,7 @@ var nodeTls  = require("node:tls");
 var helpers = require("../helpers");
 var wire    = require("../helpers/wire");
 var foreign = require("../helpers/foreign-client");
+var clients = require("./clients");
 
 var count = helpers.count;
 
@@ -213,14 +214,13 @@ function readConfig() {
 // will accept, which is the thing under test, so the case below
 // compares the server against the client's own list rather than
 // against a list written here.
-var PYTHON = {
-  name:            "python",
-  envVar:          "BLAMEPOST_PYTHON_BIN",
-  candidates:      ["python3", "python", "py"],
-  probeArgs:       ["-c", "import imaplib;print('IMAPLIB ' + ' '.join(imaplib.AllowedVersions))"],
-  requireInOutput: /^IMAPLIB \S/m,
-  timeoutMs:       CLIENT_TIMEOUT_MS,
-};
+//
+// Claimed from the suite's table rather than written out here, because
+// scripts/test-integration.js reads that table to say how many of the
+// clients this file needs it actually located. A specification kept
+// here as well would let the runner report on a different program than
+// the one this file went on to drive.
+var PYTHON = clients.spec("python-imaplib");
 
 // What imaplib does when pointed at this server, one line per endpoint.
 // It reports the outcome as data rather than as an exit code, because a

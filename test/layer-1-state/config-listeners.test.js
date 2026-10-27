@@ -493,7 +493,27 @@ function testDefaultPortsMatchTheMailStack() {
       built !== undefined && built.enabled === loader.enabled,
       built === undefined ? "the mail stack builds no such listener"
         : built.enabled + " against " + loader.enabled);
+    // The ceiling is the third number the two tables both state. One of
+    // them moving alone gives the loader a value it validates and prints
+    // while the listener applies another, which is invisible until a peer
+    // sends a line between the two.
+    count("and that the " + name + " listener reads at most " + loader.maxLineBytes +
+      " octets of one line",
+      built !== undefined && built.maxLineBytes === loader.maxLineBytes,
+      built === undefined ? "the mail stack builds no such listener"
+        : built.maxLineBytes + " against " + loader.maxLineBytes);
   });
+
+  // The range each table admits is also stated twice, and a floor that
+  // moved in one place alone would let a value through one check and be
+  // refused by the other, which reads as a configuration that works
+  // until the listener is built.
+  count("the loader and the mail stack agree on the smallest line ceiling an operator may set",
+    config.MIN_LINE_BYTES === listenerModule.MIN_LINE_BYTES,
+    config.MIN_LINE_BYTES + " against " + listenerModule.MIN_LINE_BYTES);
+  count("and on the largest",
+    config.MAX_LINE_BYTES === listenerModule.MAX_LINE_BYTES,
+    config.MAX_LINE_BYTES + " against " + listenerModule.MAX_LINE_BYTES);
 }
 
 async function run() {

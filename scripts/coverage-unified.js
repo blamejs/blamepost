@@ -25,10 +25,33 @@
 // the shared directory (child test processes inherit it), so raw V8 coverage from every
 // layer accumulates; `c8 report --temp-directory` then merges it. This avoids wrapping
 // each command through the c8 CLI (whose argument parsing differs per layer cwd).
+//
+// WHAT THE RUN MERGED, published as the last lines of stdout:
+//
+//   EXAMINED <n> declared-coverage-layers
+//   EXAMINED <n> merged-coverage-layers
+//   EXAMINED <n> merged-coverage-files
+//
+// Three, because they fail independently and the report reads the same however
+// they came apart. `declared-coverage-layers` is the list this runner was built
+// to accumulate; a layer removed from it shrinks the floor with nothing else
+// moving. `merged-coverage-layers` is how many of them actually contributed,
+// which is the number that drops when the best-effort layer exits non-zero and
+// has its coverage discarded, and it used to be a boolean nothing read. And
+// `merged-coverage-files` is the raw V8 output that reached the merge
+// directory: two layers can both run and exit clean having written none of it,
+// which leaves the layer counts healthy and the merged report built over
+// nothing.
+//
+// The number matters beyond this script because `check-swallow-coverage` reads
+// the lcov this run writes. A floor measured on one layer of two, reported
+// under a cross-layer heading, is a weaker verdict wearing a stronger name.
 
 var spawnSync = require("node:child_process").spawnSync;
 var path = require("node:path");
 var fs = require("node:fs");
+
+var examinedCounts = require("./examined-counts.js");
 
 var ROOT = path.resolve(__dirname, "..");
 var COV = path.join(ROOT, "coverage");
@@ -48,6 +71,12 @@ fs.mkdirSync(MERGE, { recursive: true });
 // fails the whole run; a best-effort layer that exits non-zero has its coverage DISCARDED (the per-layer dir
 // is removed, never merged), so partial execution from a suite that loaded lib and then failed can never
 // inflate the merged floor or satisfy check-swallow-coverage with a failed run's hits.
+// What each layer contributed, so the run can say it rather than leaving the
+// answer in a boolean nothing reads. `merged` counts the layers whose raw
+// coverage reached MERGE; `files` counts the raw coverage files themselves,
+// because a layer can run, exit clean and write none.
+var merged = { layers: 0, files: 0, missing: [] };
+
 function layer(opts) {
   process.stdout.write("\n[coverage-unified] === " + opts.label + " ===\n");
   var layerDir = path.join(COV, "tmp-" + opts.slug);
@@ -59,15 +88,26 @@ function layer(opts) {
     fs.rmSync(layerDir, { recursive: true, force: true });   // discard a failed layer's coverage rather than merging it
     if (opts.required) { process.stderr.write("[coverage-unified] " + opts.label + " FAILED (exit " + r.status + "): required layer\n"); process.exit(r.status || 1); }
     process.stderr.write("[coverage-unified] " + opts.label + " skipped (exit " + r.status + "): coverage discarded, continuing\n");
+    merged.missing.push(opts.label + " (exit " + r.status + ")");
     return false;
   }
-  fs.readdirSync(layerDir).forEach(function (fn) { fs.renameSync(path.join(layerDir, fn), path.join(MERGE, fn)); });
+  var written = fs.readdirSync(layerDir);
+  written.forEach(function (fn) { fs.renameSync(path.join(layerDir, fn), path.join(MERGE, fn)); });
   fs.rmSync(layerDir, { recursive: true, force: true });
+  merged.layers += 1;
+  merged.files  += written.length;
   return true;
 }
 
-layer({ slug: "smoke", label: "smoke", cmd: [path.join("test", "smoke.js")], required: true });
-layer({ slug: "integration", label: "integration (live listeners)", cmd: [path.join("scripts", "test-integration.js")], required: false });
+// The layers this runner accumulates. Declared as a list so the count it
+// publishes is the list it actually walked rather than a number written beside
+// it, which is the same distinction every gate here is held to.
+var LAYERS = [
+  { slug: "smoke", label: "smoke", cmd: [path.join("test", "smoke.js")], required: true },
+  { slug: "integration", label: "integration (live listeners)", cmd: [path.join("scripts", "test-integration.js")], required: false },
+];
+
+LAYERS.forEach(layer);
 
 process.stdout.write("\n[coverage-unified] === merged cross-layer report ===\n");
 var reporters = ["--reporter=text-summary", "--reporter=lcov"];
@@ -88,4 +128,18 @@ if (report.status !== 0) {
   process.stderr.write("[coverage-unified] merged report FAILED (" + (report.signal ? "signal " + report.signal : "exit " + report.status) + ") -- the report is missing or partial\n");
   process.exit(report.status || 1);
 }
-process.exit(0);
+
+// A layer that did not contribute is named on stdout rather than left to a
+// stderr line the caller's `&&` chain scrolls past. The heading on the report
+// above says cross-layer, and a reader has to be able to see which layers that
+// covered.
+merged.missing.forEach(function (label) {
+  process.stdout.write("[coverage-unified] " + label + " did not contribute coverage, so the " +
+    "merged floor above does not answer for the branches only that layer reaches\n");
+});
+
+process.exit(examinedCounts.publish([
+  { unit: "declared-coverage-layers", n: LAYERS.length },
+  { unit: "merged-coverage-layers",   n: merged.layers },
+  { unit: "merged-coverage-files",    n: merged.files },
+], { tag: "[coverage-unified]" }));

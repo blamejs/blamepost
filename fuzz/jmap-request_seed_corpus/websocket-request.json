@@ -1,0 +1,1 @@
+{"@type":"Request","id":"r1","using":["urn:ietf:params:jmap:core"],"methodCalls":[["Core/echo",{"hello":"world"},"c0"]]}

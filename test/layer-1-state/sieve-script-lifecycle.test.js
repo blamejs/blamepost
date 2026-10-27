@@ -112,6 +112,48 @@ function aScriptIsCheckedBeforeItIsStored(handle, actor) {
     JSON.stringify(stored.requiredCaps));
 }
 
+// The refusal a rejected script draws is read in a terminal, and the
+// script it quotes was written by whoever holds the account.
+//
+// The parser names the capability it did not recognize, verbatim, so
+// everything inside those quotes is the author's own text. U+009B is
+// CSI, the single-byte form of the escape sequence the C0 range spells
+// as ESC `[`, and a terminal printing it acts on what follows rather
+// than showing it: the rest of the line moves the cursor, repaints or
+// clears. The C0 controls are screened everywhere in this server
+// already; the C1 range is the one that reads as ordinary text to a
+// check written for C0 and as a command to the terminal.
+//
+// The byte is built rather than written, because a raw C1 octet does
+// not survive being written into a source file.
+var CSI_BYTE = String.fromCharCode(0x9b);
+var C1_RANGE = /[-]/;
+
+function aRefusalQuotesAScriptWithoutCarryingATerminalCommand(handle, actor) {
+  // The same shape as the unknown-capability case above, with the byte
+  // inside the name the parser quotes back.
+  var refused = refusesWith("a script naming a capability with a C1 control is refused",
+    "mailbox/script-refused", function () {
+      handle.mailbox.sieveScripts.put(actor, "escape-seq",
+        "require [\"" + CSI_BYTE + "evil\"];\n");
+    });
+
+  count("and the refusal it hands back carries no C1 control, so printing it in a " +
+    "terminal shows the script rather than running a command from it",
+    refused !== null && !C1_RANGE.test(String(refused.message)),
+    refused === null ? "accepted" : JSON.stringify(String(refused.message)));
+
+  // The screen removes the byte rather than the sentence. A refusal
+  // that dropped the quoted text would leave the author unable to see
+  // which capability was refused, which is what the message is for.
+  count("and it still names the capability that was refused",
+    refused !== null && String(refused.message).indexOf("evil") !== -1,
+    refused === null ? "accepted" : String(refused.message));
+
+  count("and nothing is stored for it",
+    handle.mailbox.sieveScripts.get(actor, "escape-seq") === null);
+}
+
 function theStoreHasCeilings(handle, actor) {
   var oversize = "# " + new Array(70000).join("x") + "\nkeep;\n";
   refusesWith("a script past the size ceiling is refused", "mailbox/script-too-large",
@@ -401,6 +443,7 @@ async function run() {
       address: "bob@example.com", password: ACCOUNT_PASSWORD }));
 
     aScriptIsCheckedBeforeItIsStored(handle, alice);
+    aRefusalQuotesAScriptWithoutCarryingATerminalCommand(handle, alice);
     theStoreHasCeilings(handle, alice);
     oneScriptIsActiveAtATime(handle, alice);
     renameKeepsTheNamespaceUnambiguous(handle, alice);

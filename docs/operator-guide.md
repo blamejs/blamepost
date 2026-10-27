@@ -21,11 +21,20 @@ Every `blamepost <verb>` command below takes that prefix. Under compose, it is
 
 Every mail listener here requires TLS and none has a plaintext mode, so
 `blamepost serve` refuses to start until `BLAMEPOST_TLS_CERT` and
-`BLAMEPOST_TLS_KEY` point at a certificate and key on disk. The browser port on
-8080 is the one that stays cleartext, because a container health check and a
-proxy in front are what poll it, and a session is not reachable over it: the
-session cookie is only ever sent back over TLS. The data directory keeps `tls/`
-for the pair:
+`BLAMEPOST_TLS_KEY` point at a certificate and key on disk. The browser surface
+answers on 8443 from that same pair and on 8080 in the clear, and 8080 is there
+for the container health check and for a proxy in front.
+
+A password is accepted when the connection is TLS, when a proxy named in
+`BLAMEPOST_TRUSTED_PROXIES` states that the browser's connection was, or when
+the peer is on the loopback interface. A request for the sign-in page that
+arrives any other way is answered with a refusal naming the transport and
+renders no password field, and a password posted to it is refused without being
+checked against any account. See A proxy in front of the browser port.
+
+Under the container image, a request published to the host reaches this server
+from the bridge gateway rather than over loopback, so 8443 is the port to sign
+in on there. The data directory keeps `tls/` for the pair:
 
 ```text
 BLAMEPOST_TLS_CERT=/var/lib/blamepost/tls/fullchain.pem
@@ -139,6 +148,10 @@ records to publish. It generates a password and prints it once unless
 `--admin-password` or `BLAMEPOST_ADMIN_PASSWORD` supplies one. Read it out of
 the output at the time; nothing prints it again.
 
+Sign in with it on 8443, at a name the certificate covers:
+`https://mx.example.com:8443`. A browser that reaches the page by a name the
+certificate does not cover warns before it loads.
+
 It is also the only command that creates an account carrying administrator
 rights. `blamepost account add` creates an ordinary mailbox. Run `init` again
 later, against the same data directory and a different address, and it creates a
@@ -153,6 +166,10 @@ before anything changes, and both are recorded:
 blamepost audit read --action account.role_granted
 blamepost audit read --action account.role_revoked
 ```
+
+The form that creates an account does not grant the role. Create the account,
+then press **Give it the console** on its row. A creation request that names the
+role is refused and creates nothing.
 
 The two buttons appear under different conditions, and the difference matters
 when you are taking a role away in a hurry. **Take back the console** is offered
@@ -204,9 +221,16 @@ you, and only then does anything change:
 |-----|---------------|
 | Archive an account | the account's address |
 | Stop accepting mail for a domain | the domain name |
-| Remove an alias | the alias address, or the domain for a catch-all |
-| Retire a signing pair | the selector |
+| Remove an alias | the alias address, or the domain for a catch-all; the destination when another row shares that address or domain |
+| Retire a signing pair | the name its record is published at, `<selector>._domainkey.<domain>` |
 | Cancel queued messages | how many of them are still waiting |
+
+The value you type names one row. The default selector is `bp<YYYYMM>`, so every
+domain keyed in the same month carries the same selector, and the record name is
+what tells their pairs apart. The legs of a fan-out share their address, so
+removing one leg asks for the destination it delivers to. Retiring a pair that
+the domain does not hold under that selector is refused before anything is
+asked.
 
 The count is measured again when you send the second step, so a message that
 reaches its recipient while you are reading stops the whole cancellation instead
@@ -227,12 +251,12 @@ both would be right about a server neither of you was going to leave behind.
 
 The reversible acts never ask you to type a value back. Some of them still take
 a second step, because everything that records a reason asks you for one:
-suspending an account, putting a domain back in service, and giving or taking
-back the console role each ask for the reason and nothing more. Reinstating an
-account, adding a domain or an alias, minting and rotating a pair, withdrawing
-selectors whose overlap has already run out, and forcing the queue change on one
-press. If you expect a one-click archive and meet a typed prompt, nothing is
-broken.
+suspending an account, putting a domain back in service, stopping or starting an
+alias, and giving or taking back the console role each ask for the reason and
+nothing more. Reinstating an account, adding a domain or an alias, minting and
+rotating a pair, withdrawing selectors whose overlap has already run out, and
+forcing the queue change on one press. If you expect a one-click archive and meet
+a typed prompt, nothing is broken.
 
 `init` runs before a certificate exists, deliberately, so the order above works
 on a host where the certificate has not been issued yet.
@@ -348,6 +372,14 @@ Keep the record inside the ten-lookup limit that SPF evaluation imposes. Every
 fail permanently, which is a different and worse outcome than failing to
 authorize one host.
 
+Keep it inside 450 characters as well. RFC 7208 caps a published record there,
+and a receiver answers a longer one with a permanent error before it reads the
+policy, so the domain authorizes nobody however the record ends. A record
+reaches that length by collecting one sending provider at a time, and each
+addition looks correct on its own. `blamepost doctor` reports the length and the
+cap when a record is over it. Replace the `include:` terms with the addresses
+they resolve to, or remove the senders the domain no longer uses.
+
 ## DMARC
 
 One `TXT` record at `_dmarc`, telling receivers what to do when authentication
@@ -368,6 +400,13 @@ _dmarc.example.com. IN  TXT  "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.c
 - **`rua` and `ruf`** must be addresses that someone reads. Reports arrive as XML
   attachments daily; they are how you learn that a forgotten application server
   has been sending unauthenticated mail as your domain for a year.
+
+Keep the record inside 4096 characters. Past that this server stops reading it,
+and every verdict that rests on the policy is reached as though the domain
+published none. `blamepost doctor` reports the length and the cap when a record
+is over it, and names the record rather than printing it back. A record reaches
+that length by collecting reporting addresses, so drop the `rua` and `ruf`
+destinations nobody reads.
 
 **Migrating an existing domain?** A short window at `p=none` with `rua` reporting
 is a legitimate first step: it finds sending paths you had forgotten without
@@ -591,7 +630,17 @@ about is one they would ignore.
 `_smtp._tls`, it keeps a count of how its own transport security went with that
 domain and sends that domain a report once a day. What goes in one is what
 RFC 8460 defines: per policy and mail exchanger, how many sessions succeeded, how
-many failed, and which failure it was. The only address in one is your own
+many failed, and which failure it was. A mail exchanger refused because its
+certificate matched none of the TLSA records its domain publishes is one of those
+failures, so a domain running DANE reads its own rollover mistakes here. A report
+carries one entry per policy the day's attempts were judged under, so a domain
+publishing an MTA-STS policy and TLSA records reads the failures that belong to
+each beside the document they are about: `sts` for the policy, `tlsa` for the
+records. A policy this server could not retrieve is reported as
+`sts-policy-fetch-error` and a policy covering none of the domain's mail
+exchangers as `sts-policy-invalid`, which are separate result types because they
+are separate problems and only one of them is the receiver's to fix. The only
+address in one is your own
 postmaster, as the contact a receiver replies to. No account address, no
 recipient address, no subject and no message content ever appears, and a domain
 that publishes no record is sent nothing at all.
@@ -618,12 +667,23 @@ _25._tcp.mx.example.com.  IN  TLSA  3 1 1 <sha256-of-the-spki>
 blamepost doctor --dane    # confirms a TLSA record exists for port 25 on this host
 ```
 
-`--dane` answers presence and nothing more: it resolves `_25._tcp.<hostname>`
-and reports how many records came back. It does not read the certificate this
-server presents, and it does not hash it and compare, so a TLSA record that no
-longer matches the key in use passes this check while every DANE-aware sender
-refuses delivery. That is the failure the rollover advice below is about, and it
-is one you have to prevent by procedure rather than catch with a check.
+`--dane` resolves `_25._tcp.<hostname>`, reports how many records came back, and
+reports whether the answer carrying them was DNSSEC-authenticated. It does not
+read the certificate this server presents, and it does not hash it and compare,
+so a TLSA record that no longer matches the key in use passes this check while
+every DANE-aware sender refuses delivery. That is the failure the rollover
+advice below is about, and it is one you have to prevent by procedure rather
+than catch with a check.
+
+Records that arrive on an unauthenticated answer are reported as a failure
+rather than counted as present. RFC 7672 §1.3 forbids a sender from using a
+TLSA record that was not validated, so those records reach nobody. Two things
+produce that answer and they are fixed in different places: the zone is
+unsigned, which is answered by signing it and lodging a DS record with the
+parent, or the resolver this server reads does not validate, which is answered
+by pointing it at one that does. When the resolver reports nothing either way,
+the row carries `?` and the summary counts it among the records that could not
+be checked.
 
 **A TLSA record without DNSSEC is decoration.** DANE's security comes entirely
 from the sender being able to validate the DNS answer. On an unsigned zone, an
@@ -691,7 +751,7 @@ Inbound, at the host and at any network in front of it:
 | 143 | `imap` | IMAP4rev2, STARTTLS |
 | 110 | `pop3` | Only if POP3 is enabled, STLS |
 | 4190 | `managesieve` | ManageSieve |
-| 8080, 8443 | web app | Webmail, admin and JMAP, if reached directly rather than through a proxy |
+| 8080, 8443 | web app | Webmail, admin and JMAP, if reached directly rather than through a proxy. 8443 is the one that takes a password from off the machine |
 | 80, 443 | not bound here | The MTA-STS policy file if the server serves it, and whatever your certificate client needs for its challenge |
 
 IMAP and POP3 negotiate TLS in band, so this server binds 143 and 110 and does
@@ -709,9 +769,10 @@ That refusal is right rather than a bug. The listener cannot see TLS it was not
 part of, and the alternative, telling it to treat a plaintext connection from a
 named source as encrypted, puts an address check between a password and the
 wire and hands the exemption to anything else that can reach that address. So a
-client that can only do implicit TLS has no route here today. It is tracked
-upstream as blamejs#665, which asks for the implicit-TLS mode the submission
-listener already has on 465. The `tls` profile in `compose.yml` is unrelated:
+client that can only do implicit TLS has no route here today. What it needs is
+the implicit-TLS mode the submission listener already has on 465, and the
+framework now offers one on the mailbox listeners; this server does not compose
+it yet. The `tls` profile in `compose.yml` is unrelated:
 it publishes 80 and 443 and proxies HTTP to the web port, so it reaches no mail
 listener at all.
 
@@ -725,6 +786,55 @@ built on. The answer is a client that speaks RFC 9051, not a change here:
 advertising `IMAP4rev1` would claim a specification this server deliberately
 declines parts of, and a script admitted past that check would then have its
 `LOGIN` refused and read it as a bad password.
+
+**What the IMAP listener advertises and answers.** The capability line names
+`IMAP4rev2`, `CONDSTORE` (RFC 7162), `METADATA` and `METADATA-SERVER` (RFC 5464)
+and `AUTH=PLAIN`, and it names `STARTTLS` until the session is encrypted. It
+does not name `QRESYNC`, `NOTIFY` or `CATENATE`, and
+`ENABLE QRESYNC` does not turn QRESYNC on. `COPY`, `MOVE` and `UID EXPUNGE` are
+answered `NO`.
+`LITERAL+` is not advertised, so a literal is announced with `{N}` and sent
+after the server's `+`; a client that sends `{N+}` and the octets together has
+its command refused.
+A client that deletes a message by moving it to Trash reports an error for that
+move. Flagging the message `\Deleted` and expunging it works, and the browser
+interface moves messages between folders.
+
+**Folder management.** `CREATE`, `DELETE`, `RENAME`, `SUBSCRIBE` and
+`UNSUBSCRIBE` all answer, so a client's folder controls work.
+
+`DELETE` destroys the mail the mailbox holds, through the same delete path as
+`EXPUNGE`, so legal hold and the retention floor decide each message. A mailbox
+holding a message they keep is not removed: the client is answered
+`NO [CONTACTADMIN]` naming how many were kept and how many were destroyed, and
+the mailbox is still there holding what stayed. `INBOX` is refused, and so are
+`Sent`, `Drafts`, `Trash`, `Junk` and `Archive`, because this server files into
+those by name. Removing a mailbox that has names underneath it removes only the
+name it was given; the level stays in a listing as `\NonExistent \HasChildren`
+and `SELECT` of it is answered `NO [NONEXISTENT]`.
+
+`RENAME` moves the names underneath the mailbox with it and creates the levels
+the new name needs. The mailbox keeps its `UIDVALIDITY`, so a client's cache
+survives the rename. Renaming `INBOX` moves the messages into a new mailbox and
+leaves `INBOX` in place, empty, with its own inferior names untouched. Renaming
+one of the five role mailboxes is refused for the same reason `DELETE` refuses
+it.
+
+`SUBSCRIBE` records a name for the account and `UNSUBSCRIBE` removes it. The
+record outlives the mailbox, so removing a subscribed mailbox leaves the name in
+the account's subscribed set until the client unsubscribes from it.
+`LIST "" "*" RETURN (SUBSCRIBED)` marks the entries, `LIST (SUBSCRIBED) "" "*"`
+lists only those, and `RETURN (STATUS (...))` carries the counts. `RECURSIVEMATCH`
+is answered `BAD` naming the option, and so is a reference and pattern that come
+to more than 256 bytes or carry more than 16 wildcards.
+
+A mailbox opened with `EXAMINE` is read-only for the session that opened it:
+`EXPUNGE` from that session is answered `NO`, and reading a message there does
+not mark it seen. `CLOSE` removes the messages flagged `\Deleted` from a mailbox
+opened with `SELECT`, through the same delete path as `EXPUNGE`, so legal hold
+and the retention floor apply to it. A `SELECT` or `EXAMINE` that fails leaves
+no mailbox selected, and one naming a mailbox the account does not hold is
+answered `NO [NONEXISTENT]`.
 
 Those are the defaults. Each listener has a variable that moves its port alone,
 which is the form that fits a `docker run` line:
@@ -744,6 +854,303 @@ standard port on the host instead:
 ```
 docker run -e BLAMEPOST_MX_PORT=2525 -p 25:2525 ...
 ```
+
+### A proxy in front of the browser port
+
+The `tls` profile in `compose.yml` puts Caddy on 80 and 443 and proxies cleartext
+to `BLAMEPOST_HTTP_PORT`. Any other reverse proxy that terminates TLS has the
+same shape: the browser's connection is HTTPS and this server's own socket is
+not. Four decisions depend on which of those two this server reads as the
+connection:
+
+- whether the CSRF cookie carries the `Secure` attribute and the `__Host-`
+  prefix,
+- which scheme the origin cross-check builds this server's own origin from,
+- whether `Strict-Transport-Security` is sent,
+- whether a password is accepted at all.
+
+A proxy states the browser's half in `X-Forwarded-Proto`. Any client can write
+that header, so this server reads it only from a peer you have named:
+
+```text
+BLAMEPOST_TRUSTED_PROXIES=["192.0.2.0/24"]
+```
+
+Name the range the proxy reaches this server from, which under compose is the
+network the two containers share. Every entry needs a mask. `192.0.2.1` is
+refused at start, because a bare address matches nothing and would sit in the
+list looking like a configured range.
+
+Without it, signing in through the proxy answers `403`. The origin cross-check
+compares the browser's `https://` origin against an `http://` origin this server
+built from its own socket, and the two do not match. The CSRF cookie comes back
+under the name `csrf` with no `Secure` attribute, and no
+`Strict-Transport-Security` header is sent.
+
+The setting governs the transport and nothing else. The source address is still
+read off the socket, so `X-Forwarded-For` is ignored whatever this is set to and
+every browser behind the proxy counts as one address against the per-address
+sign-in bound.
+
+A request that reaches the cleartext browser port over loopback is accepted with
+no proxy named. A connection to `127.0.0.1` crossed no network, which is why a
+browser stores a `Secure` cookie on `http://localhost`. That is the shape a
+server run directly on a host has, where the browser and the process are on the
+same machine. A request that arrives on that port from anywhere else, with no
+proxy named and no TLS, gets a `/sign-in` page carrying a refusal that names the
+transport and no password field, and a password posted to it is refused without
+being checked against any account.
+
+The container image is in that position. A published port is forwarded into the
+container's own network namespace, so a request the host sends to
+`127.0.0.1:8080` arrives at the server from the bridge gateway and is refused a
+password like any other off-machine peer. Sign in on 8443, or put a terminator
+in front and name its range here.
+
+Two routes on the browser port answer with something other than a page. A file
+on a message is served at `/mail/<message>/parts/<number>?folder=<name>` for a
+browser and at `/jmap/download/<accountId>/<blobId>/<name>` for a JMAP client,
+both as `application/octet-stream` with `Content-Disposition: attachment` and
+`X-Content-Type-Options: nosniff`, and a response there is as large as the
+decoded part, to a ceiling of 8 MiB. A proxy with a response-body cap below that
+truncates the download, and a proxy that rewrites `Content-Type` or removes
+`Content-Disposition` or `X-Content-Type-Options` takes away the controls that
+keep a part claiming `text/html` from rendering as a page on your domain. Pass
+all three headers through unchanged.
+
+### JMAP clients
+
+JMAP is served on the browser ports. The session document is at
+`/jmap/session`, requests go to `POST /jmap/api`, the event source is at
+`/jmap/eventsource`, the WebSocket transport is at `/jmap/ws` and blob download
+is at `/jmap/download/<accountId>/<blobId>/<name>`. Each of them reads the
+session cookie a browser sign-in at `/sign-in` sets, and refuses a request that
+carries no session.
+
+**WebSocket origins.** A browser sends an `Origin` header when it opens
+`/jmap/ws`, and the server accepts two values:
+
+- `https://<BLAMEPOST_HOSTNAME>`, which is the origin a browser sends to a TLS
+  terminator on port 443;
+- `https://<BLAMEPOST_HOSTNAME>:<BLAMEPOST_HTTPS_PORT>`, when this process holds
+  the certificate and `BLAMEPOST_HTTPS_PORT` is not 443.
+
+Any other `Origin`, including `http://` at the same hostname, is refused with
+`403` and an audit row under `blamepost.jmap.websocket.refused`. An upgrade with
+no `Origin` header comes from a client that is not a browser and is accepted
+when it carries a session. If a proxy publishes the web interface under a
+different name or port, a browser JMAP client there cannot open the socket;
+`POST /jmap/api` and `/jmap/eventsource` still answer it.
+
+**Limits.** The session document advertises these values under
+`urn:ietf:params:jmap:core`, and the server refuses a request that crosses one:
+
+| Limit | Value | A request past it gets |
+|---|---|---|
+| `maxSizeRequest` | 1 MiB | `413` from the request body parser |
+| `maxCallsInRequest` | 32 | `400` with problem type `urn:ietf:params:jmap:error:limit` |
+| `maxConcurrentRequests` | 4 per account on `POST /jmap/api` | `400` with problem type `urn:ietf:params:jmap:error:limit` |
+| `maxObjectsInGet` | 50 ids per `/get` call | method error `requestTooLarge` |
+| `maxObjectsInSet` | 50 objects per `/set` call | method error `requestTooLarge` |
+| `maxSizeUpload` | 0 | blob upload answers `503` |
+
+**Fetching a file.** The `downloadUrl` in the session document is
+`/jmap/download/{accountId}/{blobId}/{name}?accept={type}`. A blob id is a
+message identifier, which answers that message's raw bytes and is the value
+`Email.blobId` carries, or that identifier followed by `-p` and the body part
+number of RFC 9051 section 6.4.5 with each dot written as a dash, so the file at
+part `1.2` downloads under `<message>-p1-2`. The `name` and `accept` variables
+are the client's own suggestions and neither reaches the response: every blob is
+served as `application/octet-stream`, and the name in `Content-Disposition` comes
+from the message. A blob another account holds, an identifier nothing holds, a
+part number nothing holds, a part that is the message's own text and a message
+larger than 8 MiB all answer `404` with the same problem document. Blob upload is
+not served, so a client cannot attach a file over JMAP. IMAP `APPEND` still can;
+the browser interface does not offer an attachment control either.
+
+A limit problem names the limit in its `limit` member. A body sent with a
+`Content-Type` other than `application/json`, or an empty body, is refused with
+`400` and problem type `urn:ietf:params:jmap:error:notJSON`. A JSON body that is
+not a JMAP request object is refused with `400` and problem type
+`urn:ietf:params:jmap:error:notRequest`. A body the request parser cannot read
+as JSON is refused with `400` before it reaches JMAP.
+
+**What a client is told it may ask for.** Every account in the session document
+carries these values under `accountCapabilities`. A client reads them once and
+draws its window from what it finds.
+
+| Capability | Property | Value |
+|---|---|---|
+| `urn:ietf:params:jmap:mail` | `maxMailboxesPerEmail` | `1` |
+| `urn:ietf:params:jmap:mail` | `maxMailboxDepth` | `null` |
+| `urn:ietf:params:jmap:mail` | `maxSizeMailboxName` | `128` |
+| `urn:ietf:params:jmap:mail` | `maxSizeAttachmentsPerEmail` | `0` |
+| `urn:ietf:params:jmap:mail` | `emailQuerySortOptions` | empty |
+| `urn:ietf:params:jmap:mail` | `mayCreateTopLevelMailbox` | `false` |
+| `urn:ietf:params:jmap:submission` | `maxDelayedSend` | `0` |
+| `urn:ietf:params:jmap:submission` | `submissionExtensions` | empty |
+
+`maxMailboxDepth` is `null`, which RFC 8621 defines as no limit. Nothing here
+caps how many levels a mailbox name carries.
+
+**Folders a client made over IMAP.** `Mailbox/get` and `Mailbox/query` answer
+with the same folders `LIST` reports. A folder's `id` is its whole name,
+`Clients/Acme/2026` included; its `name` is the last level alone, and `parentId`
+names the level above it.
+
+`DELETE` of a name that has names underneath it leaves a level holding folders
+and holding no mail of its own. That level is answered with every right set to
+`false`, so the `parentId` of the folders under it resolves. Nothing can be filed
+into it and `Email/query` naming it matches nothing.
+
+The browser interface names the folder being read in the query string, as
+`/mail?folder=Clients%2FAcme`. An account holder opens a nested folder from the
+folder rail the way they open INBOX, and the address bar carries a link they can
+bookmark. A name holding a backslash opens the same way. Every link the mailbox
+renders names the folder there: the rail, the message list, the breadcrumb back
+from a conversation, the bulk action form with its destination list, and the link
+to a file on a message.
+
+**Querying a mailbox.** `Email/query` answers newest first over the newest 1000
+messages of the mailbox `filter.inMailbox` names, or of `INBOX` when the filter
+names none. `position` and `limit` page through that range, and a negative
+`position` counts back from the oldest message in it. A `limit` asks for up to
+50 ids and is capped there, which is the same ceiling `Email/get` takes in one
+call. The answer reports the `position` it started at and the `limit` it
+applied, and carries `total` when the request set `calculateTotal` to true. A
+request reaching past the newest 1000 messages is refused `requestTooLarge`;
+IMAP pages a mailbox without that ceiling.
+
+The filter conditions are `inMailbox`, `text`, `from`, `to` and `body`. A filter
+naming any other condition is refused `unsupportedFilter`, a `sort` naming a
+property is refused `unsupportedSort`, an `anchor` is refused `anchorNotFound`,
+and `collapseThreads` set to true is refused `invalidArguments`. None of the
+four is read and dropped, so a client is never answered with mail it did not ask
+for.
+
+**Sending.** `EmailSubmission/set` sends the draft `emailId` names, written as
+the identity `identityId` names. With no `envelope`, the envelope sender is the
+account's own address and the recipients are the draft's `To`, `Cc` and `Bcc`
+addresses. A submission that carries an `envelope` is sent as follows:
+
+- `envelope.mailFrom` must be an address `Identity/get` lists for the account.
+  Any other address is refused `forbiddenMailFrom` and recorded under
+  `blamepost.web.author_not_permitted` with surface `jmap-submission-envelope`.
+  The submission port checks `MAIL FROM` against the same set.
+- `envelope.rcptTo` must name every `To` and `Cc` address of the draft, and each
+  address it adds is sent as a blind copy. An `rcptTo` that leaves one out is
+  refused `invalidProperties`.
+- SMTP parameters on `mailFrom` or on a recipient are refused
+  `invalidProperties`.
+- A `sendAt` naming a time still to come is refused `invalidProperties` naming
+  that property. The message is released as the request is accepted, which is
+  what the account's `maxDelayedSend` of `0` says. A `sendAt` already past is
+  accepted and the message goes out.
+- A submission names at most 100 recipients.
+
+The server keeps no submission record after the message is handed to the
+outbound queue, so an `update` or `destroy` naming a submission id is reported
+`notFound`.
+
+### The public front page
+
+Left alone, `/` sends a visitor with no session to the sign-in page, and
+`/robots.txt` asks crawlers to index nothing. That is the shipped posture, and it
+is the one to keep on a server whose web port is reachable only by the people who
+hold mailboxes on it.
+
+Turning the front page on publishes a page at `/` describing what blamepost does,
+with screenshots of this interface and the version this server runs. It names
+this host. Publish it when you want the server to be findable, and leave it off
+otherwise:
+
+```
+BLAMEPOST_PUBLIC_SITE_ENABLED=1
+```
+
+The switch on the console overview page changes the same setting while the server
+runs, and what the console records wins over the variable. So the variable states
+what a fresh volume boots with, and an operator who has pressed the button since
+does not have it undone by a restart. Pressing it is one step either way, and the
+button that appears afterwards is the one that reverses it.
+
+Three things move together with it. `/` renders the page instead of redirecting.
+`/robots.txt` stops asking for the whole server to be left alone and starts
+naming `/sitemap.xml`, while still withholding `/admin`, `/mail`, `/compose`,
+`/search`, `/jmap`, `/api`, `/sign-in`, `/sign-out` and `/prefs`. And
+`/sitemap.xml` starts answering, listing the public pages this server actually
+mounts.
+
+The page links `/wiki` in its navigation, and the sitemap lists `/wiki`, only
+while a GET request for `/wiki` reaches a route registered for that path. The
+server registers that route when it starts, and the reference it serves there is
+described below. An application that embeds the web surface and sends GET
+`/wiki` to a route of its own gets neither the link nor the sitemap entry.
+
+The head of the page carries a JSON-LD record of type `SoftwareApplication`. It
+holds the name, description, version, license, Node.js requirement and category
+of the software, read from `package.json` and from the page's own description
+each time the page renders. The record carries no offer and no rating.
+
+Publishing it changes nothing about who may read mail. Every authenticated route
+keeps the gate it already had, the only form on the page is the theme switch,
+and a visitor who has never signed in is given no session: the only cookie an
+anonymous reader receives is the request-scoped CSRF token the whole surface
+sets, which is a fresh random value on every response and identifies nobody
+between visits.
+
+A signed-in reader is still sent straight to their own mailbox at `/`, so the
+shortcut does not change for the people using the server. To see the page the way
+a visitor sees it, sign out or open a private window.
+
+### The reference wiki
+
+`/wiki` serves a reference for every module and primitive in the build this
+server runs. The server generates the pages from the documentation comments in
+its own `lib/` source when the web interface starts. These are the pages:
+
+| Path | Page |
+|---|---|
+| `/wiki` | The index: the version, the count of primitives by status, and every module by group |
+| `/wiki/<module>` | One module, its overview and a table of its primitives |
+| `/wiki/<module>/<primitive>` | One primitive: signature, status, the version that introduced it, the specifications it cites, options, examples and related primitives |
+| `/wiki/specs` | Every specification the source cites, by section, with the primitives citing each one |
+| `/wiki/specs/<document>` | One cited document and the primitives citing each of its sections |
+
+A path with no page answers 404. Every page names the source file and line its
+comment is on, and the index names the version this server runs.
+
+The wiki follows the public site setting. While the public site is published,
+anyone can read it, the front page links it, and the sitemap lists `/wiki`. While
+it is not, a visitor with no session is sent to the sign-in page from every
+`/wiki` path, a caller asking for JSON is answered 401, and a signed-in account
+can still read every page.
+
+A page served to a visitor with no session carries
+`Cache-Control: private, max-age=900`, the same header as the front page. The
+reader's browser may keep the page for 15 minutes, and a proxy or a CDN does not
+store it. Each page holds the reader's own CSRF token in the theme switch and
+sets the matching cookie, and a stored copy would hand both to the next reader.
+Do not configure a proxy in front of this server to cache `/wiki` or `/`
+whatever the response says. A page served to a signed-in account carries
+`Cache-Control: private, no-store`, like every other page behind a session, so
+neither the browser nor a proxy keeps a copy of it.
+
+If a documentation comment in `lib/` cannot be turned into a page, the rest of
+the web interface still starts: webmail, the administration console and `/jmap`
+answer as usual. Every GET at or below `/wiki` answers 503, and the front page and
+the sitemap stop listing `/wiki`. While the public site is not published, a
+visitor with no session is still sent to the sign-in page from every `/wiki`
+path. The server writes the reason to its error log and records it in the audit
+trail under `blamepost.web.wiki_unavailable`, with the source file and line of the
+comment in the `file` and `line` fields when one comment is the cause:
+
+```
+blamepost audit read --action blamepost.web.wiki_unavailable
+```
+
+The wiki stays unavailable until the server starts on a build whose comments
+it can read.
 
 ### When the process cannot take a port below 1024
 
@@ -816,7 +1223,7 @@ Outbound:
 | 443 | Any HTTPS reporting endpoint you use, and your certificate client's calls to its authority |
 
 Outbound 25 is the one that catches people. Many providers block it by default
-and some will not unblock it at all. Confirm it works before planning a
+and some will not unblock it at all. Confirm it works before scheduling a
 migration, not after:
 
 ```bash
@@ -897,6 +1304,13 @@ Everything this server keeps is under `BLAMEPOST_DATA_DIR`, which is
 `/var/lib/blamepost` in the image: the encrypted database, the sealed key files,
 the message blobs, the outbound spool and the certificate pair.
 
+**It has to be a directory, or nothing yet.** The path need not exist, because
+the first start is the one that creates it, but a path already holding a regular
+file stops the start with a message naming `BLAMEPOST_DATA_DIR` and the path it
+resolved to. The same answer covers the entries underneath: a file sitting where
+`blobs/`, `queue/`, `keys/` or `tls/` goes, or a directory sitting where `db.enc`
+goes, is named and refused before anything is created.
+
 **It has to be mode `0750` or tighter.** Before any listener binds, `serve`
 asserts the posture the deployment claims to have, and a data directory the rest
 of the host can read fails that assertion. The process names the mode and exits:
@@ -915,11 +1329,11 @@ it usually bites on ownership before it ever reaches the mode.
 A directory made with `mkdir` at the usual umask arrives at `0755` and owned by
 whoever ran the command, which is normally root rather than the unprivileged UID
 the image runs as. The container cannot write into it at all, so it stops while
-creating the directories it keeps its data in, and what `docker logs` holds is a
-permission error naming the path:
+creating the directories it keeps its data in, and what `docker logs` holds names
+the entry it was making, the path, and what the filesystem said:
 
 ```text
-blamepost serve: EACCES: permission denied, mkdir '/var/lib/blamepost/blobs'
+blamepost serve: the data volume's blobs entry, /var/lib/blamepost/blobs, could not be created: EACCES: permission denied, mkdir '/var/lib/blamepost/blobs'. Every entry under BLAMEPOST_DATA_DIR is created and written to under the name it holds, so this server needs a directory it can make and write there.
 ```
 
 The mode assertion quoted above is real, but it runs later, once the process has
@@ -941,12 +1355,13 @@ write, so the directory has to belong to the UID the container runs as. Getting
 the mode right and the owner wrong produces a different failure with a different
 message, further into the boot.
 
-Two things later put the mode back where it started, so check it at both. A
-restore that recreates the directory takes the umask of whoever ran it rather
-than the mode of the volume it replaced. And a volume held on or exported over a
-filesystem that does not carry POSIX modes presents whatever that layer decides;
-move the data directory onto local storage rather than relaxing the requirement,
-because the mode is what keeps the sealed key files off the rest of the host.
+A volume held on or exported over a filesystem that does not carry POSIX modes
+presents whatever that layer decides; move the data directory onto local storage
+rather than relaxing the requirement, because the mode is what keeps the sealed
+key files off the rest of the host. `blamepost restore` moves the entries inside
+the data directory and leaves the directory's own owner and mode as they were.
+When the directory does not exist yet, as on a new host, the restore creates it
+at `0700`.
 
 ## One writer at a time
 
@@ -971,16 +1386,20 @@ blamepost audit: the data directory at /var/lib/blamepost is already open for
 writing in process 1. blamepost decrypts the whole database into a working copy
 of its own while it is open and writes that copy back, so two writers cannot see
 each other's work and whichever writes last overwrites the other, losing every
-message delivered in between. Stop the server and run this again. Nine verbs
-answer without stopping it, from a read-only open: doctor, account list, account
-show, domain list, domain show, dkim list, dkim records, blobs report and audit
-verify-chain. A verb that reports and also records that it read is not among
-them, because recording the read is a write.
+message delivered in between. Stop the server and run this again. These verbs
+answer without stopping it, from a read-only open, while the volume's schema is
+the one this release reads: account list, account show, domain list, domain show,
+dkim list, dkim records, zone preview, zone verify, zone verify-token,
+credential list, credential show, credential bounces, reports list, reports
+show, blobs report, audit verify-chain and doctor. A verb that reports and also
+records that it read is not among them, because recording the read is a write.
 ```
 
 `init`, `restore`, `backup`, `queue remove` and every verb that changes an
 account, a domain or a DKIM selector need it, as do `audit read`, `audit
-archive`, `audit export`, `audit purge`, `account sieve` and `blobs reclaim`.
+archive`, `audit export`, `audit purge`, `account sieve`, `blobs reclaim`,
+`blobs repair`, `attachments report`, `attachments backfill` and
+`credential ceiling`.
 `queue list`, `queue held` and `queue flush` read the outbound spool off disk
 instead, so they keep working while the server runs.
 
@@ -991,16 +1410,25 @@ left behind by a server that was killed names a process that is gone, and the
 next command reaps it and proceeds, so a crash does not lock you out of your own
 data.
 
-A reader takes no lock and waits for none. It is not a second writer: it never
-writes the encrypted file, so it has nothing to lose the race with.
+A reader takes no lock and waits for none. It never writes the encrypted file,
+so it is not a second writer and has nothing to lose the race with.
 
-### Nine reporting verbs answer while the server runs
+A few verbs answer while the server runs without reading the volume at all.
+`dmarc preview` builds a record from what the domain publishes in DNS, and `zone
+allowlist` reports the reach of the write gate, which the configuration settles.
+Neither opens a data volume, so neither prints the snapshot caveat below and
+both answer when the database will not open.
+
+### The reporting verbs answer while the server runs
 
 `account list`, `account show`, `domain list`, `domain show`, `dkim list`,
-`dkim records`, `blobs report`, `audit verify-chain` and `doctor` do not refuse.
-Each tries a writable open first, so an operator who has already stopped the
-server gets a current answer, and only the refusal above sends the command down
-the other path: a read-only open of the same volume.
+`dkim records`, `zone preview`, `zone verify`, `zone verify-token`,
+`credential list`, `credential show`, `credential bounces`, `reports list`,
+`reports show`, `blobs report`, `audit verify-chain` and `doctor` do not refuse.
+Each tries a
+writable open first, so an operator who has already stopped the server gets a
+current answer, and only the refusal above sends the command down the other
+path: a read-only open of the same volume. The refusal names every one of them.
 
 A read-only open decrypts a working copy of its own and then writes nothing.
 `db.enc` is never written back, the sealed database key is never re-sealed, no
@@ -1012,6 +1440,18 @@ is removed when the command returns.
 `doctor` is the verb this exists for. You reach for it exactly when the server is
 up and behaving oddly, and being told to stop the mail server first was the wrong
 instruction at the worst moment.
+
+A read-only open does not update the volume's schema. A writable open adds the
+tables and columns a new release declares and runs its migrations; a read-only
+open reads the schema as the last writable open left it. After you install a new
+release that adds a table, a column or a migration, these verbs refuse with
+`store/snapshot-schema-behind` until that release has opened the volume for
+writing once, and the refusal names the tables, columns and migrations the
+volume lacks. Start the server on the new
+release, or stop the server and run the verb again, which opens the volume for
+writing. A volume that records a migration the running release does not ship was
+last opened for writing by a newer release, and these verbs refuse it with
+`store/snapshot-schema-ahead`.
 
 **The answer says how old it is, and that number is measured rather than
 estimated.** It is the modification time of the encrypted database, read before
@@ -1060,8 +1500,12 @@ do.
 
 **A read whose own record has to outlive the command.** `audit read` is recorded
 as it runs, and `account sieve` records that an administrator opened somebody's
-filter scripts. That row is a write, so a read-only open cannot make it, and a
-read that claims to be recorded and is not is worse than a read that refuses.
+filter scripts. `dmarc status` and `dmarc markings` read the audit trail, and
+every read of it is recorded before it answers; `dmarc status` writes a second
+row whenever the policy a domain publishes differs from the last one it saw,
+which is how it answers later how long that domain has been at `p=quarantine`.
+That row is a write, so a read-only open cannot make it, and a read that claims
+to be recorded and is not is worse than a read that refuses.
 
 **A verb that writes before it copies.** `backup run` anchors the audit chain so
 the bundle carries a signature over its own last row, and requires the volume
@@ -1104,6 +1548,11 @@ nothing below could stop it: the bodies would go from the live volume on the
 strength of rows that stopped minutes ago, and the audit row that is the only
 record they existed could not be written at all.
 
+`blobs repair` refuses there under the same code, for the neighboring reason. It
+decides which mail to destroy by holding the message store's rows against this
+layer's, and on a frozen set a message delivered since the rows stopped is one
+the walk cannot see, so its mailbox would be judged on a state that has moved.
+
 ### What the read-only open needs, and what becomes of it
 
 A read-only open still decrypts a working copy of somebody's mail, so where it
@@ -1121,22 +1570,36 @@ With nothing named, `/dev/shm` is accepted only when the kernel reports it as a
 not pass. Off Linux there is no mount table to read and no path is inferred, so
 the command stops until you name one.
 
-**What `BLAMEJS_TMPDIR` is checked against is a name, not a mount.** On Linux the
-path it resolves to has to begin with `/dev/shm`, `/run/shm`, `/run/user/` or
-`/tmp`, and a path that does not is refused at boot under `db/tmpdir-not-tmpfs`.
-That test reads the resolved name rather than the mount table, so it accepts two
-things you may not want. A `/tmp` that is ordinary disk passes it, and passes
-without a warning, which is the common case on a host where `/tmp` was never
-mounted as tmpfs. And three of those four names are matched as prefixes rather
-than as directories, so `/tmpdata` and `/dev/shmx` pass as well.
+**What `BLAMEJS_TMPDIR` is checked against is the mount, not the name.** On Linux
+the path it resolves to is looked up in the kernel's mount table, and only a
+`tmpfs` or `ramfs` mount is accepted. Anything else is refused at boot under
+`db/tmpdir-not-tmpfs`, and the refusal names the filesystem it found and the
+directory that filesystem is mounted at:
+
+```
+FATAL: db.init: tmpDir '/tmpdata/work' (real: '/tmpdata/work') is on a 'overlay'
+filesystem mounted at '/', not tmpfs or ramfs — it is not an in-memory mount.
+```
+
+A `/tmp` that is ordinary disk is refused, which is the common case on a host
+where `/tmp` was never mounted as tmpfs. A directory you created by hand is not a
+mount point, so it resolves to whatever filesystem contains it and is refused on
+that filesystem's type. A path whose name merely begins with an accepted one,
+such as `/tmpdata` beside `/tmp`, is not treated as being on that mount.
+
+`allowNonTmpfsTmpDir: true` downgrades that refusal to a warning, for a mount you
+have verified is in memory by some route the mount table does not show.
 
 Off Linux nothing can be classified, so the path you name is used and the server
-logs a warning saying the residency could not be established.
+logs a warning saying the residency could not be established. The same warning is
+logged on Linux when the mount table cannot be read, because a check that could
+not run is not a check that passed.
 
-Either way, the decrypted database is written where you point this, and a backup,
-a snapshot, a replica or a disk image reaches it for as long as the command runs.
-Confirm the mount yourself with `findmnt -no FSTYPE <path>`, and treat whatever
-you name as carrying the same secrets the volume does.
+Where the path is accepted on a warning rather than a refusal, the decrypted
+database is written where you point this, and a backup, a snapshot, a replica or
+a disk image reaches it for as long as the command runs. Confirm the mount
+yourself with `findmnt -no FSTYPE <path>`, and treat whatever you name as
+carrying the same secrets the volume does.
 
 The copy is named for the process that made it and claimed with an ownership
 record before any bytes go into it, and it is removed when the command returns.
@@ -1146,7 +1609,7 @@ inferring it from a filename. A copy whose owner is still running is left where
 it is. A host that lost power is covered by the mount itself, which is memory and
 does not survive the reboot.
 
-Four refusals belong to this path. None of them writes to the volume, because
+Six refusals belong to this path. None of them writes to the volume, because
 nothing on this path ever does:
 
 | Code | What it means |
@@ -1155,6 +1618,8 @@ nothing on this path ever does:
 | `store/snapshot-no-source` | There is no database at that path to read. A directory that has never been through `blamepost init` looks like this. |
 | `store/snapshot-out-of-step` | The rows on disk are older than the volume's own record of where its audit trail had reached, which is what a server starting up while this was being read looks like. Run the command again. |
 | `store/snapshot-unreadable` | The database would not decrypt or open. Either the passphrase does not unseal the database key, or the database is damaged where it lies. |
+| `store/snapshot-schema-behind` | An older release last opened the volume for writing, and its schema lacks a table, column or migration this release reads. The refusal names up to eight of them. Start the server on this release, or stop the server and run the command again. |
+| `store/snapshot-schema-ahead` | The volume records a migration this release does not ship, so a newer release last opened it for writing. Run the command with that release or a newer one. |
 
 **The checkpoint signatures are verified on this path.** A read-only open anchors
 no checkpoint of its own, which matters: anchoring one would advance the record
@@ -1191,8 +1656,8 @@ That refusal is deliberate. Guessing that the process is gone, and being wrong,
 is the case that loses mail. If the server really is gone for good, delete
 `blamepost.lock` from the data directory and run the command again.
 
-The nine reporting verbs above treat this the same way they treat a lock they
-can check: they fall back to a read-only open rather than refusing, and label the
+The reporting verbs above treat this the same way they treat a lock they can
+check: they fall back to a read-only open rather than refusing, and label the
 answer as one. So a host-side `blamepost domain list` answers, with the caveat
 attached, and it needs the passphrase and a memory-backed mount on the host to do
 it. Every other verb is refused with the message above.
@@ -1238,7 +1703,7 @@ configuration file; the variable is the name to use in the environment.
 | `BLAMEPOST_CONFIG` | | `/etc/blamepost/blamepost.config.json` | The configuration file to read. Named in the environment only, because it is the thing that names the file. |
 | `BLAMEPOST_HOSTNAME` | `hostname` | *required* | The public MX hostname this server answers for. Announced in `EHLO`, looked up in reverse by receivers, and bound to by MTA-STS and DANE. |
 | `BLAMEPOST_VAULT_PASSPHRASE` | `vaultPassphrase` | *required* | Seals the DKIM private keys and every sealed database column. At least 16 characters, and no recovery path if it is lost. |
-| `BLAMEPOST_DATA_DIR` | `dataDir` | `/var/lib/blamepost` | The single data directory: database, message blobs, outbound spool, sealed keys and certificates. Mode `0750` or tighter, or `serve` exits before binding anything. See The data directory and its mode. |
+| `BLAMEPOST_DATA_DIR` | `dataDir` | `/var/lib/blamepost` | The single data directory: database, message blobs, outbound spool, sealed keys and certificates. A directory, or a path that does not exist yet; anything else at that path is refused at start with the variable and the path named. Mode `0750` or tighter, or `serve` exits before binding anything. See The data directory and its mode. |
 | `BLAMEPOST_TLS_CERT` | `tlsCert` | unset | The certificate chain every listener presents. `serve` refuses to start without it and its key. |
 | `BLAMEPOST_TLS_KEY` | `tlsKey` | unset | The matching private key, which may itself be sealed with the vault passphrase. |
 | `BLAMEPOST_DNS_ACKNOWLEDGED` | `dnsAcknowledged` | `false` | The server-wide half of the MX boot gate. Set it to `1` once the records in Part 1 are live. |
@@ -1246,8 +1711,10 @@ configuration file; the variable is the name to use in the environment.
 | `BLAMEPOST_ADMIN_PASSWORD` | `adminPassword` | unset | That account's password, also read by `init` alone. Set both of these or neither; one without the other is refused at start. |
 | `BLAMEPOST_HTTP_PORT` | `httpPort` | `8080` | Webmail, admin and JMAP over HTTP. |
 | `BLAMEPOST_HTTPS_PORT` | `httpsPort` | `8443` | The same surface over HTTPS, when TLS terminates in this process. |
+| `BLAMEPOST_TRUSTED_PROXIES` | `trustedProxies` | *nobody* | The address ranges of the reverse proxies whose `X-Forwarded-Proto` this server believes when it decides whether the browser reached it over TLS. From any other peer the header is ignored and the socket is read instead, so with nothing named a password is accepted only over TLS or from a peer on the loopback interface, which a request published out of a container is not. Every entry needs a mask; a bare address is refused at start. It governs the transport alone: the source address stays the socket's, and `X-Forwarded-For` is ignored whatever this holds. Covered under A proxy in front of the browser port. |
+| `BLAMEPOST_PUBLIC_SITE_ENABLED` | `publicSiteEnabled` | `false` | Whether this server answers `/` with a public page describing blamepost, and `/wiki` with the reference wiki, instead of sending a visitor with no session to the sign-in page. It states the posture this server boots with; the switch on the console overview page changes it afterwards and the console wins. Covered under The public front page and The reference wiki. |
 | `BLAMEPOST_POP3_ENABLED` | `pop3Enabled` | `false` | Whether the POP3 listener binds. The one listener that is off by default. |
-| `BLAMEPOST_LOG_LEVEL` | `logLevel` | `info` | The lowest severity written to the log: `debug`, `info`, `warn`, `error` or `fatal`. |
+| `BLAMEPOST_LOG_LEVEL` | `logLevel` | `info` | `debug` adds the entries this server and the framework under it write about what they recovered from: which configuration file a command read, a stale lock file that could not be removed, a migration whose rollback failed. It also prints the stack behind a command that failed. `warn`, `error` and `fatal` are accepted and remove nothing: the info, warning and error entries are written at every level. |
 | `BLAMEPOST_PROFILE` | `profile` | `strict` | How strictly the wire protocols judge a domain, a HELO name and a command line. `balanced` widens `strict` to accept punycode and non-latin scripts, which a server receiving mail from internationalized domains needs. |
 | `BLAMEPOST_LISTENERS` | `listeners` | *per-listener defaults* | Which listeners bind, and on which port and interface. Covered under Firewall above. |
 | `BLAMEPOST_RELAY_ALLOWED_FOR` | `relayAllowedFor` | *nobody* | The address ranges the MX listener would relay for. This server does not relay for a source address, so setting this to anything with an entry in it stops the boot rather than being honored. Covered under Devices that have to send through this server. |
@@ -1258,14 +1725,26 @@ configuration file; the variable is the name to use in the environment.
 | `BLAMEPOST_OUTBOUND_RETRY` | `outboundRetry` | `{"maxAttempts":35,"backoffMs":[60000,300000,900000,3600000,14400000]}` | How long a message a peer deferred stays in the spool before its sender is told it failed. One wait per attempt, climbed in order, and the last wait repeats for every attempt past the end of the list, so the shipped schedule waits a minute, five minutes, fifteen minutes, an hour, and then four hours between every attempt after that. Thirty five attempts spend five days and eighty one minutes, which is the give-up time RFC 5321 §4.5.4.1 asks for. The waits have to rise, because the delivery path indexes them by attempt number. `maxAttempts` is what to change to give up sooner or later, and past the fifth attempt each one adds four hours: `5` gives up after eighty one minutes and `11` after a day and eighty one minutes. |
 | `BLAMEPOST_OUTBOUND_SPOOL` | `outboundSpool` | `{"maxMessages":10000,"maxBytes":2147483648}` | How much undelivered outbound mail this server holds before it starts refusing new mail with a temporary code. Both ceilings apply and whichever is reached first binds, because depth is what each sweep pays and bytes are what the volume pays. Covered under The outbound queue below. |
 | `BLAMEPOST_OUTBOUND_TIMEOUTS` | `outboundTimeouts` | *the delivery composer's own* | `{ mxLookupMs, perHostMs }`: how long an outbound attempt waits for the recipient domain's MX answer and for the peer itself. The floors stop a value written in seconds from failing every delivery, and the ceilings stop one wedged peer from holding the spool. |
-| `BLAMEPOST_REQUIRE_TLS` | `requireTls` | `false` | Whether every outbound envelope asks for REQUIRETLS (RFC 8689), so a receiver holds a message back rather than delivering it over a connection it could not encrypt. This server does not put that parameter on the wire, so turning it on stops the boot rather than being honored quietly. The refusal is deliberate: a receiver that would hold the message is never asked, mail the setting says would bounce is delivered instead, and nothing reports the difference, so an operator trusting the flag has no way to find out it did nothing. MTA-STS is the transport protection that does apply to every outbound message; DANE applies as well once you have declared your resolver DNSSEC-validating, which it does not do on a default install. See DANE / TLSA. |
+| `BLAMEPOST_REQUIRE_TLS` | `requireTls` | `false` | Whether every outbound envelope asks for REQUIRETLS (RFC 8689), so a receiver holds a message back rather than delivering it over a connection it could not encrypt. With it on, the keyword is put on the `MAIL FROM` line of every peer whose EHLO advertises the extension. **A peer that does not advertise it is not delivered to.** RFC 8689 §4.1 makes that the required behavior, because delivering anyway is indistinguishable from having asked, so the message is offered to each MX host for the recipient's domain in turn and permanently failed once none of them has advertised it. Most receivers do not implement the extension, so turning this on for every envelope stops delivery to most of the internet: it is for a server whose correspondents are known to support it. MTA-STS applies to every outbound message whatever this is set to; DANE applies as well once you have declared your resolver DNSSEC-validating, which it does not do on a default install. See DANE / TLSA. |
 | `BLAMEPOST_COMPLIANCE_POSTURE` | `compliancePosture` | `none` | The regulatory posture the mailbox agent enforces on a hard delete. See Retention below, because this is the one setting that changes what delete means. |
+| `BLAMEPOST_DMARC_FORENSIC_ENABLED` | `dmarcForensicEnabled` | `false` | Whether the per-message DMARC failure reports of RFC 6591, which receivers send to the address your `ruf=` tag names, are stored at all. Turning it on stores third-party personal data: the sending address, the envelope sender and the recipients of one message belonging to somebody who has no account here. The failing message itself is never stored whatever this is set to. Covered under What peers report about your domains. |
+| `BLAMEPOST_DMARC_AGGREGATE_RETENTION_DAYS` | `dmarcAggregateRetentionDays` | `30` | How many days the counting from aggregate DMARC reports (RFC 7489 section 7.2) is kept before it is destroyed. Between `1` and `400`. It is how far back the stored counting reaches when you are deciding whether a domain is ready for `p=reject`. |
+| `BLAMEPOST_DMARC_FORENSIC_RETENTION_DAYS` | `dmarcForensicRetentionDays` | `7` | How many days a stored forensic report is kept. Between `1` and `30`, and never longer than `BLAMEPOST_DMARC_AGGREGATE_RETENTION_DAYS`. A pair written the other way round stops the start. |
 | `BLAMEPOST_MTA_STS_MODE` | `mtaStsMode` | `enforce` | The mode published in the MTA-STS policy this server serves. Covered under MTA-STS. |
 | `BLAMEPOST_MTA_STS_MX` | `mtaStsMx` | this server's hostname | The MX hosts listed in that policy. Covered under MTA-STS. |
 | `BLAMEPOST_MTA_STS_MAX_AGE` | `mtaStsMaxAge` | `604800` | How long in seconds a sender caches that policy. Between `86400` and `31557600`. |
 | `BLAMEPOST_SECURITY_CONTACT` | `securityContact` | `["mailto:postmaster@<hostname>"]` | The contact URIs published at `/.well-known/security.txt` (RFC 9116). Each has to carry a scheme, so a bare address is refused. |
 | `BLAMEPOST_SECURITY_POLICY_URL` | `securityPolicyUrl` | unset | The disclosure policy page named in that same file. |
 | `BLAMEPOST_SECURITY_TXT_EXPIRES` | `securityTxtExpires` | one year from start | An RFC 3339 timestamp after which the published `security.txt` stops being authoritative. One that has already passed is refused at start. |
+| `BLAMEPOST_ZONE_PROVIDER` | `zoneProvider` | `none` | Which hosted DNS provider this server may edit records at. `none` and `cloudflare` are the two values. At `none` no credential is opened, no provider client is built, and this server sends nothing to a DNS provider. Covered under Letting this server write its own DNS records. |
+| `BLAMEPOST_ZONE_API_TOKEN` | `zoneApiToken` | unset | The provider API token, as this server's vault sealed it for the zone writer. A value that is not sealed, or one the vault sealed for another purpose, is refused at start. Set it when the deployment injects secrets through the environment; leave it unset to use the sealed token `blamepost zone token set` writes to the data volume. Supplying both stops the start. |
+| `BLAMEPOST_ZONE_ALLOW_MX_WRITES` | `zoneAllowMxWrites` | `false` | Whether the zone writer may edit the `MX` record at a hosted domain's apex. Repointing `MX` moves delivery away from this server, which is the one change this server cannot report on afterwards. |
+| `BLAMEPOST_ZONE_ENDPOINT` | `zoneEndpoint` | unset | The provider API address the zone writer sends to, for a deployment whose outbound traffic goes through a proxy of its own. Unset, it uses the provider's public API. An address written as a literal cloud metadata address stops the start, and so does a literal private, loopback or link-local address unless `BLAMEPOST_ZONE_ALLOW_INTERNAL_ENDPOINT` is set. A host name is checked when a request resolves it. |
+| `BLAMEPOST_ZONE_ALLOW_INTERNAL_ENDPOINT` | `zoneAllowInternalEndpoint` | `false` | Whether the address in `BLAMEPOST_ZONE_ENDPOINT` may resolve inside a private, loopback or link-local range. Setting it without an endpoint stops the start. Cloud metadata addresses are refused whatever it holds. |
+
+The four zone variables below `BLAMEPOST_ZONE_PROVIDER` are refused while it
+names no provider, because a sealed token and an `MX` switch that nothing reads
+look exactly like a zone writer that is turned on.
 
 The six per-listener port variables are in the Firewall table above, next to the
 ports they move.
@@ -1307,6 +1786,311 @@ account. The retention floor governs deleting a message, and it governs an
 erasure too: an erasure runs through the same delete path, so a message inside
 the window the posture names stays until it is old enough to go, and the command
 says which ones stayed.
+
+## What peers report about your domains
+
+A domain publishing a DMARC record asks receivers for two kinds of report, and
+the `rua=` and `ruf=` addresses in that record decide where each one is sent.
+
+An aggregate report is one receiver's count of a day of mail claiming your
+domain: how many messages arrived from each sending address, whether they
+aligned, and what the receiver did with them. That is the reading you move a
+policy on. This server keeps that counting for thirty days.
+
+```
+BLAMEPOST_DMARC_AGGREGATE_RETENTION_DAYS=90
+```
+
+Raise it when you want a longer view before moving a domain to `p=reject`, up
+to `400` days. The floor is `1` day, because an aggregate report covers a day
+and a window shorter than the period it measures destroys the counting before
+it is complete.
+
+A forensic report is one message that failed, sent back at the moment it
+failed. Storing it is off by default, and it is off because of what it holds.
+
+```
+BLAMEPOST_DMARC_FORENSIC_ENABLED=1
+BLAMEPOST_DMARC_FORENSIC_RETENTION_DAYS=7
+```
+
+**Turning it on stores personal data belonging to people who are not your
+users.** A forensic report names the sending address, the envelope sender and
+the recipients of somebody else's message. Those people have no account on this
+server, were never told this server would hold anything of theirs, and have no
+way to reach this server and ask for it back. Decide that deliberately, and
+check what your own obligations are first. Left off, an arriving forensic
+report is refused rather than filed.
+
+The failing message itself is never stored, whatever this is set to. The parser
+hands it back, the insert path reads a fixed list of fields off the report, and
+the table declares no column the message could go in.
+
+The forensic window may not be longer than the aggregate one, and a pair
+written the other way round stops the start with a message naming both. The two
+are not interchangeable: an aggregate row holds counts, and a forensic row
+holds a stranger's addresses, so a forensic row outliving the counting it
+belongs to is the one arrangement to rule out.
+
+Rows are destroyed as their windows pass rather than at the next start. A
+running server sweeps both tables every hour; a server that is stopped destroys
+nothing, and the first sweep after it starts again reaches everything that came
+due while it was down.
+
+### Where the reports arrive
+
+A report reaches this server as ordinary mail carrying a compressed attachment,
+addressed to whatever your `rua=` and `ruf=` tags name. **Point both at the
+address `BLAMEPOST_POSTMASTER` names**, which is the one address whose arriving
+mail this server opens. A report addressed anywhere else is delivered to that
+mailbox and read by nobody, and the tables stay empty.
+
+```
+_dmarc.example.com. IN  TXT  "v=DMARC1; p=quarantine; rua=mailto:postmaster@example.com; ruf=mailto:postmaster@example.com; fo=1; adkim=s; aspf=s"
+```
+
+The reporter chooses the container. Uncompressed XML, gzip and ZIP are all read,
+and the bytes decide which, so an attachment whose name disagrees with its
+content is opened as its content. A payload that expands past fifty times its
+compressed size is refused before it is expanded, as is one that arrives larger
+than 4 MiB in either compressed form, an archive holding more than sixteen
+entries, one holding another archive, and a report whose declared window is
+longer than thirty-two days, ends more than two days from now, or ends before it
+begins. Each
+refusal is recorded in the audit trail under
+`blamepost.mail.reports.refused` with the reason and the attachment name. So is
+a report naming a domain you do not host, which is refused rather than stored.
+
+Reading a report writes rows and consumes nothing. The message stays filed in
+the mailbox exactly as it arrived, so the copy you open when a number looks
+wrong is the one the reporter sent.
+
+**Give that mailbox to nobody but yourself.** A report counts toward the
+reading below only where this server authenticated the message that carried it,
+which it decides by reading the `Authentication-Results` header its own inbound
+path wrote. An account holder who can reach the mailbox over IMAP can `APPEND` a
+message carrying a header of their own, and nothing in a filed message separates
+an upload from a peer's delivery. No account credential should reach the address
+your `rua=` record publishes.
+
+### Reading what has arrived
+
+```bash
+# Every hosted domain, over the last 30 days.
+blamepost reports list
+
+# One domain, over a range you choose. A date is ISO 8601 or milliseconds
+# since the epoch, and it is matched against the period each report covers
+# rather than the moment the report arrived here.
+blamepost reports list --domain example.com --from 2026-08-01 --to 2026-09-01
+```
+
+Per domain the answer carries the volume receivers counted, how much of it
+aligned on either identifier, the sending addresses that failed on both with the
+largest first, and which organizations reported and when their most recent
+report arrived. A hosted domain nothing has reported on gets a line saying so
+rather than a row of zeroes, because a domain nobody reports on and a domain
+nobody spoofs otherwise print the same totals.
+
+**A report counts toward that reading only where this server authenticated the
+message that carried it.** Anybody who can send mail to the address your `rua=`
+record publishes can compose a well formed report, so the counting is over the
+reports whose carrier passed DMARC for the organization the report names as its
+author, and over nothing else. The volume that condition leaves out is printed
+beside every total rather than dropped:
+
+```text
+example.com
+  2026-08-02T09:11:04.000Z to 2026-09-01T09:11:04.000Z
+  counted 17   aligned 9   unaligned 8
+  100 messages sit outside that arithmetic, in reports whose carrier this server could not
+  authenticate. Anybody who can send mail to a published reporting address can
+  write one, so they are counted here and nowhere else. Fold them in with
+  `blamepost reports list --include-unauthenticated`.
+```
+
+`--include-unauthenticated` recomputes every total over the wider set, the
+failing sources included. Reach for it while working out why a number looks
+wrong, and not while deciding whether to move a policy.
+
+Each reporting organization in the listing is the registered domain that the
+message carrying its reports passed DMARC for. The name a report gives itself in
+`<org_name>` is printed on the line below, as the name its reports give. The
+sender writes that name, and this server does not verify it. Reports from one
+domain under several names are listed once, with a count of the other names.
+The DMARC console shows the same two columns, and `blamepost reports show <id>`
+prints both for one report.
+
+A report stored under another reporter's name and report id does not stop that
+reporter's own report from being stored, unless both reports passed DMARC for
+the same registered domain.
+
+Reports stored before this server recorded the domain a report passed DMARC for
+count toward no organization. Their messages stay in the totals, and the listing
+prints how many of them there are.
+
+`blamepost reports show <id>` narrows to one aggregate report: the policy the
+reporter judged your mail against, the organization that sent it and their
+contact mailbox, what this server concluded about the message that carried it,
+and the sending addresses it counted with their dispositions and alignment
+results. Ids come from `list`. `--limit` sets how many rows each list prints,
+and what is not printed is counted rather than dropped.
+
+Both verbs write nothing and answer while the server is running.
+
+Neither reads a forensic report. Those rows hold a stranger's envelope, so what
+the command line offers for them is the erasure below rather than a listing.
+
+### An erasure request about a report
+
+Somebody whose message headers ended up in a forensic report has no account on
+this server and no verb of their own to reach. When they write to you, this is
+what answers them:
+
+```bash
+# Stop the server first. This destroys rows on the data volume.
+blamepost reports forget stranger@example.net --reason "erasure request received 2026-09-01" --confirm
+```
+
+It destroys every stored report row naming that address, together with the key
+each row was sealed under, so what is left behind in the write-ahead log reads as
+absent rather than as ciphertext somebody may still hold a key for. The reason
+goes on the audit trail, and it is the only record afterwards of why those rows
+went.
+
+`--confirm` is required because the address on the command line does not show
+what the verb reaches. An address is matched in three places: the envelope sender
+and the recipients of a forensic report, and the contact mailbox a reporting
+organization writes into its own aggregate reports. An address belonging to a
+reporter therefore takes every aggregate report that reporter sent with it, and
+the counting `blamepost reports list` prints comes from those rows.
+
+The answer prints how many rows named the address and how many were destroyed.
+Those two coming apart is a row that matched and stayed. A row something is
+preserving on purpose is named with the reason it was kept, and releasing that
+order and running the command again is what finishes the request.
+
+## Moving a domain's DMARC policy
+
+A domain starts at `p=none`, which asks receivers to report and to change
+nothing. Moving it to `p=quarantine` and then to `p=reject` is what makes the
+record refuse forged mail, and it is also what starts discarding any of your own
+mail that does not align. The reports above are the evidence for that decision:
+
+```bash
+blamepost dmarc status example.com
+```
+
+It prints the policy the domain publishes today, which step is next, every rule
+that step is measured against with what the rule asks for beside what the domain
+has, and the `_dmarc` record text for all three levels. The thresholds are
+constants rather than settings, and the command prints the ones in force, so
+there is no number here to copy and no setting that lowers a gate.
+
+It exits zero whichever way it answers. A domain a fortnight into collecting
+reports is the ordinary state of a domain on its way to `p=quarantine`, not a
+fault.
+
+The counting it reads is over the reports whose carrier this server
+authenticated and over nothing else, and no flag changes that. Anybody who can
+send mail to the address your `rua=` record names can compose a well formed
+report, so a step taken on the wider reading is a step taken by whoever wanted
+it taken.
+
+The rule on reporting organizations counts registered domains. The step to
+`p=quarantine` asks for two, and the step to `p=reject` asks for three. An
+organization is the registered domain that the message carrying its reports
+passed DMARC for. Reports from `mail.example.net` and `reports.example.net`
+count once, as `example.net`. Reports from one domain count once however many
+names they give in `<org_name>`. A party that controls several registered
+domains, each passing DMARC, counts once per domain.
+
+After an upgrade, reports stored before this server recorded that domain count
+toward no organization. The organization count for a domain starts from the
+reports that arrive after the upgrade.
+
+### Senders that fail, and writing down what they are
+
+A step is refused while any sending address is failing both alignments over the
+floor and nobody has said what it is. Those addresses are what `blamepost reports
+list` prints, largest first. Each one is either a sending path of yours that is
+not aligned yet or somebody else claiming the domain, and the next policy
+discards the mail either way, so each gets a sentence:
+
+```bash
+blamepost dmarc mark example.com --source 198.51.100.20 \
+  --disposition not-ours --reason "a hosting range with no relationship to this domain"
+
+blamepost dmarc mark example.com --source 203.0.113.40 \
+  --disposition ours-and-fixed --reason "the newsletter sender, SPF include added 2026-09-01"
+```
+
+`not-ours` says the address is not yours, so its failures are the forgeries the
+policy exists to stop, and it goes on failing without blocking anything.
+`ours-and-fixed` says it is yours and its alignment has been corrected, and the
+reporters get to contradict that: an address marked fixed that keeps failing in
+a window ending well after the marking was written blocks the step again, and
+the command says so.
+
+The marking goes to the audit trail and nowhere else. It carries who wrote it,
+when, and your sentence as its own column, and a later marking for the same
+address supersedes it without erasing either. The address itself is not written
+into the row: what identifies the source is the keyed digest the report rows are
+already indexed by, because the address belongs to somebody with no account
+here, and `blamepost reports forget` is the erasure path for the copy that
+already exists.
+
+```bash
+blamepost dmarc markings example.com
+```
+
+reads back what is in force. A trail it could not read is reported as a trail it
+could not read, which is not the same answer as a domain nobody has marked
+anything for.
+
+`dmarc status` and `dmarc markings` both read the audit trail, and reading it is
+itself recorded, so both refuse while the server holds the volume for the reason
+`audit read` does. `dmarc mark` writes a row. Stop the server for all three.
+
+### Publishing, and the way back
+
+None of the commands above writes a zone. Each prints the record and you put it
+in DNS, the same as every other record this server expects. Where
+`BLAMEPOST_ZONE_PROVIDER` names a provider, the DMARC page in the administration
+console publishes it for you instead, from the same reading: see
+[Publishing a DMARC record from the console](#publishing-a-dmarc-record-from-the-console).
+
+Stepping DOWN is not gated. There is no evidence to gather, no threshold to
+clear and no marking to write: mail being discarded is answered by publishing
+the weaker record and looking afterwards. Every reading above prints the weaker
+record beside the verdict, including the readings that refuse to step up, so the
+value you would publish to reverse is in front of you before you need it.
+
+The record text has a command of its own, and it opens no data volume:
+
+```bash
+blamepost dmarc preview example.com
+blamepost dmarc preview example.com --level none
+```
+
+It reads the record the domain publishes now, keeps every tag on it, changes the
+`p` tag and prints the result. It answers while the server runs, after it has
+stopped, and on a machine whose database will not open at all, which is the
+state you are in when you most want the weaker record.
+
+Two tags are treated differently. A `pct` tag is never carried into the printed
+record: RFC 7489 §6.3 makes an absent one mean the whole of the mail, RFC 9989
+removed the tag, and a policy applied to part of the mail is not the policy the
+evidence was measured for. A `rua` tag is added when the published record carries
+none, pointing at the address `BLAMEPOST_POSTMASTER` names, because a domain that
+asks for no reports accumulates no evidence. **Point that setting at a mailbox on
+a domain you host, or replace the address before you publish**: its default is
+built from the MX hostname, which is usually not a hosted domain, so reports sent
+there are refused at `RCPT` and never arrive.
+
+A tag whose name or value falls outside the tag grammar of RFC 9989 §4.8 is left
+out of the printed record and named beneath it. The published record came out of
+DNS and the printed one is read at a terminal and pasted into a provider's form.
 
 ## Message bodies on disk
 
@@ -1408,6 +2192,20 @@ else's mail, and `blobs report --verify` is what names the file. Run it after
 restoring onto a disk you have any doubt about, and treat the repair as a
 saving on the deliveries it happens to catch rather than as the thing that keeps
 the volume honest.
+
+Each body is also sealed to the name it is filed under, so a value sealed as
+something else on this volume is refused before it is opened at all. That
+refusal reads `is sealed, and not as this message's body`, and it separates a
+file holding the wrong kind of value from a body that is damaged, which reads
+`did not open`. The two send you to different places: a damaged body is restored
+from a backup, and a value sealed as something else is not mail and restoring
+the message store puts nothing right.
+
+A volume written before that seal existed carries its bodies in the older form,
+and they are read exactly as they were. There is nothing to migrate: the file
+name is the hash of the octets whichever form the file is sealed in, and the
+read checks it either way. Bodies written from now on are 2256 bytes smaller
+each.
 
 ### A delete the volume would not finish
 
@@ -1531,6 +2329,104 @@ body that fails `--verify` is not deleted, and a file under `blobs/` that is not
 a message body is left exactly where it is. Each of those is a decision, and a
 reclaim that made them quietly would be the second thing to have gone wrong.
 
+### Repairing a mailbox charged for mail nothing lists
+
+```bash
+# Stop first, for the reason the reclaim above does: the running server holds
+# the volume, and the second process to open it is refused.
+docker stop blamepost
+
+blamepost blobs report
+blamepost blobs repair \
+  --confirm \
+  --reason "counters charged for mail stranded by the crash on 2026-08-22"
+
+docker start blamepost
+```
+
+Delivery writes the sealed body, then the message store's row, then the row
+binding that message to a mailbox. The quota counter moves on the second. A
+process that stops before the third leaves the counter charged for a message the
+owner can neither read nor delete: no protocol lists it, no client can delete it,
+and the mailbox fills up against nothing. `blobs report` names the mailbox and
+says how many messages and how many bytes the repair would take from it. Read
+that first, because the repair destroys mail.
+
+The counter is not written. The repair removes the messages the message store
+holds that no mailbox row names, and the store's own arithmetic moves the number
+by exactly what went, so a mailbox reporting as reconciled afterwards is one that
+is. A number set by hand would be one nothing could derive again.
+
+**A preservation order and the retention floor keep a message here exactly as
+they keep any other.** Each message goes through the same delete path `EXPUNGE`
+takes. One that is kept is printed on its own `kept` line with the rule keeping
+it, and its mailbox stays charged for as long as the message is kept. That is
+the system working: you can name the record being kept and the rule keeping it.
+
+**Where the message store counts fewer messages than the mailbox lists, nothing
+here raises the counter.** Those rows name messages the store no longer has.
+They are printed as `FAIL` lines, the command exits non-zero rather than
+reporting the volume repaired, and the answer is to restore from a backup whose
+database and `blobs/` directory were taken together.
+
+The bodies those destroyed messages named are referenced by nothing once the
+repair has run. `blobs reclaim` frees them after the settle window above.
+
+Both flags are required and the reason goes into the audit chain under
+`blamepost.store.blobs.quota_repaired`, naming who ran it and how much went and
+stayed. A run cut off part way leaves the messages it reached destroyed and every
+other mailbox as it was, so running it again finishes.
+
+### Recording whether a message carries files
+
+```bash
+# Stop first, for the reason the two verbs above do: the running server holds
+# the volume, and the second process to open it is refused.
+docker stop blamepost
+
+blamepost attachments report
+blamepost attachments backfill
+
+docker start blamepost
+```
+
+Every message this server files records whether it carries parts a client should
+offer as downloadable, as the IMAP keyword `$HasAttachment` or
+`$HasNoAttachment`. An IMAP client shows the keyword in `FETCH FLAGS`, a JMAP
+client reads `hasAttachment` from it, and the folder listing marks the rows that
+have one. Mail filed before this release records neither, and `backfill` is what
+reads those messages and writes the answer.
+
+`report` says how many stored messages record the answer and how many record
+nothing. It changes nothing, and it opens the volume the same way the backfill
+does, so it needs the server stopped as well.
+
+**An interrupted run is finished by running it again.** Each message is marked on
+its own, there is no cursor to keep and nothing to clear: the mark on the message
+is the record of what has been done. `--limit <n>` caps how many messages one run
+opens, and the answer says how many it left, which is how a volume too large for
+one maintenance window is done in several.
+
+```bash
+blamepost attachments backfill --limit 20000
+```
+
+**Two shapes of message stay unmarked.** A message above the 8 MiB octet read
+bound is not opened here at all, which is the same bound the conversation page
+declines to list files past. A message whose stored body cannot be read back is
+named on its own `FAIL` line and the run exits non-zero; `blobs report --verify`
+is the verb that answers for those. Both are counted apart from the messages the
+run finished, and a later run opens them again.
+
+Until a message records the answer, the folder listing says the answer is not
+known for it and a JMAP client is told it may carry files, so nothing is hidden
+by the mark being absent.
+
+A run files one audit row under
+`blamepost.mail.mailbox.attachment_marks_recorded` carrying its counts. One row
+per run rather than per message, because a row per message would be a row per
+message on the volume.
+
 ## Domains
 
 ```bash
@@ -1564,6 +2460,11 @@ it was: its accounts, their mail, and its DKIM selectors. `enable` puts it back.
 Both record a reason in the audit trail. A disabled domain is also skipped by the
 MX listener's acknowledgment gate, so switching one off does not hold up a
 restart.
+
+An account on a disabled domain cannot sign in, and a browser session it already
+holds stops at its next request: webmail, JMAP and the admin console all send it
+to the sign-in page. That includes an administrator whose address is on the
+domain.
 
 **Disabling takes effect at the next RCPT, with no restart**, and so does
 enabling. The direction that needs a restart is adding, above; taking a domain
@@ -1611,9 +2512,10 @@ has already committed, the record that named the file is gone, and the file is
 named on its own line for you to delete by hand. A key left in the keys folder
 below covers what that looks like.
 
-The records themselves are still published. This server never edits DNS, so
-delete the `_domainkey` TXT records for the domain from its zone yourself once
-the removal has run.
+The records themselves are still published. Nothing here removes a DNS record on
+any setting, including a server holding a hosted-DNS credential, so delete the
+`_domainkey` TXT records for the domain from its zone yourself once the removal
+has run.
 
 ## Accounts
 
@@ -1631,6 +2533,14 @@ blamepost account resume  alice@example.com
 is the safer default: a password typed on a command line is in the shell history
 of whoever ran it. `--quota` is in bytes and the mailbox is unlimited without it.
 It is set when the account is created, and `show` prints it back.
+
+**The cap covers every folder the account owns, and both browser surfaces
+report it that way.** `/admin/accounts` prints what each mailbox holds beside
+the cap you set, with the message count under it, and the mailbox page prints
+the same total to the account holder above their message list. A message that
+would take the mailbox past the cap is refused where it is appended, over IMAP
+with `NO [OVERQUOTA]` and over JMAP and the web form with the same used and cap
+figures the pages show.
 
 `list` leaves archived accounts out, because the common question is which
 mailboxes are live. `--include-archived` puts them back in, and that is where to
@@ -1650,6 +2560,23 @@ the address still has somewhere to land is decided at the moment the copy would
 be filed, so a suspension that lands mid-transfer refuses that message like any
 other. This matters when you are suspending an account because of what is
 arriving in it, which is when mail is in flight by definition.
+
+**A client that is already signed in stops at its next command.** Suspending an
+account does not close the connections it has open, and a mail client holds one
+open for hours: an IMAP session under `IDLE` and a submission session between
+messages are both connected with nothing arriving. The account is read again for
+every command a signed-in session sends, so the next `FETCH`, `LIST`, `STAT`,
+`LISTSCRIPTS` or message offered to the submission port is refused, and the
+client reads its protocol's negative reply. It stays connected until it
+reconnects or gives up, and a reconnection is refused at the password. Each
+refusal writes a row: `blamepost audit read --action
+blamepost.mail.listeners.session_account_stopped` names the account, the command
+it was refusing and which state the account is in.
+
+`blamepost account resume` puts those same open sessions back to work without the
+client signing in again. Archiving an account, erasing one, and withdrawing a
+hosted domain with `blamepost domain disable` all reach an open session the same
+way.
 
 Everything the account already holds is kept, and `resume` puts it back exactly
 as it was. So suspension is the right first move on a compromised credential:
@@ -1688,8 +2615,8 @@ creating the account rather than on one that already exists.
 ## Aliases
 
 An alias points one address at one destination, and a chain of them is followed
-to its end. They are added and removed in the admin interface under Aliases;
-there is no command line verb for them. A destination outside this server is
+to its end. They are added, stopped, started and removed in the admin interface
+under Aliases; there is no command line verb for them. A destination outside this server is
 accepted, and a message forwarded to one leaves through the same outbound path
 and the same transport policy as everything else this server sends. It takes a
 smaller share of the queue than an account's own mail does, because how much of
@@ -1709,9 +2636,9 @@ that lands in a mailbox here has none of that problem, which is the argument
 for hosting the mailbox rather than forwarding it.
 
 **Creating an alias also hands out a sending identity.** Submission binds the
-`From` header of every message an account sends, and the authors it accepts are
-the account's own address plus every active alias landing in that account's
-mailbox. So an alias on `ceo@example.com` aimed at `alice@example.com` does two
+`From` header and the envelope sender of every message an account sends against
+one set: the account's own address plus every active alias landing in that
+account's mailbox. So an alias on `ceo@example.com` aimed at `alice@example.com` does two
 things: mail addressed to `ceo@example.com` arrives in alice's mailbox, and
 alice can write `ceo@example.com` as the author of her own outgoing mail. Where
 the alias and the account sit in the same domain, that mail leaves signed with
@@ -1729,10 +2656,33 @@ address that mailbox may write. Disabling an alias withdraws the delivery and
 the identity together, at the next message rather than at the next sign-in,
 because the set is read from the store per message.
 
-Where the identity is actually usable is the webmail interface and JMAP, which
-compose their own envelope; a mail client on the submission port cannot send
-under an alias. "Sending as an alias" below has the detail, and it is worth
-reading before you tell somebody a departmental address is set up for them.
+The identity works on all three sending surfaces: the webmail interface, JMAP,
+and a mail client on 587 or 465 with the alias configured as a second identity.
+"Sending as an alias" below has the detail, and it is worth reading before you
+tell somebody a departmental address is set up for them.
+
+### Stopping an alias, and removing one
+
+The Aliases page carries two controls on every row. **Stop** turns the alias off
+and keeps the row: mail to the address is refused at the wire, the destination
+and the history stay, and **Start** puts it back in service. **Remove** deletes
+the row, and putting one back then means writing the address and the destination
+again from what you remember of them.
+
+Reach for Stop when an address is being abused, when a role has moved, or when
+anything else is temporary. Mail to a stopped alias is refused rather than
+handed to the domain's catch-all, so an address you stop here stays stopped even
+on a domain that claims everything else. A sending server holds the message and
+retries, so mail sent while the alias is off arrives if you start it again
+before that server gives up.
+
+Both controls act on one leg of a fan-out: an address forwarding to four people
+has four rows, and each carries its own pair of controls. Both ask for a reason
+before they act, and it is recorded in the audit trail. Stop and Start ask for
+the reason and nothing else; Remove also asks you to type the address back,
+because it is the one of the two you cannot undo from this page. When the
+address has more than one row, Remove asks for the destination of the leg you
+pressed instead, since the address names every leg.
 
 ## Mail between two mailboxes on this server
 
@@ -1805,7 +2755,7 @@ What that looks like from here depends on the rest of the message. Where other
 recipients on the same message were delivered, the peer is told the message
 arrived and this server composes a delivery report to the envelope sender
 naming the recipient that did not. Where nothing on the message could be
-delivered, the peer is answered:
+delivered and the condition is one somebody can clear, the peer is answered:
 
 ```text
 451 4.3.0 Local delivery error
@@ -1814,30 +2764,44 @@ delivered, the peer is answered:
 and keeps the message, so it retries on its own schedule and reports to its own
 sender if it gives up. This server writes no report of its own in that case, and
 that is deliberate: a report goes to whoever the envelope claimed to be from,
-which on a run of mail to addresses that do not exist here is a third party who
-never wrote to you. The peer's return path is one it accepted from a sender it
-knows. That case is on the trail, one row per message, naming the recipients:
+which on a forged run is a third party who never wrote to you. The peer's return
+path is one it accepted from a sender it knows. That case is on the trail, one
+row per message, naming the recipients:
 
 ```bash
 blamepost audit read --action blamepost.mail.inbound.refused
 ```
+
+**A condition no later attempt can clear is answered permanently instead**, and
+the code says which kind it is. An address this server does not deliver to draws
+`550`: a name that stopped resolving to a mailbox here between `RCPT` and the end
+of `DATA`, an address that forwards in a loop, or a mailbox part way through an
+erasure. A message the parser will not read draws `554`, whether the reason is
+its structure, its headers, or a transfer encoding or character set this server
+does not read. A message over the size ceiling draws `552`. All three need every
+refused recipient on the message to have failed for the same reason, because one
+reply covers the whole transaction: a message refused for two different reasons
+at once is answered `451 4.3.0` and handed back to the peer.
 
 ## What an account may put in `From`
 
 The envelope sender and the `From` header are bound separately, and a client can
 satisfy one and fail the other.
 
-`MAIL FROM` has to be the account's own address as the account is spelled. An
-alias is refused there, and so is the account's own plus-tagged address:
-`alice+receipts@example.com` is accepted as a recipient on port 25 and refused
-as an envelope sender on 587. That is a false refusal rather than a way in, and
-[ROADMAP.md](../ROADMAP.md) tracks it under Sending under an alias and Sending
-from your own subaddress. It is also the reason the section below ends where it
-does: the browser and JMAP can send under an alias and an ordinary desktop
-client cannot.
+Both are measured against one set: the account's own address plus every active
+alias landing in its mailbox, canonical so a plus tag folds into the address it
+extends. So `alice+receipts@example.com` and an alias aimed at alice are both
+addresses she may write in `From` and put in `MAIL FROM`, and neither half
+permits an address the other refuses. The set is read from the store on every
+envelope, so an alias you disable stops working at the next message.
 
-`From` is measured against the wider set, with plus tags folded away the same
-way routing folds them. The rules a client can trip over:
+`MAIL FROM` is answered before any recipient is accepted, and an address outside
+the set is refused there with `553 5.7.1 Sender address rejected: not owned by
+authenticated identity`. The session survives it, so a client that guesses wrong
+once can correct itself rather than reconnecting.
+
+`From` is measured on the finished message, after `DATA` and before anything
+signs it. The rules a client can trip over:
 
 - Every address in `From` or `Sender` at a domain this server hosts has to be
   one the account may write. An address at a hosted domain that belongs to
@@ -1852,14 +2816,15 @@ way routing folds them. The rules a client can trip over:
   with a `From` naming an empty group, or with a header block that cannot be
   read is refused whatever it names.
 
-**The refusal reaches the client as `451 4.3.0 Local delivery error`.** That is
-a transient code for a permanent condition and it names no cause, because it is
-the one reply the listener writes for every refused message. Expect a client to
-handle it badly: curl reports it as a malformed reply rather than a temporary
-failure, so a script cannot branch on it, and a sending MTA reads the 4 and
-retries a message that will be refused identically every time. Tracked upstream
-as blamejs#668, which asks that a refusal be able to choose its own reply. The
-reason is in the log and in an audit row:
+**A refused `From` header is answered permanently, and the code says which rule
+it broke.** An author the account may not write draws `550 5.7.1 Message
+rejected: author address not owned by authenticated identity`, which sends you
+to the alias table. A `From` and `Sender` pair that names no single readable
+author draws `550 5.6.0 Message rejected: From or Sender header cannot be read
+as a single author`, which sends you to the client that composed it. Either way
+the sending client is told to stop rather than to retry. The reply is short
+because it goes onto a line-oriented protocol and names no address; the
+addresses are in the log and in an audit row:
 
 ```bash
 blamepost audit read --action blamepost.mail.listeners.submission_from_not_owned
@@ -1888,20 +2853,38 @@ refusal. The return path stays the account's own address, so a bounce lands in
 the mailbox of whoever actually sent the message.
 
 **Over JMAP**, `Identity/get` answers with one identity per permitted address,
-and `EmailSubmission/set` now requires an `identityId` naming one of them. A
-create with the field missing is refused as an invalid property and one naming an
+and `EmailSubmission/set` requires an `identityId` naming one of them. A create
+with the field missing is refused as an invalid property and one naming an
 identity this account does not hold is refused as `identityNotFound`; neither is
 quietly sent as the account instead, which is the failure a mailbox owner would
 otherwise discover in the recipient's reply.
 
-**An ordinary desktop client on the submission port cannot use this.** Such a
-client derives the envelope from whichever identity it is configured with, so it
-puts the alias in `MAIL FROM` as well as in `From`, and the envelope binding
-refuses that with `553 5.7.1 Sender address rejected: not owned by authenticated
-identity`. The browser and JMAP compose their own envelope and never have the
-problem. If someone needs to send as a departmental address from a mail client,
-the answer today is a second account for that address rather than an alias onto
-theirs.
+**From an ordinary mail client**, add the alias as a second identity and the
+client sends under it directly. Such a client derives the envelope from the
+identity it is configured with, so the alias goes in `MAIL FROM` as well as in
+`From`, and one set answers both. The return path is then the alias, so a bounce
+lands wherever the alias points rather than in the mailbox of whoever sent the
+message.
+
+**An alias in a second hosted domain aligns under DKIM whichever surface sent
+it.** The browser and JMAP sign for the domain in the `From` header they build.
+A mail client puts the alias in `MAIL FROM` as well as in `From`, and the
+submission port signs for the domain in the envelope sender, which is that same
+domain. An alias in the account's own domain aligns for the same reason.
+
+**What the browser and JMAP cost is SPF alignment.** Both keep the account's own
+address in the envelope, so a bounce lands in the mailbox of whoever pressed
+send, and SPF authenticates the domain in the envelope rather than the one in
+the header. A message displaying an alias in a second hosted domain carries an
+SPF result for the account's domain and a `From` at the other, and those two do
+not align. DMARC passes when either mechanism aligns and passes (RFC 9989), and
+DKIM does, so the message passes. A receiver that reports per-mechanism results
+shows the SPF half as unaligned.
+
+**A client that puts the envelope at one hosted domain and the author at another
+aligns under neither.** The submission port takes the signing domain from the
+envelope, so the signature names a domain the recipient is never shown. Set the
+client's identity so both fields carry the same address.
 
 Point a client at 587 or 465 for sending and 143 for reading, and set it to
 require TLS. On the authentication method, the answer is narrow and worth
@@ -1994,12 +2977,332 @@ that genuinely cannot hold a credential needs a submission relay of your own in
 front of it, which keeps the credential in one place you control rather than
 extending trust to a whole segment.
 
+## Sending credentials for an application
+
+An account is one mailbox and sends as one address. An application that sends
+under many local parts of a domain, so that each message comes from the name that
+suits it, would need an account per name and a mailbox behind each. A sending
+credential is the other shape: one secret, scoped to one hosted domain, permitted
+to send as every local part in it and holding no mailbox at all.
+
+An application presents one on either of two transports. On 587 or 465 it signs
+in over SASL with the hosted domain as the user name and the token as the
+password. On the browser port it posts JSON to `POST /api/send`, which is
+described under Sending over the browser port below. Both transports read the
+same row, so the refusal list and the two ceilings hold across them and an
+application cannot get past either by changing transport.
+
+### Issuing one
+
+```bash
+blamepost credential add example.com --bounce-to mailops@example.com --reason "the notifications application sends for this domain"
+```
+
+Stop the server first. This writes the data volume.
+
+The mailbox named by `--bounce-to` has to exist and be in service before the
+credential is written. A credential naming an address with no mailbox discards
+every bounce at the door while the application goes on sending, and the first you
+would hear of it is a receiver's complaint.
+
+**The token is printed once and nothing can read it back.** The volume holds a
+digest of it, so there is no verb that returns it and no file it was written to.
+It reaches the terminal and nowhere else, which makes this terminal and its
+scrollback the place it is exposed: copy it into wherever the application keeps
+its secrets, then clear the scrollback. A token that has been lost is replaced
+with `blamepost credential rotate <id> --reason <text>`.
+
+That is the opposite exposure from `blamepost zone token set`, which reads its
+token from a file because the value is one you already hold and a command line is
+in the shell history and the process list. Here the value is one this server has
+just generated, so it has to come out somewhere, and the terminal is the only
+place it goes.
+
+A credential expires a year from the day it was issued. `--expires` takes a
+moment as ISO 8601 or milliseconds since the epoch, or the word `never` for one
+you have decided to watch by hand.
+
+### Where its bounces come back to
+
+A credential may write as every local part in its domain and almost none of them
+hold a mailbox, so a receiver returning a message to the address it came from
+reaches an address this server answers `no-such-mailbox` for. Each credential
+therefore carries a return path of its own, `bounces+<tag>@example.com`, and that
+is the address to put in the envelope sender of everything it sends. The tag is
+thirty-two hexadecimal characters this server derives for the credential, and
+`blamepost credential show <id>` prints the whole address.
+
+The tag is not the credential's identifier. The return path travels on the
+envelope of every message the credential sends, so the tag reaches every
+recipient the application writes to, and the identifier is what this server
+counts failed sign-in attempts against. A credential whose identifier rode out on
+its own mail would be one any recipient could spend that count against.
+
+The domain carries one alias at `bounces@example.com` pointing at the mailbox you
+named. Routing folds the tag away before it looks the alias up, so one alias
+serves every credential in the domain and the tag stays on the envelope and in
+the delivered `To`, which is how the bounce mailbox tells whose bounce it is
+reading. **Leave `bounces@example.com` free.** Issuing the first credential
+writes that alias when nothing is standing at the address; something already
+standing there that delivers somewhere else refuses the whole call and names both
+addresses. Withdrawing the last credential in the domain takes the alias away
+again, and only an alias this server wrote.
+
+A bounce mailbox archived a month after the credential was issued leaves the
+credential working and every bounce refused at the door. Nothing about the
+credential changed, so resolving the return path is the only thing that finds it:
+
+```bash
+blamepost credential bounces example.com
+```
+
+That answers with the domain's return path and every live credential whose
+bounces have stopped arriving where it named, and it answers while the server
+runs. `blamepost credential show <id>` carries the same reading for one
+credential, and `blamepost credential list <domain>` carries it for each row.
+
+### What it may not send as
+
+Each credential holds a list of local parts it refuses. It starts as `postmaster`
+and `abuse` together with every mailbox in the domain carrying the operator role
+when the credential is issued, which are the addresses a recipient writes to when
+they want to reach a person rather than the application. Replace the list with:
+
+```bash
+blamepost credential refusals <id> --local-part postmaster --local-part abuse --reason "this one answers the operator notices itself"
+```
+
+The list is replaced whole rather than added to, so the flags name every local
+part the credential is to refuse afterwards. Taking one off widens the
+credential, and the audit row records what came off as well as what went on.
+Leaving the list empty is a widening to every address in the domain other than
+the operator mailboxes described below, so it is a separate flag and takes a
+confirmation:
+
+```bash
+blamepost credential refusals <id> --clear --confirm --reason "this one answers the operator notices itself"
+```
+
+A credential is also refused every mailbox in its domain that carries the
+operator role, whatever its list says. The server reads the role from the account
+each time it checks a sender or an author, on submission and on `POST /api/send`
+alike. A mailbox created with the role, or given the role from the console, after
+the credential was issued is refused from the next message, including on a
+submission session that authenticated before the change. Emptying the list or
+taking an operator mailbox off it does not permit that mailbox. For a credential
+to write as it, take the operator role away from the account, and take the local
+part off the credential's list if the list names it.
+
+`bounces` is not on the default list. It is the local part of the credential's
+own return path, so a credential refusing it would be one refusing the address
+this server told you to put in its envelope sender.
+
+### Ceilings
+
+Two ceilings ride on each credential over a rolling window, one on messages and
+one on recipients, and both are finite whether or not you name them. A hundred
+messages carrying one recipient each and one message carrying a hundred thousand
+are different events, and the second is the one a stolen credential produces, so
+one counter cannot see both.
+
+```bash
+blamepost credential add example.com --bounce-to mailops@example.com --max-messages 200 --max-recipients 400 --window-minutes 15 --reason "the notifications application sends in bursts"
+```
+
+The window is between 1 and 1440 minutes and defaults to 60.
+
+The counters those ceilings are measured against live in the process that is
+sending, and a restart puts every one of them back to zero. A command line runs
+in a different process and cannot reach them, so what a running server counted
+is on the audit trail instead:
+
+```bash
+blamepost credential ceiling <id>
+```
+
+That prints the two ceilings, the window the command's own process reads, and
+every row the trail holds for this credential: each message the server refused
+for crossing a ceiling, with how much had been sent and which of the two was
+crossed, and each window an operator gave back, with the reason they recorded.
+`--limit` takes between 1 and 500 rows of each kind and defaults to 20; the
+answer says when a read came back full, because the rows that fall off the end
+are the oldest crossings.
+
+The window in that answer is the command's own and is always empty. It is the
+window the next start begins from rather than the one that refused a message.
+Reading the trail is itself recorded, so this verb needs the server stopped,
+unlike `credential list`, `credential show` and `credential bounces`.
+
+A crossing defers the message rather than losing it: the refusal is
+`452 4.5.3` on submission and `429` over the browser port, and the window is
+rolling, so it drains on its own. A credential crossing a ceiling it never used
+to reach is the shape a stolen one makes; rotate its secret.
+
+### Sending over the browser port
+
+An application that speaks HTTP rather than SMTP posts the message to
+`POST /api/send`. The route is part of the web application, so it answers on 8443
+and on 8080 and binds no port of its own. The token goes in an `Authorization`
+header, and every request carries an `Idempotency-Key` header:
+
+```bash
+curl -s https://mx.example.com:8443/api/send \
+  -H 'Authorization: Bearer <the token>' \
+  -H 'Idempotency-Key: dispatch-note-4471' \
+  -H 'Content-Type: application/json' \
+  -d '{"from":"no-reply@example.com","envelopeFrom":"bounces+<id>@example.com","to":["reader@example.net"],"subject":"Your order has shipped","text":"It left the depot this morning."}'
+```
+
+A message this server accepted answers `202`:
+
+```json
+{"messageId":"<a1b2c3d4e5f60718@example.com>","signed":true,"local":0,"remote":1,"refused":0}
+```
+
+`messageId` is the `Message-Id` header the message carries.
+`signed` says whether the domain's DKIM key signed the message. `local` counts
+the recipients this server filed into a mailbox it hosts, `remote` counts the
+ones it handed to the outbound path, and `refused` counts the ones it would not
+take.
+
+**The connection has to be one this server can establish is encrypted.** A
+cleartext request is refused with `403` before the credential is read, unless it
+arrived on the loopback interface or through a proxy named in
+`BLAMEPOST_TRUSTED_PROXIES`. A published container port is forwarded into the
+container's own network namespace, so a request the host sends to `127.0.0.1`
+arrives from the bridge gateway rather than over loopback and is refused like any
+other cleartext peer. Point the application at 8443.
+
+**The request has to carry no `Cookie` header at all.** The route reads the
+credential from the `Authorization` header and authenticates nothing else, so a
+request that also carries a browser session is refused with `400` rather than
+resolved one way or the other. The route hands back no cookie, so an application
+that talks only to it has none to return; one sharing a cookie jar with a
+signed-in browser session does, and its next send is refused. Turn that client's
+cookie jar off.
+
+**The sender's copy is not filed.** A credential holds no mailbox, so there is no
+`Sent` folder for the message to go into, and an operator looking in webmail for
+a record of what an application sent will not find one. Naming a mailbox on this
+server in `bcc` files a copy the account holder can read, because a recipient
+this server hosts is filed here rather than sent out. The application's own
+records and the audit trail are where the rest of that history lives.
+
+### The body a send takes
+
+The body is JSON of at most 1048576 bytes, which bounds every field together; a
+larger body is refused with `413` before any field is read. `from` is required,
+at least one address across `to`, `cc` and `bcc` is required, and at least one of
+`text` and `html` is required.
+
+| Field | What it holds |
+|---|---|
+| `from` | The address in the `From` header. At most 320 characters. |
+| `sender` | The address in the `Sender` header, for a message written on behalf of an author at a domain this server holds no key for. At most 320 characters. |
+| `envelopeFrom` | The envelope sender. Defaults to the credential's return path, `bounces+<id>@<domain>`. At most 320 characters. |
+| `to`, `cc`, `bcc` | Arrays of addresses, at most 100 across the three together, each at most 320 characters. |
+| `subject` | At most 998 characters. |
+| `text` | The plain-text body. At most 1048576 characters, and `text` and `html` together fit inside the body limit above. |
+| `html` | The HTML body. At most 1048576 characters, and `text` and `html` together fit inside the body limit above. |
+| `inReplyTo` | The `In-Reply-To` header. At most 998 characters. |
+| `references` | The `References` header, as an array of at most 20 entries, each at most 998 characters. |
+
+**The route refuses a body carrying a field it does not accept.** An application
+that spells `bcc` as `bccs` has written a message with recipients it believes are
+on it, so the field is refused rather than dropped.
+
+The `From` and `Sender` headers and the envelope sender are each measured against
+the addresses the credential may write, which are the ones described under What
+it may not send as above. The same reading answers on the submission ports, so an
+address refused on one transport is refused on the other.
+
+### The `Idempotency-Key` header
+
+Every request needs one, and a request without one is refused with `400`. The key
+is at most 256 bytes of printable US-ASCII, with no control characters, no slash
+or backslash and no `..` sequence.
+
+A key is recorded against the credential that presented it and answers for 24
+hours. A repeat under the same key and the same body answers with the first
+response again and carries `Idempotency-Replayed: true`, so a client whose
+request timed out after this server accepted the message retries without sending
+it twice. A key whose first request has not finished is refused with `409`, and a
+key reused for a message with different contents is refused with `422`.
+
+The records live in the process that is sending. A restart forgets every one of
+them, and a credential minting a fresh key for each message reaches the bound of
+ten thousand records, at which point the oldest are dropped. A refusal decided
+before the message reached the outbound path gives the key back, so an
+application that corrects its request keeps the key it started with.
+
+### When the route refuses
+
+Every refusal is an RFC 9457 problem document. The content type is
+`application/problem+json` and the body carries `type`, `title`, `status` and
+`detail`, so an application branches on the `type` and shows the `detail`.
+
+| Status | `type` | What it means |
+|---|---|---|
+| `403` | `urn:blamepost:problem:send-transport-cannot-carry-a-credential` | The connection is neither encrypted nor from loopback. |
+| `400` | `urn:blamepost:problem:send-ambient-credential-refused` | The request carried a `Cookie` header. |
+| `401` | `urn:blamepost:problem:send-credential-refused` | No credential was presented, the one presented was not accepted, or it stopped standing between the check and the send. `WWW-Authenticate: Bearer` rides with it. |
+| `400` | `urn:blamepost:problem:send-idempotency-key` | The `Idempotency-Key` header is absent, empty, or not a key this server accepts. |
+| `409` | `urn:blamepost:problem:send-idempotency-key-in-flight` | An earlier request under this key has not finished. |
+| `422` | `urn:blamepost:problem:send-idempotency-key-reused` | This key was used for a message with different contents. |
+| `503` | `urn:blamepost:problem:send-idempotency-records-full` | The server holds 10000 idempotency records and every one belongs to a send that has not finished. Nothing was sent. `Retry-After` carries the wait in seconds. |
+| `400` | `urn:blamepost:problem:send-body-refused` | The body is not one this route accepts, or an address in it is not one this server will read. |
+| `403` | `urn:blamepost:problem:send-envelope-not-permitted` | The envelope sender is not an address this credential may write. |
+| `403` | `urn:blamepost:problem:send-author-not-permitted` | The `From` or `Sender` header is not an address this credential may write. |
+| `429` | `urn:blamepost:problem:send-ceiling-reached` | A ceiling is full for the current window. `Retry-After` carries the wait in seconds. |
+| `503` | `urn:blamepost:problem:send-ceiling-unreadable` | This server could not read the credential's ceiling, so the message was not sent. The audit trail names what is wrong with the record. Retrying does not clear this; an operator repairs the record. |
+| `502` | `urn:blamepost:problem:send-not-relayed` | The message was not handed to the outbound path. |
+
+The `401` is one answer to several states. A secret this server never issued, a
+revoked credential, an expired one and a domain no longer hosted here all reach
+it, and the audit trail is where the distinction is written.
+
+The two ceilings under Ceilings above are spent on this route and on 587 and 465
+out of one window, so an application at its ceiling gets `429` here and
+`452 4.5.3` there rather than a fresh budget on the other transport. A message
+the credential may not write is refused before it costs any part of that window.
+
+### Rotating, and the difference between revoke and remove
+
+```bash
+blamepost credential rotate <id> --reason "the token reached a place it should not have"
+```
+
+The identifier, the domain, the bounce mailbox, the refusal list and the ceilings
+are all unchanged, and the old secret stops working at once. `--grace-hours <n>`
+names a window, up to 168, in which the previous secret keeps working; a verdict
+produced by it says so, which is how you see whether the application has finished
+migrating before the window closes. There is no window unless you name one,
+because the reason to rotate is usually that somebody else holds the old secret.
+
+```bash
+blamepost credential revoke <id> --reason "the application was decommissioned"
+```
+
+Revoke stops the credential and keeps its row, so the identifier on every audit
+row it produced still resolves to a credential. That is what you want almost
+every time.
+
+```bash
+blamepost credential remove <id> --destroy --reason "erasure request received 2026-09-01"
+```
+
+Remove takes the row off the volume as well, and the identifier on those earlier
+rows then names something nothing can look up. Both verbs take the domain's
+return path alias with them when the credential going was the last one using it,
+and both say which happened.
+
 ## Connection and message ceilings
 
 Every listener holds a ceiling on what one source address may ask of it, so a
 single hostile peer cannot take the server away from everyone else. The first
 four below are those; the fifth bounds one message rather than one address, and
-only the two SMTP listeners read it. The shipped numbers are these:
+the two SMTP listeners, the IMAP listener and the message store read it. The
+shipped numbers are these:
 
 | Ceiling | Shipped value | What it bounds |
 |---|---|---|
@@ -2007,11 +3310,44 @@ only the two SMTP listeners read it. The shipped numbers are these:
 | `connectionsPerIpPerMinute` | `60` | New connections one address may open in a rolling minute. |
 | `authFailuresPerIpPer15Min` | `10` | Failed sign-ins from one address in a rolling fifteen minutes. |
 | `rcptFailuresPerIpPerMinute` | `50` | Refused recipients from one address in a rolling minute. |
-| `maxMessageBytes` | `52428800` (50 MiB) | The largest message `MAIL FROM` may declare and `DATA` may carry. |
+| `maxMessageBytes` | `52428800` (50 MiB) | The largest message `MAIL FROM` may declare, `DATA` may carry, an IMAP literal may announce, and a mailbox will store. It is also the ceiling on the field, so this one lowers and does not raise. |
 
 A peer over a ceiling is refused in the protocol it is speaking: `421 4.7.0` on
 SMTP, `* BAD` on IMAP, `-ERR` on POP3, `NO` on ManageSieve. The refusal is
 recorded. Nothing is dropped silently.
+
+Each listener also bounds one command line, and this ceiling is set per listener
+because the standards differ. RFC 5321 section 4.5.3.1.4 bounds an SMTP command
+line and RFC 2449 section 4 bounds a POP3 one, while IMAP and ManageSieve carry
+longer commands.
+
+| Listener | Shipped line ceiling |
+|---|---|
+| `mx` | `1024` |
+| `submission` | `1024` |
+| `submissions` | `1024` |
+| `imap` | `8192` |
+| `pop3` | `1024` |
+| `managesieve` | `8192` |
+
+What this bounds is a line that never ends, where the connection holds the octets
+while it waits for a terminator. A command that does end meets its own protocol's
+grammar first: a POP3 command over 255 octets is refused naming that number,
+which RFC 2449 section 4 sets, without reaching the ceiling above.
+
+Set one on the listener that needs it, as a whole number of octets between 512
+and 65536:
+
+```json
+{
+  "listeners": {
+    "managesieve": { "maxLineBytes": 16384 }
+  }
+}
+```
+
+The floor is the 512 octets RFC 5321 section 4.5.3.1.4 requires an SMTP server to
+accept. A value outside the range is refused at start.
 
 **Two further bounds hold at fixed values, and neither is a field above.** Every
 mail listener accepts at most 1024 sockets at once, whoever they belong to, which
@@ -2095,11 +3431,26 @@ BLAMEPOST_LIMITS='{"maxMessageBytes":26214400,"maxConcurrentConnectionsPerIp":50
 
 The number is advertised to senders on the `EHLO` response as `SIZE`, so a
 sending server knows before it starts. A message declaring more is refused with
-`552` at `MAIL FROM`, before any of it crosses the wire.
+`552` at `MAIL FROM`, before any of it crosses the wire. One that declares
+nothing and then sends more is refused with the same code during the transfer.
 
-Per-command line lengths and idle timeouts are deliberately not settable. Both
-have floors the mail RFCs require a server to meet, and a value below one of
-them refuses correct clients while doing nothing about a hostile one.
+On IMAP, a literal announcing more than the ceiling is answered `NO` with the
+ceiling named, and the continuation that invites its octets is not sent, so an
+oversize `APPEND` is refused before any of the message is read. The same
+ceiling bounds the literal `LOGIN`, `AUTHENTICATE` and `ID` may carry before a
+client has signed in, which makes it the largest amount one unauthenticated IMAP
+connection can ask the server to hold.
+
+`52428800` is the ceiling as well as the shipped value, so this field lowers and
+does not raise, and a value above it stops the start and names the setting. A
+stored message is written as one sealed file, and the seal puts base64 inside
+base64, so the file is sixteen ninths of the message: 50 MiB of mail is an 89
+MiB file, against the 96 MiB the read path serving IMAP `BODY[]` will open. Past
+that the server would store messages it cannot fetch back.
+
+Idle timeouts are not settable. They have floors the mail RFCs require a server
+to meet, and a value below one of them refuses correct clients while doing
+nothing about a hostile one. The per-listener line ceiling is the table above.
 
 These are in-process ceilings and they see only what reaches the process. A
 packet filter or a load balancer in front of the server still earns its keep:
@@ -2155,8 +3506,8 @@ blamepost dkim list example.com    # which selectors exist, which is signing
 ```
 
 `dkim list` and `dkim records` answer while the server runs, carrying the moment
-the volume was last written; the three verbs that change a selector need it
-stopped.
+the volume was last written; the verbs that change a selector or rewrite a key on
+the volume need it stopped.
 
 Every step above is on the audit trail, which is the record an auditor asks for
 when they want to know when a key was replaced and by whom:
@@ -2166,6 +3517,7 @@ blamepost audit read --action blamepost.mail.dkim.keys_generated
 blamepost audit read --action blamepost.mail.dkim.keys_rotated
 blamepost audit read --action blamepost.mail.dkim.keys_retired
 blamepost audit read --action blamepost.mail.dkim.selectors_swept
+blamepost audit read --action blamepost.mail.dkim.keys_resealed
 ```
 
 A rotation row names the outgoing selector and the incoming one together, because
@@ -2174,6 +3526,48 @@ recorded alongside the ones that finished, so a rotation somebody started and
 could not complete is visible rather than absent. No key material of either half
 reaches a row: what is written down is the selector name, its algorithm and its
 domain.
+
+### Sealing the keys already on the volume
+
+Every private key in the `keys` folder is sealed with the vault, and each one is
+sealed to the selector it belongs to, so a value sealed as anything else does not
+open as that key. Keys minted by a server older than this one carry a seal that
+does not name the selector. **Run this once, with the server stopped, after
+upgrading:**
+
+```bash
+blamepost dkim reseal
+```
+
+It opens each key, checks it against the public half its own selector record
+publishes, and writes it back sealed to that record. `--domain example.com` limits
+it to one domain. Run it again whenever you are not sure it has run: a key already
+sealed that way is reported and not rewritten, and a run cut off part way is
+finished by running it again. It changes no selector, no record and no key: the
+same private key comes back out, so every signature already made still verifies
+and nothing in the zone changes.
+
+The server signs throughout. A key the run has not reached yet is opened and
+checked against its own record exactly as a sealed-to-selector one is, so a volume
+part way through signs with every key it can place and refuses every key it
+cannot.
+
+A key the run will not rewrite is named and left exactly as it was found:
+
+```text
+blamepost dkim: these signing keys were left as they were, because nothing here
+can say they belong to the selector that names them: example.com 'bp202608'
+(ed25519), because it is not the key its record publishes
+```
+
+Every other key on the volume is sealed to its selector by the time you see that.
+The one named is the case under [A key that is not the one its record
+publishes](#a-key-that-is-not-the-one-its-record-publishes), and sealing it to the
+selector would say it belongs there, which is what the run refuses to say. Take
+the repair in that section, then run the reseal again.
+
+The run is on the audit trail under `blamepost.mail.dkim.keys_resealed`, naming
+who ran it, the domain and each selector whose key was rewritten.
 
 ### A key left in the keys folder
 
@@ -2246,6 +3640,295 @@ delete the named file from the `keys` folder and run the mint again. Either way,
 
 Nothing was written when you see that line, so a refused mint changes nothing and
 the domain keeps signing with whatever it was signing with.
+
+### A key that is not the one its record publishes
+
+A selector is two halves in two places. The public half is a row in the database,
+and it is what `blamepost dkim records` prints and what you publish. The private
+half is a sealed file in the `keys` folder, named on that same row. A restore
+that brings back the `keys` folder and `db.enc` from different points in time
+leaves a file that opens and parses under a record carrying a different key.
+
+The server refuses to sign for that domain and names the selector:
+
+```text
+example.com cannot sign, because the signing key for its 'bp202608' selector
+(ed25519) is not the key its record publishes.
+```
+
+Mail from the domain leaves unsigned while that stands, and both the submission
+listener and the browser compose form file a row for each message:
+
+```bash
+blamepost audit read --action blamepost.mail.listeners.submission_unsigned
+```
+
+`blamepost doctor` does not report this one. Its `signing keys` line answers
+whether a record has a key and a key has a record, and here both are present.
+
+Restore the volume from a backup whose `keys` folder and `db.enc` were taken
+together. Where there is no such backup, replace the pair:
+
+```bash
+blamepost dkim retire --domain example.com --selector bp202608
+blamepost dkim generate --domain example.com
+```
+
+Publish both records `generate` prints. The domain carries no signature between
+those two commands.
+
+### A key sealed as something other than this selector's
+
+A key is sealed to the selector it belongs to, so a file put into the `keys`
+folder under a selector's name that was sealed as anything else does not open
+there:
+
+```text
+example.com cannot sign, because the signing key for its 'bp202608' selector
+(ed25519) is sealed, and not as this selector's signing key.
+```
+
+Three things reach that line and this server cannot tell them apart, because a
+seal that does not open says only that it does not open. The file is a value this
+volume sealed for something else, it belongs to another selector or another
+domain, or its bytes have been damaged where they lie. Nothing signs with it
+either way, and the mail leaves unsigned under the same rows as the section above.
+
+Restore the volume from a backup whose `keys` folder and `db.enc` were taken
+together, or replace the pair with the two commands above. Copying a key file in
+from another domain does not work and is not worth trying: the seal names the
+selector, so the file opens only where it was minted.
+
+## Letting this server write its own DNS records
+
+Left alone, this server publishes nothing. It prints the records and you put them
+in the zone, which is the arrangement every section of Part 1 describes, and it
+stays the arrangement unless you set `BLAMEPOST_ZONE_PROVIDER`.
+
+A hosted-DNS credential buys two things. It buys reading: this server holds your
+zone up against the DKIM selector records it expects to find there, and tells you
+which of them the provider is missing and which of them a resolver cannot see.
+Those are the records this server holds the only authoritative value for, and
+they are the ones that change on a schedule, run to several hundred characters,
+and have to be published before the mail they sign goes out. It also buys one
+write, from the DMARC page in the administration console: publishing the
+`_dmarc` record for one hosted domain, covered under
+[Publishing a DMARC record from the console](#publishing-a-dmarc-record-from-the-console).
+
+Everything else in Part 1 stays yours whatever you set here. The sender policy
+lists whoever else sends for the domain, the TLS reporting record names a mailbox
+you chose, and the MTA-STS policy is served over HTTPS rather than published as a
+record, so this server cannot state any of them without inventing your half.
+
+**Skip this section if you are content publishing records by hand.** It costs a
+credential that can edit your zone.
+
+Turn it on with two settings and one command:
+
+```bash
+BLAMEPOST_ZONE_PROVIDER=cloudflare
+```
+
+```bash
+# Stop the server first: this writes the data volume.
+blamepost zone token set --token-file /run/secrets/zone-token --reason "publish DKIM records"
+```
+
+The file holds the API token on one line. It is read from a file rather than from
+the command line, because a command line is in the shell history and in the
+process list of every other user on the host. A file holding anything a bearer
+token cannot carry, such as a space or a second line, is refused before anything
+is written. The token is sealed with the vault passphrase before it reaches disk,
+and the sealed form is written to `keys/zone-token.sealed` on the data volume,
+beside the sealed DKIM private keys. The seal is bound to the zone writer, so a
+value this volume sealed for something else, such as a DKIM key copied over that
+file, is refused rather than sent to the provider. Delete the file you read the
+token from afterwards.
+
+A deployment that injects secrets through the environment can supply the sealed
+value as `BLAMEPOST_ZONE_API_TOKEN` instead. Supplying both stops the start,
+rather than one silently winning: an operator who rotates the one that is not
+being read has a server still authenticating with the old credential and nothing
+saying so.
+
+**Size the grant against the write set below, not against the two read
+commands.** `preview` and `verify` read, and the console publishes a `_dmarc`
+record through the same credential. A read-only token turns the console's publish
+into a refusal from the provider and leaves everything else working.
+
+The write set is a fixed list of addresses under one hosted domain, and nothing
+widens it:
+
+| Type | Address | What it is |
+|---|---|---|
+| `TXT` | `<domain>` | The sender policy record at the apex |
+| `TXT` | `_dmarc.<domain>` | The DMARC policy record |
+| `TXT` | `<selector>._domainkey.<domain>` | A DKIM selector record |
+| `TXT` | `_mta-sts.<domain>` | The MTA-STS policy identifier |
+| `TXT` | `_smtp._tls.<domain>` | The TLS reporting address |
+| `CNAME` | `mta-sts.<domain>` | The MTA-STS policy host |
+| `TLSA` | `_<port>._tcp.<host>.<domain>` | A DANE association |
+| `MX` | `<domain>` | The mail exchanger, only with `BLAMEPOST_ZONE_ALLOW_MX_WRITES` |
+
+A record type outside that list, an address outside that list, a wildcard, and
+any name in another zone are each refused before a request leaves.
+
+A removal reaches only an address the change set already names, and only the
+extra records that address is holding beyond the one being written. An address
+the set is silent about is never read and never touched, so a domain
+verification record sitting at the apex survives a sender policy being replaced.
+A retired selector's record is still pulled by hand once `blamepost dkim sweep`
+says its window has closed: nothing on any surface here removes one.
+
+**`MX` is behind its own switch and is off.** Repointing `MX` moves delivery away
+from this server, which is the one change this server cannot report on
+afterwards. Mail stops arriving, and the process that made the change is the
+process that would have told you. Every other record in the list fails visibly.
+
+**The credential is worth what the zone is worth.** A token that can edit these
+records can also edit them wrongly: an `MX` rewrite takes delivery, a DKIM record
+rewrite makes every signed message fail alignment, and an MTA-STS identifier
+rewrite makes senders refetch a policy. Issue it scoped to the one zone, and
+treat every backup bundle taken while it was on the volume as carrying it.
+Erasing it here revokes nothing:
+
+```bash
+blamepost zone token clear --reason "rotating the provider credential" --confirm
+```
+
+Then revoke it at the provider, which is the act that decides whether a copy
+someone else holds is still live.
+
+**Checking the credential.** Whether the sealed token still works at the provider
+is asked by one verb, and it takes no domain:
+
+```bash
+blamepost zone verify-token --reason "checking the provider credential"
+```
+
+The provider answers about the account the token belongs to. A token that comes
+back active is one the provider still recognizes; it is not one shown to hold the
+scope to edit a given zone, because the endpoint does not report scope. Reading
+one zone with the credential is what surfaces a missing scope, and `preview`
+below does that.
+
+A token the provider refuses names the credential to reissue and reseal. A
+provider that could not be reached is reported as a question that went unanswered
+rather than as a bad token. The verb writes nothing and answers while the server
+is running.
+
+**Reading the zone.** Two verbs, both read-only, both of which answer while the
+server is running:
+
+```bash
+blamepost zone preview example.com --reason "checking the DKIM records"
+blamepost zone verify example.com --reason "confirming the DKIM records"
+```
+
+`preview` reads the zone at the provider and prints what would change to publish
+this domain's DKIM records. It writes nothing.
+
+`verify` reads each of those records twice: from the provider, which says what
+the zone holds, and through a resolver, which says what the rest of the world can
+see. A record can be at the provider and invisible, which is what a resolver with
+no answer yet looks like and what time fixes. A record can also resolve to
+something else, which time does not fix: mail is being judged against a value
+this server did not publish. The report separates the two as `pending` and
+`conflict`.
+
+**What this server may write.** Every change goes through a write gate that
+refuses an address outside its list before a request is built, and the gate
+reports its own reach:
+
+```bash
+blamepost zone allowlist example.com
+```
+
+That prints the record types the gate accepts, each address it is permitted at
+with what that address is for, whether MX writes are on, and the ceiling on one
+change set. It sends nothing to the provider and opens no data volume, so it
+answers while the server runs, after it has stopped, and when the database will
+not open.
+
+The gate's list and the token's scope are two separate bounds. This is what the
+server will ask for; the scope you gave the token at the provider is what the
+provider will allow. Keep the token narrower than the gate rather than the other
+way around: a token scoped to one zone's DNS edits cannot reach anything else
+even if a later release widens this list.
+
+**There is no `apply` verb on the command line.** Performing a change set needs
+the data volume, and a running server holds it, so an apply here would mean
+stopping the mail server to edit a TXT record. The publish is on the
+administration console instead, where the preview and the change that performs it
+are one page. `preview` and `verify` are the command-line half and answer while
+the server runs; `blamepost dkim records <domain>` prints the selector records to
+publish by hand.
+
+### Publishing a DMARC record from the console
+
+Sign in to the console, open **DMARC**, and pick a single domain. With
+`BLAMEPOST_ZONE_PROVIDER` naming a provider, the page carries a **Policy** block:
+the record each of `p=none`, `p=quarantine` and `p=reject` would be published as,
+which level the domain publishes today, and the rules the next step up is
+measured against with what the domain has beside what each rule asks for. That is
+the same reading `blamepost dmarc status` prints, and this page is where it turns
+into a record in the zone.
+
+A level carries a **Prepare** button when this server will publish it. Stepping
+down is offered whenever the record is readable, because mail being discarded is
+answered by publishing the weaker record and looking afterwards. Stepping up is
+offered only for the level the reporting evidence carries. A level with no button
+says **not offered**, and the rules above it say what is missing.
+
+Write down why you are publishing before you press Prepare. The sentence is
+recorded against the read and against the write, and it is what somebody reading
+the trail afterwards has to go on.
+
+Prepare reads the zone at your provider and answers with the change set that
+would be performed, one line per record: the record being written, and any extra
+record at `_dmarc.<domain>` that would be removed. **Nothing is written by that
+read.** Type the domain back to perform it.
+
+Two DMARC records at one name is a permanent error to every receiver that reads
+them, so publishing reduces `_dmarc.<domain>` to the one record rather than
+adding a second. It reaches no other address in the zone.
+
+The set that is performed is the set you read. It is held in the running server
+between the two pages rather than recomputed at the second, so:
+
+- A zone that moved in between stops the write and says so. Prepare again and
+  read the new diff: something else edited the zone, which is worth knowing
+  before repeating the change.
+- A confirmation that names a different held change set is refused.
+- A set that has already been performed cannot be performed again.
+- A set expires fifteen minutes after it is prepared, and after a restart.
+
+After the write the record is read back twice, at the provider and through a
+resolver, and the page you land on says which of three states it reached:
+
+| Notice | What it means | What to do |
+|---|---|---|
+| The provider holds it and a resolver answers with it | The publish is complete | Nothing |
+| The provider holds it and no resolver has answered yet | A previous answer is still cached | Read the page again in a few minutes, or run `blamepost zone verify` |
+| A resolver is answering with something else | Mail is being judged against a record this server did not write | Check whether another zone holds the same name, or whether something else edits this one |
+| It was written and could not be read back | The write happened and neither read answered, so nothing here says where the record is | Read the server log, then run `blamepost zone verify` |
+
+Every prepare and every publish leaves an audit row naming the operator, the
+domain, what changed and the reason. Read them with
+`blamepost audit read --action blamepost.dns.applied` and
+`--action blamepost.dns.previewed`; a refusal is at `--action
+blamepost.dns.refused`.
+
+A refusal answers `application/problem+json` rather than redrawing the page, with
+a `type` naming which rule refused: a change set the server is no longer holding,
+one that does not match the diff the form was rendered from, a zone that moved
+under it, a set larger than the twenty-five changes one set may carry, a step the
+evidence does not carry, or the provider itself refusing. The `detail` is the
+sentence to act on.
+
+With `BLAMEPOST_ZONE_PROVIDER` at its default the Policy block is absent, no
+resolver is asked and no provider is reached. The page reads reports and says
+where to publish the records it prints.
 
 ## The outbound queue
 
@@ -2430,6 +4113,17 @@ A row here means a sender was not told their mail failed. A run of them on a
 server that is not under a flood means the tracking ceiling is being reached on
 ordinary traffic, and a restart clears the counters.
 
+**A report can also fail to leave for a reason that has nothing to do with the
+ceilings.** A report is a message and goes out over the same outbound path as
+any other, so that path can refuse it outright: the sender's own domain
+publishes no mail exchanger, or publishes the RFC 7505 null MX, or
+`BLAMEPOST_OUTBOUND_RETRY` allows one attempt, which makes the report's first
+attempt its last. Nothing is queued and no retry follows, so that sender hears
+nothing. It files the same `report_unsent` row, and the row reads
+`the outbound path refused it outright` with the refusal beside it instead of
+naming a ceiling. `queue list` shows nothing either way, because a report that
+never reached the queue was never in it.
+
 `remove` abandons one message: the body is erased and the sender is never told,
 so use it for mail you know is undeliverable. It takes a reason, which is
 recorded in the audit trail, and it refuses an id that is not in the queue rather
@@ -2595,6 +4289,14 @@ Things worth knowing:
 - **An MTA-STS failure is a refusal to downgrade, and it is correct.** If a
   destination's policy says enforce and its certificate does not match, the
   delivery fails rather than falling back to plaintext. The fix belongs to them.
+- **An MTA-STS failure naming a lookup rather than a policy is yours.** A report
+  whose reason reads `MTA-STS fetch for <domain> failed under enforce policy`
+  followed by a TXT lookup error is this server's own DNS, not the receiver's
+  configuration. It carries status `5.7.10` and the sender is told, including for
+  domains that publish no MTA-STS record at all. Check outbound DNS from the
+  container before you contact the destination: `blamepost doctor` resolves the
+  same records and reports what it could not reach. Messages already refused this
+  way have to be sent again once DNS is working.
 - **A sudden outbound spike from one account** is an incident, not growth. See
   Incident response.
 
@@ -2605,7 +4307,7 @@ healthy server. The listeners are bound, the store is open, the certificate is
 fresh, and mail is not leaving. Both probes carry a `queue` check so a
 monitoring system finds that without anyone running a command.
 
-The check reduces the verdict from `ok` to `degraded` on three readings, and
+The check reduces the verdict from `ok` to `degraded` on the readings below, and
 each one is a way for mail to stop rather than a way for it to be slow. The
 answer names which one fired:
 
@@ -2623,7 +4325,7 @@ Over the loopback interface, which is where the container's own probe runs, the
 answer also carries how much is waiting, the depth at which forwarding stops,
 and how many messages the queue has refused since the server started.
 
-**Alert on `degraded`.** Neither probe refuses on any of the three, so a policy
+**Alert on `degraded`.** Neither probe refuses on any of them, so a policy
 that alerts on failure alone will never see this. Refusing would not help
 either. A liveness failure asks a runtime to restart the process, and a restart
 does not drain a queue: the queue is files on the data volume, every entry is
@@ -2891,7 +4593,7 @@ sealed under this volume's vault key rather than under anything the erasure
 destroys, so a backup or a snapshot taken earlier still opens with the same key
 and still holds the mail. Erasure is a property of this volume from the moment
 it runs. Carrying it into your backup history is a retention policy on the
-backups themselves, and that policy is yours rather than this server's: plan the
+backups themselves, and that policy is yours rather than this server's: set the
 expiry of your backups against the erasure requests you expect to answer. On
 this volume recovery is not possible, not from a snapshot taken afterwards and
 not from support, and that is the property the mechanism exists to provide.
@@ -2952,6 +4654,16 @@ to answer for the other.
 The `--reason` every destructive verb requires still carries what the identity
 cannot, which is why it is worth writing as though somebody will read it.
 
+**A row's reason quotes whatever caused it, and `audit read` screens it before
+printing.** The reason on a delivery row is the words a far side gave, on a
+filing row it is the part of an account holder's filter script that would not
+run, and on a submission row it is a header a sender wrote. Those values go
+through the same screen the browser pages and the message listing use: the
+control characters in the U+0000 to U+001F and U+0080 to U+009F ranges are
+removed, bidirectional overrides and zero-width characters with them, and a tab,
+a carriage return or a line feed becomes a space so each row stays on one line.
+The stored row is unchanged, so `audit export` still carries what arrived.
+
 **An account turned away from the administration surface leaves a row.** A
 signed-in mailbox owner that asks for an administration page or posts an
 administration form is refused, and the refusal is recorded as
@@ -2984,6 +4696,11 @@ nowhere else.
 A report that does go carries the canceled message's own headers, which is how
 its sender tells it from the other messages they sent to that address. It
 carries nothing else of the message.
+
+A report the console asked for and the outbound path refused reads as
+`report-recorded-unsent` in the same two fields, with `reported` false. The
+message was still canceled; what did not happen is the sender hearing about it,
+and the `report_unsent` row above names the address and the refusal.
 
 A message that leaves the queue while a cancellation is working through your
 selection files a row under the same action with outcome `failure`, saying the
@@ -3054,26 +4771,31 @@ time the volume is anchored, so its absence means something removed it.
 **A gap where the record points is reported as a gap, not as a retention run.**
 The record beside the database can name a counter that has no row behind it, and
 there is one legitimate reason for that: an archive and purge deleted the range.
-Where the deletion stopped is written into a table inside the database. That
-table is worth less than every other reading here. It carries no signature, is
-linked into no chain, is covered by no checkpoint and has no append-only trigger
-over it, so writing one row into it costs write access to the database and
-nothing else, while rewriting the rows or forging a checkpoint costs the vault
-passphrase. One row there discards every audit row at or below the counter it
-names from the walk.
+Where the deletion stopped is written into a table inside the database. One row
+there discards every audit row at or below the counter it names from the walk,
+which makes it the single most useful row on the volume to write, so a purge
+signs the row it writes. The signature covers the counter, the hash the row at
+that counter held and the archive the record names, and the key it is made with
+is sealed under `BLAMEPOST_VAULT_PASSPHRASE`, so moving the boundary costs what
+rewriting the rows costs. The volume refuses to open when that signature does not
+hold, and the refusal says which of the two it met: a row carrying no signature
+at all, or a row whose signature no longer covers the range it claims. Those need
+opposite responses, so they are never reported as one another.
 
-So the command reports the gap as `note a gap this run did not read, trusted on
-an unsigned counter`, names the counter, and does not print the line about
-nothing having been inserted, altered or removed. It cannot: those rows were
-never read. It also does not tell you an archive was verified, because nothing
-here verifies one. The identifier the record carries names the signed checkpoint
-the archive was made against rather than a location, and the archive bundle is a
-directory you were told to keep where this server cannot reach it. What the
-command can say is whether that checkpoint is still on the volume at or above the
-purged range, and it says which. That is worth something narrow: a rewrite that
-deleted rows and relinked the survivors changes every surviving row hash and has
-to delete the checkpoints over them, so one still standing means the rows that
-remain were not relinked. It means nothing about the rows that are gone.
+A signature over the row says who wrote it and nothing about the rows it names,
+so the gap is still a gap. The command reports it as `note a gap this run did not
+read, trusted on a signed purge boundary`, names the counter, and does not print
+the line about nothing having been inserted, altered or removed. It cannot: those
+rows were never read. It also does not tell you an archive was verified, because
+nothing here verifies one. The identifier the record carries names the signed
+checkpoint the archive was made against rather than a location, and the archive
+bundle is a directory you were told to keep where this server cannot reach it.
+What the command can say is whether that checkpoint is still on the volume at or
+above the purged range, and it says which. That is worth something narrow: a
+rewrite that deleted rows and relinked the survivors changes every surviving row
+hash and has to delete the checkpoints over them, so one still standing means the
+rows that remain were not relinked. It means nothing about the rows that are
+gone.
 
 **What to do about that note.** Find the archive bundle covering the range and
 read it back:
@@ -3190,12 +4912,15 @@ takes an explicit confirmation and a recorded reason, and it refuses any bundle
 that does not verify.
 
 **A purge always leaves a row behind, and a purge that would not is refused.**
-The next event attaches to the last row, and the check this server runs at start
-compares its recorded counter against the highest one in the table. Take the
-last row and there is nothing to attach to and nothing to compare against, and
-the server never starts again. So `--before` has to name a cut with activity
-after it. Archiving with a cut in the future produces a valid evidence bundle
-and says plainly that it cannot be purged.
+The volume keeps a record beside the database naming one audit row by its
+counter and its hash, and every open holds the trail against that row before it
+hands back a database. A purge whose range reaches that counter deletes the row
+the record names, so the next open finds the record standing against a row that
+is gone, writes the finding onto the volume, and refuses every open after that
+until an operator clears it. The refusal names the anchored counter, and a cut
+that ends below it is one you can purge. So `--before` has to name a cut with
+activity after it. Archiving with a cut in the future produces a valid evidence
+bundle and says plainly that it cannot be purged.
 
 ## Backup and restore
 
@@ -3234,7 +4959,9 @@ the audit signing key, the sealed message bodies, the DKIM private keys, the
 outbound spool, the certificates, and every other file on the data volume. The
 list is the volume itself rather than a set of names somebody remembered, because
 a file left out of a backup is data that does not come back and the way that
-shows up is not an error.
+shows up is not an error. Two names at the top of the volume are left out:
+`blamepost.lock`, which names the process holding the volume, and `.restore`,
+which holds the rollback points a restore keeps.
 
 See what is there and check one without restoring it:
 
@@ -3251,11 +4978,19 @@ manifest, writing nothing to the data volume. Neither opens the database, so bot
 still answer on a server whose data volume will not open. That is the day they
 matter.
 
-`inspect` and `verify` both report the key that signed the manifest. The
-signature proves the bundle has not been modified since it was written. It does
-not on its own prove who wrote it, because the key travels with the bundle. Pass
-`--fingerprint` with the value you recorded when the bundle was made and any
-other key is refused.
+`inspect` and `verify` both report the key that signed the manifest. A manifest
+carries the public key its signature is checked under, so a signature that
+verifies proves neither that the manifest is unchanged nor who wrote it: anyone
+who can write to the storage directory can edit a manifest and sign it with a key
+of their own. Pass `--fingerprint` with the value `backup run` printed when the
+bundle was made, and a manifest signed by any other key is refused. `restore
+apply` checks the signer without `--fingerprint`, as described under Restoring.
+
+`inspect` also reports where the manifest says the bundle came from: the id it
+was written as, the data directory it was taken from and the server it was taken
+on. `inspect` prints a `restores here` line and exits `1` when any of the three
+is not this server's, and `verify` refuses such a bundle before it decrypts a
+file. A restore refuses it too, so the three verbs answer alike.
 
 ### Restoring
 
@@ -3284,12 +5019,55 @@ way. On a volume nothing is writing to there is no such gap, which is the whole
 reason to ask before the start rather than after it. Start the server once both
 have answered.
 
-The restore puts the data directory that was there aside as a rollback point,
-moves the bundle in, then opens the result and verifies its audit chain before it
-reports success. If the restored directory does not open, the rollback point goes
-back automatically and the command says why. That is what a rollback path is
-for: a bundle that turns out to be unusable must not cost you the volume you
-still had.
+`restore apply` runs in this order:
+
+1. It reads the manifest where the bundle is stored and refuses, before anything
+   is held or moved, when the manifest records a different bundle id from the
+   one given, a different data directory, or a different `BLAMEPOST_HOSTNAME`,
+   and when the filesystem holding the data directory has less free space than
+   the bundle's files take decrypted.
+2. It takes the data volume's lock and refuses with `store/volume-in-use` while
+   another process holds it. It keeps the lock until it has answered.
+3. It decrypts the bundle into `.restore/incoming-<moment>/` on the data volume
+   and checks every file against the manifest. A bundle entry named
+   `blamepost.lock` or under `.restore` is not written.
+4. It moves every entry at the top of the data volume except `blamepost.lock`
+   and `.restore` into `.restore/<moment>/`, the rollback point, and moves the
+   bundle's entries into their place. The data directory itself is never
+   renamed, so this works when it is the mount point of a volume, as it is in
+   the published image.
+5. It opens the restored volume, verifies the audit chain and the signed
+   checkpoints, and compares the key that signed the bundle's manifest with the
+   audit signing key sealed inside the bundle. A manifest re-signed by anyone
+   else fails here.
+6. If any of that fails, it moves the entries back, removes the decrypted
+   bundle, and exits `1` with the reason. The volume that was there before is
+   back in place.
+
+On success the report also carries `taken`, the moment the bundle was written;
+`signed`, the signing key; `rewinds`, the counter the replaced volume's audit
+trail was anchored at beside the counter the bundle's trail was anchored at,
+when the replaced volume's is further on; and `storage`, how many bundles in
+storage are newer than the one restored. A restore from an older bundle puts
+back accounts, credentials, aliases and keys as they were when it was taken,
+including ones revoked or removed since. The rows recording those changes are in
+the rollback point.
+
+Rollback points are whole earlier volumes, mail and sealed keys included, and
+they stay in `.restore` until you delete them. `backup run` leaves `.restore` out
+of every bundle. An account erased after a restore is still in the rollback point
+the restore kept, so delete a point you no longer need, with the server stopped:
+`rm -r /var/lib/blamepost/.restore/<moment> /var/lib/blamepost/.restore/<moment>.json`.
+
+**A restore or rollback that stops partway is undone by `restore rollback`.**
+Before each half of the move the command writes `.restore/in-flight.json`, and it
+removes that file once the volume is settled. A process killed in between leaves
+the file, and every command that opens the volume, `serve` included, then refuses
+with `store/restore-interrupted` instead of opening a mixture of two volumes. Run
+`blamepost restore rollback --confirm --reason <text>` to put back the volume that
+was there before the interrupted command started. If the file describes a move
+that has already been undone, `restore rollback` refuses it and moves nothing;
+check that the volume is the one you want and delete the file by hand.
 
 **A trail that cannot be written does not undo the restore.** Whether the
 restored volume opened and whether the row describing the restore could be
@@ -3308,7 +5086,15 @@ blamepost restore list-rollbacks
 blamepost restore rollback --confirm --reason "the restored volume was the wrong day"
 ```
 
-Five things to get right:
+`restore rollback` without `--point` puts back the newest rollback point. With
+`--point`, it takes the path `list-rollbacks` prints or the point's name, and
+refuses with exit `2` anything that is not one of this volume's rollback points.
+It holds the volume's lock, sets the live entries aside in
+`.restore/discarded-<moment>/`, moves the point's entries in and opens the
+result. A point that does not open is moved back into the point, the entries
+that were live are put back, and the command exits `1`.
+
+Six things to get right:
 
 1. **Restore into the same data directory path.** The database key is sealed to
    the absolute path of the directory it belongs to, so a bundle taken from
@@ -3316,22 +5102,28 @@ Five things to get right:
    restore reads the path out of the bundle and refuses a mismatch before it
    moves anything, so this costs a clear message rather than a broken volume. To
    rehearse a restore, use a scratch machine or container with the same path.
-2. **The vault passphrase is not in the bundle, and the bundle is useless without
+2. **Restore with the same hostname.** A bundle carries its server's hosted
+   domains, accounts and DKIM keys, and records the `BLAMEPOST_HOSTNAME` it was
+   taken under. A restore on a server configured with another hostname is
+   refused before anything moves. To restore it on a replacement host, set
+   `BLAMEPOST_HOSTNAME` to the recorded value for the restore.
+3. **The vault passphrase is not in the bundle, and the bundle is useless without
    both it and the bundle passphrase.** Store them separately, offline, somewhere
    that survives the loss of the machine and the loss of you. This is the single
    most common way a correctly backed up mail server becomes unrecoverable.
-3. **Rehearse the restore on a schedule.** A bundle nobody has restored is a
+4. **Rehearse the restore on a schedule.** A bundle nobody has restored is a
    hypothesis. `blamepost backup verify` proves the bytes come back; a rehearsal
    proves the server does. Leave `BLAMEPOST_DNS_ACKNOWLEDGED` unset on the
    rehearsal so the MX listener stays closed and it cannot start taking real
    mail.
-4. **A restore rewinds DKIM state.** If the bundle predates a rotation, the
+5. **A restore rewinds DKIM state.** If the bundle predates a rotation, the
    server signs with the old selectors while DNS advertises the new ones. Run
    `blamepost doctor` immediately after any restore, with the server still
    stopped; it catches exactly this. Run `blamepost blobs report --verify`
    beside it, for the reason under the recipe above: it is the check that opens
    the bodies, and it cannot run once the server holds the volume.
-5. **Prune deliberately.** `--keep` on `run` sweeps after a successful bundle.
+6. **Prune deliberately.** `--keep` on `run` sweeps after the new bundle has been
+   read back and verified, and deletes nothing when it does not verify.
    Dropping older bundles without taking a new one is its own verb, and it takes
    the same confirmation and recorded reason every destructive verb here does:
 
@@ -3341,9 +5133,27 @@ Five things to get right:
      --passphrase-file /etc/blamepost/bundle.pass
    ```
 
+   Both count only bundles that verify: the manifest reads, its signature is
+   from an audit signing key this volume holds or held before a rotation, the
+   manifest records this bundle's own id, this data directory and this server,
+   every file it lists is present at the listed size, and the passphrase file
+   opens it. They keep the newest `--keep` of those and delete the older ones. A
+   directory in storage that does not verify, such as a bundle cut short, one
+   written under another passphrase, a copy of another bundle under a new name,
+   or a directory that only carries a bundle's name, is neither counted nor
+   deleted, and the command lists it with the reason. `purge` exits `1` and
+   deletes nothing when storage holds bundles and none of them verifies.
+
+   The origin fields are in that list because a bundle whose manifest disagrees
+   with this server is one `restore apply` refuses. Counting such a bundle
+   deletes a bundle that would have restored in order to keep one that will not.
+
 **Upgrading** follows the same order: back up, pull the new image by digest, start
 it, run `blamepost doctor`. Schema migrations run at boot and are one-way, which
-is why the backup comes first rather than after.
+is why the backup comes first rather than after. While a server on the previous
+release still holds the volume, the new release's reporting verbs refuse with
+`store/snapshot-schema-behind` if the schema changed between the two releases.
+They answer again once the new release has started.
 
 ## Incident response
 
@@ -3416,10 +5226,13 @@ interface, and removing an alias withdraws that author at the next message.
 Afterwards, check the account's Sieve script. Adding a rule is standard practice
 for whoever took the credential, and it survives a password change.
 
-A Sieve rule cannot forward mail off this server. `redirect` and `vacation` are
-refused wherever they appear, the message is kept rather than dropped, and the
-refusal is recorded under
-`blamepost.mail.sieve.action_unavailable`. What a rule can do is hide things: one
+A Sieve rule cannot forward mail off this server. A rule using `redirect` is
+stored and runs, and the delivery keeps the message rather than sending it,
+recording the refusal under `blamepost.mail.sieve.action_unavailable`. A rule
+using `vacation` is refused at upload and never stored. The same row records
+every other destination a rule asks for that this server did not use, such as a
+second `fileinto` or a `keep` written beside one, because a message is filed once
+here. What a rule can do is hide things: one
 filing security notices into a folder nobody reads, or discarding them, keeps
 the account holder from noticing the intrusion. Read the whole script rather
 than looking only for a forwarding address.
@@ -3427,12 +5240,36 @@ than looking only for a forwarding address.
 ```bash
 docker stop blamepost
 blamepost account sieve alice@example.com --reason "incident 4471"
-blamepost account sieve alice@example.com --reason "incident 4471" --script file-invoices
+blamepost account sieve alice@example.com --reason "incident 4471" --script file-receipts
 docker start blamepost
 ```
 
 The first lists the account's scripts and marks the one that is active, which
 is the only one that runs. The second prints a script's body.
+
+A script name is between 1 and 128 characters and carries no control character,
+no bidirectional override and no zero-width or invisible formatting character,
+and it may not mix writing systems in one word. ManageSieve answers `NO` at
+`PUTSCRIPT` and at `RENAMESCRIPT` for a name outside that, and the same rule
+holds for a mailbox name. The names are read back to you in this listing, in the
+audit trail and in the log, so a name that renders as a different name is a
+script you would activate believing it was another one.
+
+A rule can file on the address a message arrived at rather than on its headers,
+which is what `envelope :to` reads, and that address is the recipient the peer
+wrote in `RCPT TO`. For mail sent straight to a mailbox it is the mailbox's own
+address; for mail that reached the mailbox through an alias it is the alias, so
+a rule covering both names both addresses.
+
+The body is checked as well, and `PUTSCRIPT` answers `NO` for a script that does
+not parse and for one that parses and names an action or a test this server's
+filter cannot run. The second covers `vacation`, `reject`, `ereject`, `addflag`,
+`notify`, every other extension this build does not carry, and a misspelling of
+an action it does. Those are refused whether or not the script declares them in
+a `require` line, because the interpreter would refuse such a script on every
+message that arrived and file the whole of it to INBOX, and an account holder
+reading a folder that has stopped filling has no way to see why. A refused
+upload leaves the stored script as it was.
 
 The reason is required and lands in the audit trail. Reading somebody's filter
 rules is administrative access to their private configuration, and the row is
@@ -3461,7 +5298,7 @@ Signs, in the order they usually reach you:
 - The refusal talks about attempts rather than about the credential. In the
   browser it says to try again later; on the mail listeners it is a plain
   authentication failure, which is deliberate, since telling a caller which of
-  the two walls they hit is telling them how to plan around it.
+  the two walls they hit is telling them how to work around it.
 
 There are three budgets, and knowing which one you are looking at is most of the
 work.
@@ -3559,11 +5396,13 @@ post buys one password verification whether or not the address has a mailbox
 here. Waiting out the slot is the whole remedy.
 
 That count is per source address, and this server reads the peer off the socket
-and ignores `X-Forwarded-For` everywhere. Behind a TLS terminator, every browser
-therefore arrives from the terminator's address, so the fifty are shared across
-everyone signing in. On a server with a busy morning behind one terminator, that
-is the bound to raise first, and it is the reason a caller can be refused the
-form having typed nothing wrong.
+and ignores `X-Forwarded-For` everywhere. `BLAMEPOST_TRUSTED_PROXIES` does not
+change that: it names the peers whose `X-Forwarded-Proto` decides the transport,
+and no setting here makes a forwarded address decide whose budget is spent.
+Behind a TLS terminator, every browser therefore arrives from the terminator's
+address, so the fifty are shared across everyone signing in. On a server with a
+busy morning behind one terminator, that is the bound to raise first, and it is
+the reason a caller can be refused the form having typed nothing wrong.
 
 **A clock correction clears this one, and does not clear the budgets above.** The
 per-mailbox and per-machine counters are measured on a clock the host cannot
@@ -3575,7 +5414,7 @@ sign-in attempts, never take a lockout away.
 Then release it. Fill in the mailbox, the machine if the account holder can name
 it, and why.
 
-Four things about that form are worth saying plainly:
+Several things about that form are worth saying plainly:
 
 - The reason is required, and it lands in the audit trail naming you. Releasing
   a budget is the one action in the console that takes a defense away from
@@ -3666,6 +5505,31 @@ prints the DKIM records the domain already holds rather than minting new ones,
 and prints a generated password once unless you pass `--admin-password`. Sign in
 with it and promote whoever should have the role from the console.
 
+### The console asks for the password again and the mailbox does not
+
+Signs: the admin pages answer "Sign in again for the console" while the same
+browser reads mail in another tab without being asked for anything.
+
+A console session is held to the client address, the browser and the accepted
+language it was opened on. A request that differs in any of the three is
+answered with that page, and the account's mail stays open because the mailbox
+does not apply the same check. Signing in again on the machine you are at now
+opens the console. A laptop that moved between networks, a browser that updated
+itself, and a proxy that changed the address requests arrive from all produce
+it.
+
+The session row is kept, so this asks for a password rather than ending the
+session, and somebody replaying a copied cookie from another machine cannot sign
+an operator out by trying. Each refusal is recorded:
+
+```bash
+blamepost audit read --action blamepost.web.console_device_refused
+```
+
+Rows arriving from an address you do not recognize are a copied session cookie
+being tried. Take the role back from the account, or suspend it, and read
+`auth.session.fingerprint_drift` for where else that session has been used.
+
 ### A POP3 client says the mailbox is in use
 
 RFC 1939 gives a maildrop to one session at a time, so this server hands it to
@@ -3674,36 +5538,41 @@ The refusal is correct, and the account holder is usually the one being refused,
 because the session holding the maildrop is almost always their own from a
 minute ago.
 
-A session ends the maildrop cleanly by sending `QUIT`. A client that loses its
-connection instead never sends one, and this server is not told the connection
-went away, so the maildrop stays held. It is released after thirty minutes with
-no activity on it. The socket itself closes earlier, after ten minutes idle, but
-that closes the connection rather than the hold. So the worst case for somebody
-whose phone dropped off the network mid-download is a wait of up to half an
-hour before they can collect mail again.
+The hold comes off when the session ends, and every way a session can end
+counts: a `QUIT`, the ten-minute idle close, or a link that dropped without
+either. A client whose connection died reconnects and collects its mail, with no
+wait to sit out.
+
+One case still waits. The hold is also released after thirty minutes with
+nothing touching it, which is what answers if the server never registers the
+session ending at all. A client sitting on an open maildrop sends `NOOP` to keep
+it, so the thirty minutes cannot expire under a connection that is still there.
+
+A client that pipelines its credentials does not reach that path. The listener
+reads one command at a time, so a client that sends two `USER` and `PASS` pairs
+on one connection without waiting for the replies meets a session that has
+already signed in on the second pair, and that pair is refused rather than
+admitted alongside the first.
 
 What to tell them, in order:
 
-- **Wait.** Nothing is lost and nothing needs repairing. The hold expires on its
-  own and their mail is where they left it.
+- **Reconnect.** A client refused after its own connection dropped gets the
+  maildrop back on the next attempt. Nothing is lost and nothing needs
+  repairing.
 - **Nothing was deleted by the interrupted session.** POP3 applies deletions
   only at `QUIT`, so a session that died having marked twenty messages for
   deletion deleted none of them. They will be offered again on the next
   collection, which is the correct outcome and not a duplicate delivery.
 - **A restart clears every hold immediately.** Holds live in the running
   server's memory and nothing is written to the data volume, so there is no lock
-  file to find and no state to clean up by hand. If the account holder cannot
-  wait, restarting the server is the release. It costs every other connection in
-  flight, so it is the answer for a stuck morning rather than a routine one.
+  file to find and no state to clean up by hand. Restarting releases every hold
+  at once, and it costs every other connection in flight, so it is the answer
+  for a stuck morning rather than a routine one.
 - **If it recurs on the same account, look at the client.** A client set to leave
   mail on the server re-downloads the whole maildrop every time, so its sessions
   are the longest ones and the most likely to be interrupted. Either let it
   delete on collection, or move that account to IMAP, which has no exclusivity
   rule and is the better fit for a mailbox read from more than one device.
-
-The wait exists because the POP3 listener gives this server no signal when a
-connection ends, so a timer is the only release available and it cannot tell a
-finished session from a slow one. Tracked upstream as blamejs#669.
 
 ### The domain's mail is being rejected
 
@@ -3855,9 +5724,10 @@ Find the newest bundle that verifies and whose chain was intact when it was
 written, then restore it. What is between that bundle and now is lost, which is
 why the schedule matters more than the mechanism.
 
-`restore apply` replaces the data directory and keeps the old one as a rollback
-point, so a finding recorded in `audit.disputed` goes with it and the restored
-volume opens. If you resolve the incident some other way and keep the volume you
+`restore apply` moves every entry on the data volume into a rollback point under
+`.restore`, so a finding recorded in `audit.disputed` goes with it and the
+restored volume opens. The restore does not open the volume it replaces, so the
+finding does not stop it. If you resolve the incident some other way and keep the volume you
 have, remove that file yourself once you are finished with it. Nothing clears it
 for you, because a finding that clears itself on the next restart is a finding
 nobody reads.
@@ -3876,14 +5746,25 @@ domain is hosted and acknowledged, because a server that accepted mail for
 recipients it knows nothing about would be collecting a stranger's mail.
 `unbound` is the fault: enabled, expected to bind, did not.
 
-So `/healthz` answers `degraded` with a 200 while something is withheld. The
-process is worth keeping and is serving everything else; a fresh container
-between `docker compose up -d` and `blamepost init` is in exactly that state,
-and it is expected rather than a problem. `/readyz` is the one that refuses,
-because that is the lever that fits: stop routing, leave the process alone.
-Nothing about a listener fails liveness, since a restart fixes none of it, and a
-runtime that killed the process would take down the browser surface you were
-about to run `init` against.
+A withheld listener degrades both probes and refuses neither. `/healthz` and
+`/readyz` each answer `degraded` with a 200 and name the listener and the reason
+it is being held. The process is worth keeping, it is serving everything else,
+and the traffic this port carries is unaffected by a mail port that is shut on
+purpose. A fresh container between `docker compose up -d` and `blamepost init`
+is in exactly that state, and it is expected rather than a problem.
+
+`unbound` is the state `/readyz` refuses for, and it refuses with a 503 naming
+the listener that did not take its port. That is the lever that fits: stop
+routing, leave the process alone. Nothing about a listener fails liveness, since
+a restart fixes none of it, and a runtime that killed the process would take
+down the browser surface you were about to run `init` against.
+
+A server you can reach a probe on is not in that state. A listener that cannot
+take its port fails the start, which releases every port already taken and ends
+the process, so the symptom is a container that stopped and a bind error in the
+log rather than a probe verdict. The check stays on `/readyz` because the same
+check also refuses when the listener inventory cannot be read at all, and
+because a reading of `unbound` is a routing decision rather than a restart.
 
 `503` from `/healthz` means the store is not open. That is the condition a
 restart can genuinely address, and it is the only one that answers so.
@@ -3895,7 +5776,7 @@ endpoint answers the status word alone, because it shares a port with webmail
 and the breakdown describes a mail server.
 
 ```bash
-curl -sA operator http://127.0.0.1:8080/readyz   # the same verdict, readiness tier
+curl -sA operator http://127.0.0.1:8080/readyz   # the same verdict, readiness probe
 docker logs <container> | tail -40               # the gate that refused names itself
 ```
 
@@ -3926,8 +5807,15 @@ halfway through.
 ```bash
 blamepost doctor                          # the whole posture, server up or down
 
-BLAMEPOST_LOG_LEVEL=debug blamepost serve # full protocol detail
+BLAMEPOST_LOG_LEVEL=debug blamepost serve # what the server recovered from
 ```
+
+`debug` adds entries, it does not add protocol transcripts. What arrives is the
+configuration file each command resolved and the faults this server and the
+framework under it handled without stopping: a lock file left behind by a killed
+process, a migration whose rollback failed, a background reset that did not
+finish. For a failing command it also prints the stack. Reach for `doctor` and
+the audit trail for what a peer said on the wire.
 
 `doctor` reads the hosted domains and their selectors out of the encrypted
 database before it resolves a single record, so it needs that database. Against a
@@ -3968,6 +5856,6 @@ reported as one to delete. `blamepost queue list` says the same thing at the
 bottom of its output, which is where you are looking when the queue reads as
 empty and mail is being refused anyway.
 
-Debug logging includes wire-level protocol exchanges. It is what you want while
-diagnosing, and it is not what you want running permanently against a mailbox
-somebody trusts you with. Turn it off afterwards.
+Debug logging writes no wire-level protocol exchanges and no message content.
+What it adds is the configuration path, data directory and hostname each command
+resolved, and the stack behind a command that failed.

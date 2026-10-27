@@ -1,0 +1,42 @@
+# libFuzzer dictionary for the TXT policy record readers.
+#
+# The harness reads one TXT record per line and one character string per
+# tab, so the separators are here beside the RFC 7489 and RFC 9989 DMARC
+# tags and the RFC 8460 TLS-RPT record. The printable-screening cases are
+# the escape, C1, bidi and line separator characters a zone may publish.
+
+record="\x0a"
+string="\x09"
+nul="\x00"
+escape="\x1b["
+csi="\xc2\x9b"
+rlo="\xe2\x80\xae"
+line_separator="\xe2\x80\xa8"
+invalid_utf8="\xff"
+
+dmarc_version="v=DMARC1;"
+dmarc_version_lower="v=dmarc1;"
+p_none=" p=none;"
+p_quarantine=" p=quarantine;"
+p_reject=" p=reject;"
+sp=" sp="
+pct=" pct="
+pct_over=" pct=101;"
+adkim=" adkim=s;"
+aspf=" aspf=r;"
+rua_mailto=" rua=mailto:dmarc-reports@example.com"
+ruf_mailto=" ruf=mailto:dmarc-failures@example.com"
+fo=" fo=1;"
+np=" np=reject;"
+t_tag=" t=y;"
+psd=" psd=n;"
+
+tlsrpt_version="v=TLSRPTv1;"
+tlsrpt_version_bare="v=TLSRPTv1"
+tlsrpt_rua=" rua="
+rua_https="https://reports.example.com/tlsrpt"
+rua_mail="mailto:tls-reports@example.com"
+comma=","
+semicolon=";"
+equals="="
+spf="v=spf1 -all"

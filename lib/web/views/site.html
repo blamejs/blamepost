@@ -1,0 +1,262 @@
+{% extends "site-layout" %}
+{% block title %}blamepost: a self-hosted mail server in one process{% endblock %}
+{% block content %}
+
+<section class="hero">
+  <div class="hero-in">
+    <p class="eyebrow">Self-hosted mail</p>
+    <h1 class="hero-title">One process serves every protocol your mail needs.</h1>
+    <p class="hero-lead">
+      blamepost runs inbound MX, authenticated submission, IMAP, JMAP, POP3,
+      ManageSieve, outbound delivery, DKIM signing, Sieve filtering, webmail and
+      an operator console from a single Node process against a single data
+      directory. It has no npm runtime dependencies and no build step.
+    </p>
+    <p class="hero-actions">
+      <a class="btn btn-primary btn-lg" href="/sign-in">Sign in to this server</a>
+      <a class="btn btn-lg" href="#run">Run your own</a>
+    </p>
+    <ul class="chips" aria-label="Release facts">
+      <li class="chip">Version {{ version }}</li>
+      <li class="chip">Apache-2.0</li>
+      <li class="chip">Node.js {{ nodeFloor }} or newer</li>
+      <li class="chip">0 runtime dependencies</li>
+      <li class="chip">Post-quantum first</li>
+    </ul>
+  </div>
+</section>
+
+<section class="band" id="listeners">
+  <h2 class="band-title">Every listener, one boot sequence</h2>
+  <p class="band-lead">
+    Each listener is one framework primitive composed into the same process. All
+    are on by default except POP3.
+  </p>
+  <div class="tablewrap">
+    <table class="sitetable">
+      <caption class="visually-hidden">Ports, protocols and the standards each listener implements</caption>
+      <thead>
+        <tr><th scope="col">Port</th><th scope="col">Protocol</th><th scope="col">Standard</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>25</td><td>Inbound MX over SMTP</td><td>RFC 5321, with SPF, DKIM, DMARC and ARC evaluated at DATA</td></tr>
+        <tr><td>587</td><td>Submission with STARTTLS</td><td>RFC 6409, SASL AUTH per RFC 4954</td></tr>
+        <tr><td>465</td><td>Submission over implicit TLS</td><td>RFC 8314</td></tr>
+        <tr><td>143</td><td>IMAP with STARTTLS</td><td>RFC 9051, CONDSTORE per RFC 7162, METADATA per RFC 5464</td></tr>
+        <tr><td>110</td><td>POP3 with STLS, off by default</td><td>RFC 1939, RFC 2595</td></tr>
+        <tr><td>4190</td><td>ManageSieve</td><td>RFC 5804</td></tr>
+        <tr><td>8080, 8443</td><td>Webmail, operator console and JMAP</td><td>RFC 8620 and RFC 8621 on the JMAP path</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="band-note">
+    IMAP and POP3 negotiate TLS in band, so this server binds 143 and 110 and
+    binds nothing on 993 or 995. JMAP mounts inside the web application at
+    <code>/jmap</code> rather than on a port of its own, so it inherits the same
+    session and security middleware as the rest of the HTTP surface.
+  </p>
+</section>
+
+<section class="band" id="screens">
+  <h2 class="band-title">What it looks like</h2>
+  <p class="band-lead">
+    The browser surface is server-rendered. Client JavaScript is opt-in, and the
+    theme switch works with scripting off.
+  </p>
+
+  <figure class="shot shot-wide">
+    <img src="/static/assets/site/shot-mailbox-light.png" width="1440" height="900"
+         alt="The blamepost mailbox view listing seven messages in the inbox, with a folder rail on the left showing Inbox, Drafts, Sent, Archive, Junk and Trash, and a quota meter beneath it.">
+    <figcaption>The mailbox. Folders, message list, search and a quota meter.</figcaption>
+  </figure>
+
+  <div class="shotgrid">
+    <figure class="shot">
+      <img src="/static/assets/site/shot-conversation-light.png" width="1440" height="900"
+           alt="A single message open in blamepost, showing sender, recipient, date and the message body, with controls to reply, forward, flag and move it.">
+      <figcaption>Reading a message. Remote images are withheld until asked for.</figcaption>
+    </figure>
+    <figure class="shot">
+      <img src="/static/assets/site/shot-compose-light.png" width="1440" height="900"
+           alt="The blamepost compose form with fields for from, to, cc, bcc, subject and a plain text body.">
+      <figcaption>Writing one. An account holding several sending addresses picks between them.</figcaption>
+    </figure>
+    <figure class="shot">
+      <img src="/static/assets/site/shot-admin-overview-light.png" width="1440" height="900"
+           alt="The blamepost operator console overview, showing counts of hosted domains, accounts, queued messages and signing selectors.">
+      <figcaption>The operator console. Domains, accounts, queue and selectors at a glance.</figcaption>
+    </figure>
+    <figure class="shot">
+      <img src="/static/assets/site/shot-admin-dmarc-dark.png" width="1440" height="900"
+           alt="The blamepost DMARC console in dark mode, showing aggregate report volume, alignment and reporting organizations for a hosted domain.">
+      <figcaption>DMARC reporting, in dark mode. Volume, alignment and who reported.</figcaption>
+    </figure>
+  </div>
+
+  <figure class="shot shot-wide">
+    <img src="/static/assets/site/shot-admin-audit-dark.png" width="1440" height="900"
+         alt="The audit trail in the blamepost console in dark mode, listing hash-chained rows with an action, an actor, a timestamp and an outcome for each administrative change.">
+    <figcaption>The audit trail. Every administrative action, hash-chained, with who did it.</figcaption>
+  </figure>
+</section>
+
+<section class="band" id="capabilities">
+  <h2 class="band-title">What it does</h2>
+
+  <div class="cardgrid">
+    <article class="sitecard">
+      <h3>Submission is identity bound</h3>
+      <p>
+        SASL AUTH binds the authenticated account to the envelope sender. A
+        <code>MAIL FROM</code> the account does not own is refused at the wire,
+        and the finished message's <code>From</code> is checked against the same
+        set. Active aliases and subaddresses count as sending identities.
+      </p>
+    </article>
+
+    <article class="sitecard">
+      <h3>Mail leaves signed, twice</h3>
+      <p>
+        Every outbound message carries an Ed25519 signature (RFC 8463) and an
+        RSA-SHA256 one (RFC 6376), so a receiver that cannot verify the first
+        falls back to the second. Signing keys are sealed on the data volume.
+        Minting, rotation with overlap, and retirement are console and CLI verbs.
+      </p>
+    </article>
+
+    <article class="sitecard">
+      <h3>One outbound path, policy composed</h3>
+      <p>
+        MX lookup, MTA-STS enforcement (RFC 8461), DANE (RFC 7672), REQUIRETLS
+        when you ask for it (RFC 8689), retry with backoff, and delivery status
+        notifications (RFC 3464). Mail this server sends on its own behalf takes
+        the same path, and a repository gate refuses a raw transport call.
+      </p>
+    </article>
+
+    <article class="sitecard">
+      <h3>Arriving mail is authenticated</h3>
+      <p>
+        SPF, DKIM verification, DMARC and ARC are evaluated at the end of
+        <code>DATA</code> and written into <code>Authentication-Results</code>,
+        after any header claiming this server's name is stripped. SPF, DKIM and
+        DMARC reach the disposition.
+      </p>
+    </article>
+
+    <article class="sitecard">
+      <h3>Reports you can act on</h3>
+      <p>
+        Aggregate DMARC reports are ingested, parsed and counted per domain:
+        volume, alignment, the senders failing both checks, and who reported.
+        The console says whether the evidence carries the next policy step, and
+        publishes the <code>_dmarc</code> record against a diff you confirm.
+      </p>
+    </article>
+
+    <article class="sitecard">
+      <h3>Deletion has one path</h3>
+      <p>
+        IMAP <code>EXPUNGE</code>, POP3 <code>DELE</code>, JMAP
+        <code>Email/set</code> and the browser all arrive at the same agent,
+        which enforces per-message legal hold and an optional one year retention
+        floor before anything leaves the volume.
+      </p>
+    </article>
+
+    <article class="sitecard">
+      <h3>Credentials for applications</h3>
+      <p>
+        A sending credential is scoped to one hosted domain, holds a rolling
+        ceiling on messages and on recipients, refuses <code>postmaster</code>
+        and <code>abuse</code> by default, and gets its own return path so
+        bounces reach a mailbox you named. Present it on 587 or 465, or post
+        JSON to <code>/api/send</code> with an idempotency key.
+      </p>
+    </article>
+
+    <article class="sitecard">
+      <h3>Post-quantum where the choice is ours</h3>
+      <p>
+        ML-KEM-1024 for key agreement, ML-DSA-65 for release signatures,
+        XChaCha20-Poly1305 for sealing, SHAKE256 and SHA3-512 for digests,
+        HKDF-SHA3-512 for derivation, and Argon2id for passwords. Stored mail,
+        credentials and signing keys are sealed with those primitives.
+      </p>
+    </article>
+
+    <article class="sitecard">
+      <h3>Everything is written down</h3>
+      <p>
+        Administrative actions write hash-chained audit rows carrying what
+        changed, when, how it came out and who did it, with hourly signed
+        checkpoints. A command line invocation records the operating-system
+        account; a console action records the signed-in one.
+      </p>
+    </article>
+  </div>
+</section>
+
+<section class="band band-quiet" id="limits">
+  <h2 class="band-title">What it does not do yet</h2>
+  <p class="band-lead">
+    This is pre-1.0 software and the list matters as much as the one above.
+    The roadmap in the repository marks every capability as shipped, targeted,
+    accepted or under design.
+  </p>
+  <ul class="limitlist">
+    <li><strong>It does not obtain or renew certificates.</strong> Point it at a certificate and key on disk from whatever already issues yours. A renewal written to those paths is picked up without a restart.</li>
+    <li><strong>It does not filter spam.</strong> No blocklist lookup, greylisting or content scoring is wired into the delivery path.</li>
+    <li><strong>It does not create, rename or delete folders in the browser.</strong> An IMAP client does all three. The default set is made at first use.</li>
+    <li><strong>Sieve rules are not editable in the browser.</strong> Scripts are uploaded, listed, activated and deleted over ManageSieve. <code>redirect</code> and <code>vacation</code> are refused wherever they appear.</li>
+    <li><strong>Webmail compose offers no attachment control,</strong> and does not save drafts. A forward still carries the message it forwards.</li>
+    <li><strong>It binds nothing on 993 or 995.</strong> A client that can only do implicit TLS to a mailbox has no route here today.</li>
+    <li><strong>It reads no TLS-RPT reports.</strong> It sends them; parsing what comes back is not in this release.</li>
+    <li><strong>There is no post-quantum DKIM,</strong> here or anywhere. The signature registry has no ML-DSA value, so such a signature would be unverifiable by every receiver.</li>
+    <li><strong>It relays for nobody.</strong> Give the printer or the application server an account, or a sending credential.</li>
+  </ul>
+</section>
+
+<section class="band" id="badge">
+  <h2 class="band-title">Say you run it</h2>
+  <p class="band-lead">
+    This server publishes a badge at <code>/badge.svg</code> carrying the
+    version it is running. Put it on your own site with this, which loads the
+    image from here:
+  </p>
+  <p><img src="/badge.svg" alt="Runs blamepost {{ version }}" width="180" height="20"></p>
+  <pre class="codeblock"><code>{{ badgeSnippet }}</code></pre>
+  <p class="band-note">
+    The badge is the only thing this server serves that another site may load.
+    It withdraws with the front page, and it carries nothing about the mail on
+    this host.
+  </p>
+</section>
+
+<section class="band" id="run">
+  <h2 class="band-title">Run your own</h2>
+  <p class="band-lead">
+    The server is a plain Node process. Nothing is transpiled, so the source in
+    the repository is the code the runtime executes.
+  </p>
+  <pre class="codeblock"><code>git clone https://github.com/blamejs/blamepost.git
+cd blamepost
+bash scripts/vendor-update.sh blamejs latest
+
+export BLAMEPOST_HOSTNAME=mx.example.com
+export BLAMEPOST_VAULT_PASSPHRASE='a long random string you keep offline'
+
+node bin/blamepost.js init  --data-dir ./data --admin-email admin@example.com
+node bin/blamepost.js serve --data-dir ./data</code></pre>
+  <p class="band-note">
+    The vendor step is required on a fresh clone. Before the first message you
+    publish an MX record, an SPF policy ending in <code>-all</code>, a DMARC
+    policy at <code>p=quarantine</code> or stricter, a DKIM selector record per
+    domain, an MTA-STS policy and a TLS-RPT endpoint. The MX listener refuses to
+    bind until you confirm that posture, and <code>blamepost doctor</code>
+    resolves the records and reports what is missing. The container image and
+    the day-2 operations are covered in the operator guide in the repository.
+  </p>
+</section>
+
+{% endblock %}

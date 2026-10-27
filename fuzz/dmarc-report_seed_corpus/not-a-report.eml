@@ -1,0 +1,18 @@
+From: someone@example.net
+To: dmarc-reports@example.com
+Subject: are you receiving these?
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="bnd-mail"
+
+--bnd-mail
+Content-Type: text/plain; charset=utf-8
+
+Just checking the address works.
+
+--bnd-mail
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="report.xml.gz"
+
+hello, this is not a container and not a document
+
+--bnd-mail--

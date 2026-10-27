@@ -1,0 +1,66 @@
+# libFuzzer dictionary for the DMARC report reader.
+#
+# The carrier message framing, the RFC 8601 Authentication-Results clauses
+# the reader takes its verdict from, the media types it treats as report
+# candidates, the gzip and ZIP signatures it sniffs, the RFC 7489 Appendix
+# C aggregate elements, and the RFC 6591 feedback-report fields. The seeds
+# are LF text files, so the CRLF framing arrives from here.
+
+crlf="\x0d\x0a"
+blank_line="\x0d\x0a\x0d\x0a"
+lf="\x0a"
+fold="\x0d\x0a\x20"
+nul="\x00"
+
+auth_results="Authentication-Results: mx.example.com; "
+auth_results_other="Authentication-Results: other.example; "
+authserv_id="mx.example.com"
+dmarc_pass="dmarc=pass"
+dmarc_fail="dmarc=fail"
+dmarc_quoted="dmarc=\x22pass\x22"
+header_from=" header.from="
+reporter="reporter.example"
+clause_separator="; "
+
+multipart_mixed="Content-Type: multipart/mixed; boundary=\x22bnd-report\x22"
+multipart_report="Content-Type: multipart/report; report-type=feedback-report; boundary=\x22bnd-report\x22"
+boundary_open="--bnd-report"
+boundary_close="--bnd-report--"
+disposition="Content-Disposition: attachment; filename=\x22"
+base64="Content-Transfer-Encoding: base64"
+type_gzip="Content-Type: application/gzip"
+type_zip="Content-Type: application/zip"
+type_xml="Content-Type: text/xml"
+type_app_xml="Content-Type: application/xml"
+type_octets="Content-Type: application/octet-stream"
+type_feedback="Content-Type: message/feedback-report"
+type_rfc822="Content-Type: message/rfc822"
+
+gzip_magic="\x1f\x8b\x08\x00"
+zip_local="PK\x03\x04"
+zip_central="PK\x01\x02"
+zip_end="PK\x05\x06"
+bzip2_magic="BZh9"
+utf8_bom="\xef\xbb\xbf"
+utf16_bom="\xff\xfe"
+
+xml_decl="<?xml version=\x221.0\x22 encoding=\x22UTF-8\x22 ?>"
+feedback_open="<feedback>"
+feedback_close="</feedback>"
+report_metadata="<report_metadata>"
+org_name="<org_name>"
+email="<email>"
+report_id="<report_id>"
+volume_fault="volume-fault"
+date_range="<date_range><begin>1750000000</begin><end>1750086400</end></date_range>"
+policy_published="<policy_published><domain>example.com</domain><p>reject</p></policy_published>"
+record="<record>"
+row="<row><source_ip>203.0.113.10</source_ip><count>7</count>"
+policy_evaluated="<policy_evaluated><disposition>none</disposition><dkim>pass</dkim><spf>pass</spf></policy_evaluated>"
+identifiers="<identifiers><header_from>example.com</header_from></identifiers>"
+
+feedback_type="Feedback-Type: auth-failure"
+auth_failure="Auth-Failure: dmarc"
+reported_domain="Reported-Domain: example.com"
+original_rcpt="Original-Rcpt-To: "
+source_ip="Source-IP: "

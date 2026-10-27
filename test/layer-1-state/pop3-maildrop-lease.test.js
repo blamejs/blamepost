@@ -30,6 +30,15 @@
  * wrong answer: a sweep that never reclaims passes the first, and the
  * shipped predicate passes the second. Only the pair pins the rule.
  *
+ * The window is the backstop rather than the release. The POP3 listener
+ * reports a session's activity and its ending, and those reports are
+ * what age the lease and hand it back. The report is answered here by
+ * `touchPop3Drop` and `releasePop3Drop`, and the cases for them assert
+ * the two things a release owes: that it happens on the ending rather
+ * than on a timer, and that it names the session which opened the drop
+ * rather than the account, so an ending arriving late cannot take a
+ * maildrop from the live session that opened the next one.
+ *
  * How the duration is moved: `withElapsedStep` replaces
  * `process.hrtime.bigint` for the length of one synchronous call and
  * puts it back in a `finally`. It is the monotonic source the maildrop
@@ -62,6 +71,40 @@ var PAST_THE_MAILDROP_TTL_MS = helpers.b.constants.TIME.minutes(31);
 // Comfortably inside it, for the case that has to show the sweep is
 // reading elapsed time at all rather than reclaiming on any step.
 var INSIDE_THE_MAILDROP_TTL_MS = helpers.b.constants.TIME.minutes(5);
+
+// The lifetime as the operator guide states it, and the sentence it is
+// read out of.
+//
+// The two constants above bracket the window between five minutes and
+// thirty-one, which is wide enough for the shipped number to move
+// without a case here noticing. The guide tells an account holder that
+// a maildrop they cannot open comes back to them after thirty minutes,
+// and the support answer it gives is written against that number: an
+// operator repeating it to somebody waiting is quoting this server, so
+// the window is held to the sentence rather than to the module.
+//
+// A duration in that sentence is a word rather than a numeral, so the
+// words that could reasonably stand in it are mapped. A word outside
+// the map reads as no number at all and fails the first check below,
+// naming what it found, which is the loud direction: a rewritten
+// sentence stops the run rather than quietly widening the bracket.
+var SETTINGS_REFERENCE = "docs/operator-guide.md";
+var MAILDROP_TTL_RE    = /released after ([a-z-]+|\d+) minutes/;
+
+var MINUTE_WORDS = {
+  five: 5, ten: 10, fifteen: 15, twenty: 20, "twenty-five": 25, thirty: 30,
+  "thirty-five": 35, forty: 40, "forty-five": 45, fifty: 50, sixty: 60,
+};
+
+function documentedMaildropTtlMinutes() {
+  var text = nodeFs.readFileSync(
+    nodePath.join(helpers.REPO_ROOT, SETTINGS_REFERENCE), "utf8");
+  var matched = MAILDROP_TTL_RE.exec(text);
+  if (matched === null) return null;
+  if (/^\d+$/.test(matched[1])) return parseInt(matched[1], 10);
+  var word = MINUTE_WORDS[matched[1]];
+  return word === undefined ? null : word;
+}
 
 var NANOSECONDS_PER_MS = 1000000n;
 
@@ -287,6 +330,167 @@ async function anAbandonedSessionLosesItsMaildrop(fixture) {
     String(handle.mailbox.describe().openDrops));
 }
 
+// How wide that window is, held against the number the guide prints.
+//
+// The pair above proves the sweep reads idleness rather than age, and
+// is satisfied by any window between the two steps it takes. A window
+// narrowed to ten minutes keeps both of them green while an account
+// holder reading the guide waits out a half hour that ended twenty
+// minutes ago, and a widened one leaves them locked out past the answer
+// their operator gave them. Both edges are driven, because a window
+// asserted from one side alone is satisfied by one that never reclaims
+// or by one that reclaims at once.
+async function theIdleWindowIsTheWidthTheGuidePrints(fixture) {
+  var minutes = documentedMaildropTtlMinutes();
+  count("the operator guide names how long an untouched maildrop is held, so this is " +
+    "comparing something", minutes !== null && minutes > 1, String(minutes));
+  if (minutes === null) return;
+
+  var handle = fixture.handle;
+  var heidi = await accountWith(handle, "heidi@example.com", ["only"]);
+
+  var abandoned = handle.mailbox.openPop3Drop(heidi, {});
+  count("a maildrop opens and nothing touches it again", abandoned.count === 1,
+    String(abandoned.count));
+
+  // Read as either the drop that opened or the code that refused, so a
+  // window on the wrong side of the guide's number is a named failure
+  // rather than an exception out of the middle of the case.
+  function openUnderAStepOf(offsetMs) {
+    return withElapsedStep(offsetMs, function () {
+      try { return { opened: handle.mailbox.openPop3Drop(heidi, {}) }; }
+      catch (e) { return { code: (e && e.code) || "threw without a code" }; }
+    });
+  }
+
+  // A minute short of the number rather than a millisecond short of it.
+  // The reading the sweep takes is the step plus whatever this run spent
+  // between the two calls, so a boundary driven to the millisecond would
+  // be decided by the runner's load rather than by the window.
+  var justBefore = openUnderAStepOf(helpers.b.constants.TIME.minutes(minutes - 1));
+  count("a minute short of the time the guide prints, the maildrop is still held, so an " +
+    "account holder told half an hour does not get a quarter of one",
+    justBefore.code === "mailbox/drop-locked",
+    justBefore.code === undefined ? "the maildrop was handed over" : justBefore.code);
+
+  var justAfter = openUnderAStepOf(helpers.b.constants.TIME.minutes(minutes + 1));
+  count("and a minute past it the account holder has their maildrop back, so the wait is " +
+    "the one the guide prints rather than merely no longer than it",
+    justAfter.opened !== undefined && justAfter.opened.dropId !== abandoned.dropId &&
+    justAfter.opened.count === 1,
+    justAfter.opened === undefined
+      ? "second open answered " + justAfter.code
+      : "count " + String(justAfter.opened.count));
+
+  if (justAfter.opened !== undefined) {
+    await handle.mailbox.commitPop3Drop(heidi, justAfter.opened.dropId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The session ending is the release, and it names one session
+// ---------------------------------------------------------------------------
+
+// The POP3 listener reports a session's ending however that session
+// ended, and this layer hands the maildrop back on that report. The
+// window above is what answers when the report never arrives.
+//
+// Which session the report names is the whole of the risk. An ending
+// arriving after the mailbox's next session has already opened a drop
+// would, if it named the ACCOUNT, reach past a live client and take the
+// maildrop it is holding; RFC 1939 section 6 applies a DELE only at
+// QUIT, so the marks go with it and the account holder is offered the
+// mail they deleted all over again. Two actor objects for one account
+// is what two POP3 connections signing in as the same mailbox produce,
+// because the verifier builds one per connection and the listener
+// carries it for that connection's life.
+async function anEndingReleasesOneSessionsMaildrop(fixture) {
+  var handle = fixture.handle;
+  var firstSession  = await accountWith(handle, "frank@example.com",
+    ["first", "second", "third"]);
+  var secondSession = Object.assign({}, firstSession);
+
+  var held = handle.mailbox.openPop3Drop(firstSession, {});
+  handle.mailbox.markDelete(firstSession, held.dropId, 1);
+  count("a session opens a maildrop and marks a message in it",
+    held.count === 3, String(held.count));
+  count("and the mailbox is held against everybody else while it does",
+    refusalCode(function () {
+      return handle.mailbox.openPop3Drop(secondSession, {});
+    }) === "mailbox/drop-locked");
+
+  var released = handle.mailbox.releasePop3Drop(firstSession);
+  count("the session ending hands the maildrop back there and then, rather than after the " +
+    "idle window the reports exist to replace",
+    released.released === true && released.dropId === held.dropId, JSON.stringify(released));
+  count("and the marks it was holding went with it, because the one place they become " +
+    "deletions is QUIT (RFC 1939 section 6)",
+    handle.mailbox.selectFolder(firstSession, "INBOX", {}).exists === 3,
+    String(handle.mailbox.selectFolder(firstSession, "INBOX", {}).exists));
+
+  var reopened = handle.mailbox.openPop3Drop(secondSession, {});
+  count("so the next session opens a maildrop of its own straight away",
+    reopened.count === 3 && reopened.dropId !== held.dropId, String(reopened.count));
+
+  var stale = handle.mailbox.releasePop3Drop(firstSession);
+  count("an ending reported for the session that has already gone releases nothing",
+    stale.released === false, JSON.stringify(stale));
+  count("and the live session is still holding the maildrop it opened",
+    handle.mailbox.describe().openDrops === 1,
+    String(handle.mailbox.describe().openDrops));
+
+  handle.mailbox.markDelete(secondSession, reopened.dropId, 1);
+  var committed = await handle.mailbox.commitPop3Drop(secondSession, reopened.dropId);
+  count("so its own QUIT applies what it marked rather than failing on a maildrop taken " +
+    "from underneath it", committed.deleted === 1, JSON.stringify(committed));
+  count("and nothing is held once it has",
+    handle.mailbox.describe().openDrops === 0,
+    String(handle.mailbox.describe().openDrops));
+}
+
+// ---------------------------------------------------------------------------
+// The keepalive this layer cannot see on its own
+// ---------------------------------------------------------------------------
+
+// RFC 1939 section 5 gives a client NOOP as the way to say it is still
+// there, and the listener answers it without asking this layer anything.
+// A client sitting on a maildrop it is not reading sends nothing else,
+// so the only thing that can move the reading the sweep measures is the
+// listener's report that a command arrived.
+async function aKeepaliveKeepsTheMaildrop(fixture) {
+  var handle = fixture.handle;
+  var grace = await accountWith(handle, "grace@example.com", ["only"]);
+
+  var open = handle.mailbox.openPop3Drop(grace, {});
+  var opened = handle.mailbox.describe();
+  count("an open maildrop reports how long it has been since anything touched it, one " +
+    "reading per drop", opened.dropIdleMs.length === opened.openDrops,
+    JSON.stringify(opened.dropIdleMs));
+  count("and the reading for a drop just opened is a duration rather than a date",
+    opened.dropIdleMs[0] >= 0 && opened.dropIdleMs[0] < PAST_THE_MAILDROP_TTL_MS,
+    String(opened.dropIdleMs[0]) + "ms");
+
+  var stillHeld = withElapsedStep(PAST_THE_MAILDROP_TTL_MS, function () {
+    handle.mailbox.touchPop3Drop(grace);
+    return refusalCode(function () { return handle.mailbox.openPop3Drop(grace, {}); });
+  });
+  count("a keepalive arriving past the idle window keeps the maildrop, so a session doing " +
+    "nothing but answering that it is still there is not reaped under a live connection",
+    stillHeld === "mailbox/drop-locked", "second open answered " + String(stillHeld));
+
+  var reclaimed = withElapsedStep(PAST_THE_MAILDROP_TTL_MS * 2, function () {
+    return handle.mailbox.openPop3Drop(grace, {});
+  });
+  count("and the window still runs from the last keepalive rather than never expiring",
+    reclaimed.dropId !== open.dropId && reclaimed.count === 1, String(reclaimed.count));
+
+  count("a keepalive for a session holding nothing touches nothing",
+    handle.mailbox.touchPop3Drop(Object.assign({}, grace)).touched === false);
+
+  count("and the session that opened this one hands it back",
+    handle.mailbox.releasePop3Drop(grace).released === true);
+}
+
 // ---------------------------------------------------------------------------
 // What the maildrop model owes a client between those two rules
 // ---------------------------------------------------------------------------
@@ -431,6 +635,104 @@ async function marksBecomeDeletionsOnlyAtQuit(fixture) {
   await handle.mailbox.commitPop3Drop(erin, reopened.dropId);
 }
 
+// The maildrop identifier is a handle, and the question a handle always
+// raises is what happens when somebody presents one that is not theirs.
+//
+// There is no wire form of this: the identifier is minted inside
+// `openPop3Drop`, held in the listener's per-connection state and never
+// written to the socket, so no POP3 command a client can send carries
+// one. That is exactly why the claim is made here rather than over a
+// port, and why it is worth making at all: the only thing standing
+// between a refactor and a cross-account read is the account comparison
+// in `_dropFor`, and nothing above this layer would notice it going.
+//
+// Three shapes, because they fail differently: another account's live
+// identifier, an identifier that names no drop at all, and a shape that
+// is not an identifier. All three answer the same refusal, so a session
+// learns nothing about what exists from what it is told.
+async function aMaildropIdentifierNobodyHandedOutReachesNothing(fixture) {
+  var handle = fixture.handle;
+  var ivan = await accountWith(handle, "ivan@example.com", ["ivan's own"]);
+  var judy = await accountWith(handle, "judy@example.com", ["judy's own", "and another"]);
+
+  var hers = handle.mailbox.openPop3Drop(judy, {});
+  count("one account has an open maildrop with mail in it", hers.count === 2,
+    String(hers.count));
+
+  var presented = [
+    ["another account's live identifier", hers.dropId],
+    ["an identifier naming no maildrop",  "drop_0123456789abcdef01234567"],
+    ["a shape that is not an identifier", ""],
+  ];
+  for (var i = 0; i < presented.length; i += 1) {
+    var id = presented[i][1];
+    count("a session presenting " + presented[i][0] + " is refused a listing",
+      refusalCode(function () { return handle.mailbox.listMessages(ivan, id); }) ===
+        "mailbox/no-drop");
+    count("and refused a message from it", refusalCode(function () {
+      return handle.mailbox.getMessage(ivan, id, 1, {});
+    }) === "mailbox/no-drop");
+    count("and refused a mark on it", refusalCode(function () {
+      return handle.mailbox.markDelete(ivan, id, 1);
+    }) === "mailbox/no-drop");
+    count("and refused a reset of it", refusalCode(function () {
+      return handle.mailbox.resetPop3Drop(ivan, id);
+    }) === "mailbox/no-drop");
+  }
+
+  // The commit is the one that would destroy rather than read, so it is
+  // asked separately and its refusal is awaited rather than caught
+  // synchronously.
+  var committed = null;
+  try { await handle.mailbox.commitPop3Drop(ivan, hers.dropId); }
+  catch (e) { committed = (e && e.code) || "threw without a code"; }
+  count("and a commit aimed at another account's maildrop is refused rather than applying " +
+    "that account's marks", committed === "mailbox/no-drop", String(committed));
+
+  count("the other account's maildrop is untouched by any of it",
+    handle.mailbox.listMessages(judy, hers.dropId).length === 2,
+    String(handle.mailbox.listMessages(judy, hers.dropId).length));
+
+  await handle.mailbox.commitPop3Drop(judy, hers.dropId);
+}
+
+// RFC 1939 section 3 gives one session exclusive access to a maildrop,
+// and the framework's POP3 listener documents the call it makes for one
+// as `openPop3Drop(actor, { exclusive: true })`. There is no other mode:
+// the drop is a snapshot, message numbers are positions in it, and
+// section 6 applies a DELE at QUIT, so two sessions sharing one would
+// each be numbering a mailbox the other is changing.
+//
+// So an option asking for anything else is refused rather than ignored.
+// A call that asks and is answered with a drop has been told its request
+// was honored, and nothing anywhere would say otherwise; the shipped
+// listener passes no such option today, which is exactly the state in
+// which a silently discarded one goes unnoticed.
+async function aMaildropCannotBeAskedForOnAnyOtherTerms(fixture) {
+  var handle = fixture.handle;
+  var karl = await accountWith(handle, "karl@example.com", ["karl's own"]);
+
+  count("asking for the exclusive access RFC 1939 section 3 defines is refused when the " +
+    "caller asks for something else instead",
+    refusalCode(function () {
+      return handle.mailbox.openPop3Drop(karl, { exclusive: false });
+    }) === "mailbox/bad-argument");
+  count("and nothing is held afterwards, so the refusal cost the account nothing",
+    handle.mailbox.describe().openDrops === 0,
+    String(handle.mailbox.describe().openDrops));
+
+  // The two shapes the listener actually sends: no options at all, and
+  // the exclusive access it documents. Both open.
+  var bare = handle.mailbox.openPop3Drop(karl, {});
+  count("a call carrying no options opens the drop", bare.count === 1, String(bare.count));
+  await handle.mailbox.commitPop3Drop(karl, bare.dropId);
+
+  var asked = handle.mailbox.openPop3Drop(karl, { exclusive: true });
+  count("and so does one asking for exactly the access the maildrop gives",
+    asked.count === 1, String(asked.count));
+  await handle.mailbox.commitPop3Drop(karl, asked.dropId);
+}
+
 // ---------------------------------------------------------------------------
 
 async function run() {
@@ -440,12 +742,22 @@ async function run() {
       function () { return aBusySessionKeepsItsMaildrop(fixture); });
     await helpers.withTestTimeout("pop3 lease: an abandoned session loses its maildrop",
       function () { return anAbandonedSessionLosesItsMaildrop(fixture); });
+    await helpers.withTestTimeout("pop3 lease: the idle window is the width the guide prints",
+      function () { return theIdleWindowIsTheWidthTheGuidePrints(fixture); });
+    await helpers.withTestTimeout("pop3 lease: an ending releases one session's maildrop",
+      function () { return anEndingReleasesOneSessionsMaildrop(fixture); });
+    await helpers.withTestTimeout("pop3 lease: a keepalive keeps the maildrop",
+      function () { return aKeepaliveKeepsTheMaildrop(fixture); });
     await helpers.withTestTimeout("pop3 lease: unique ids are unique and stable",
       function () { return uniqueIdsAreUniqueAndStable(fixture); });
     await helpers.withTestTimeout("pop3 lease: listed sizes are the octets RETR returns",
       function () { return listedSizesAreTheOctetsRetrReturns(fixture); });
     await helpers.withTestTimeout("pop3 lease: marks become deletions only at QUIT",
       function () { return marksBecomeDeletionsOnlyAtQuit(fixture); });
+    await helpers.withTestTimeout("pop3 lease: an identifier nobody handed out reaches nothing",
+      function () { return aMaildropIdentifierNobodyHandedOutReachesNothing(fixture); });
+    await helpers.withTestTimeout("pop3 lease: a maildrop is not asked for on other terms",
+      function () { return aMaildropCannotBeAskedForOnAnyOtherTerms(fixture); });
   } finally {
     fixture.close();
   }

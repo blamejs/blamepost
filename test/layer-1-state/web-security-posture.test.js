@@ -2,9 +2,9 @@
 // Copyright (c) blamejs contributors
 "use strict";
 /**
- * The eight request-lifecycle guarantees the browser surface makes, each
- * measured by a request that has to be refused rather than by the
- * presence of the middleware that refuses it.
+ * The nine guarantees the browser surface makes, each measured by a
+ * request that has to be refused rather than by the presence of the
+ * middleware that refuses it.
  *
  * A check that the chain is MOUNTED is cheap and answers nothing. A
  * middleware can be mounted with the option that makes it a
@@ -18,7 +18,7 @@
  * a route that performs the write and then answers 403 has done the
  * damage and hidden it.
  *
- * The eight, and the request each one is measured with:
+ * The nine, and the request each one is measured with:
  *
  *   - CSRF, a state change posted with no token and with a wrong one;
  *   - the origin cross check, a state change posted with a valid token
@@ -37,7 +37,10 @@
  *     rather than the identifier the server keeps;
  *   - sealed storage, every byte under the data directory after the
  *     store closes, against the address, the display name, the subject
- *     and the body that went into it.
+ *     and the body that went into it;
+ *   - the message body, which is the one value this application
+ *     interpolates un-escaped, read off the conversation page a reader
+ *     opens after a sender's markup arrived through the store.
  *
  * Three properties of the way those are measured are load bearing.
  *
@@ -60,6 +63,15 @@
  * be told apart from, so the scan reports its file and byte counts and
  * proves it can see cleartext by finding the operator's own certificate,
  * which is the one file under the data directory that is not sealed.
+ *
+ * **The HTTP version is one of the vectors.** The framework binds this
+ * listener with `http2.createSecureServer` and offers `["h2",
+ * "http/1.1"]` over ALPN, so a browser negotiates h2 and carries the
+ * authority in `:authority` with no `Host` header. `node:https` speaks
+ * HTTP/1.1 and sends one. Those are different requests, and a gate
+ * deriving this server's own origin from `Host` answers them
+ * differently, so the journey is driven over both and the two answers
+ * have to agree.
  *
  * What is deliberately not here, because it is measured elsewhere and a
  * second copy is a second answer waiting to disagree:
@@ -134,6 +146,55 @@ var SAME_ORIGIN = Object.freeze({
   "Sec-Fetch-Dest": "empty",
 });
 
+// What a browser attaches to a NATIVE FORM SUBMIT, which is a different
+// request from the one above and the one every human user sends. A
+// script's `fetch` is mode `cors` and destination `empty`; pressing a
+// submit button is a navigation, so the mode is `navigate` and the
+// destination is `document`, and the token rides the body rather than a
+// header because a form cannot write headers.
+//
+// Every vector in this file used the `fetch` shape, so nothing measured
+// the path a person drives.
+var NAVIGATION = Object.freeze({
+  "Sec-Fetch-Site": "same-origin",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-User": "?1",
+  "Upgrade-Insecure-Requests": "1",
+  // A form carries its token in the body. Emptying the header is what
+  // makes this the form's request rather than a script's.
+  "X-CSRF-Token":  "",
+});
+
+// The origin a browser serializes when it is told not to reveal where
+// the request came from. It is opaque: it names no site, so it can never
+// be shown to be this one, and the origin cross check refuses it.
+var OPAQUE_ORIGIN = "null";
+
+// The referrer policy that makes a browser send OPAQUE_ORIGIN on every
+// same-origin form submit.
+//
+// Under the Fetch standard a request whose mode is `navigate` and whose
+// method is not GET or HEAD has its serialized origin replaced with
+// `null` when the document's referrer policy is `no-referrer`. The
+// origin cross check then reads an origin that cannot be this server's
+// and refuses, so a policy of `no-referrer` turns every form on this
+// surface into a 403 for every browser while leaving every request a
+// script or a test client writes by hand untouched.
+var ORIGIN_ERASING_POLICY = "no-referrer";
+
+// What this surface serves instead. Cross-origin requests still carry no
+// referrer at all, which is the whole of what `no-referrer` bought here,
+// and a cross-origin form submit still serializes its origin as `null`
+// and is still refused. The difference is that a SAME-origin submit now
+// names this server, which is the header the gate reads.
+var REFERRER_POLICY = "same-origin";
+
+// A meta element restating the policy inside the document would override
+// the response header for that document, so a page carrying one is a
+// second place the value lives and the one a browser actually obeys.
+var META_REFERRER_RE = /<meta[^>]+name=["']referrer["'][^>]*>/i;
+
 // An automation agent off the framework's own deny list, and the header
 // value a request carrying no agent string at all would send.
 var AUTOMATION_AGENT = "curl/8.4.0";
@@ -195,7 +256,7 @@ async function flagsOf(agent, accountId, storeFolder, objectId) {
 // set proves a gate on the chain, which is what hard rule four is about.
 function stateChangingRoutes(accountId, folder) {
   return [
-    "/mail/" + folder + "/actions",
+    "/mail/actions?folder=" + encodeURIComponent(folder),
     "/compose",
     "/prefs/theme",
     "/sign-out",
@@ -217,7 +278,7 @@ async function sweepIsRefused(reader, routes, label, send) {
   }
   // A gate that signed the reader out while refusing would leave every
   // assertion after this one measuring an anonymous request.
-  var still = await reader.get("/mail/INBOX");
+  var still = await reader.get("/mail?folder=INBOX");
   count("the reader still holds their session after " + label,
     still.status === 200, still.status + " " + String(still.location));
 }
@@ -261,7 +322,7 @@ async function testTheCsrfGateRefusesAStateChangeWithoutAToken(reader, routes, t
 // action, driven the way the rendered form drives it, goes through and
 // writes.
 async function testTheSameActionWorksWithItsToken(reader, target, agent) {
-  var flagged = await reader.form("/mail/INBOX/actions", {
+  var flagged = await reader.form("/mail/actions?folder=INBOX", {
     action: "flag", objectId: target.objectId,
   });
   count("the same action carrying the form's own token is performed",
@@ -270,7 +331,7 @@ async function testTheSameActionWorksWithItsToken(reader, target, agent) {
   count("and the flag it asked for is on the message afterwards",
     after !== null && after.indexOf("\\Flagged") !== -1, JSON.stringify(after));
 
-  var cleared = await reader.form("/mail/INBOX/actions", {
+  var cleared = await reader.form("/mail/actions?folder=INBOX", {
     action: "unflag", objectId: target.objectId,
   });
   count("the flag comes back off, so the state is where the next vector expects it",
@@ -329,6 +390,288 @@ async function testACrossSiteStateChangeIsRefused(reader, routes, origin) {
     Object.assign({ Origin: origin }, SAME_ORIGIN));
   count("the same request reported as same origin is performed",
     permitted.status === 302, permitted.status + " " + permitted.body.slice(0, 160));
+}
+
+// ---- the form a person submits ----------------------------------------------
+
+// The path every human user drives, which no other vector in this file
+// drives: a rendered form, a pressed button, a navigation.
+//
+// Two halves, and both are needed. The first three assertions write the
+// browser's headers by hand and prove the gate answers them correctly.
+// They cannot see the defect this exists for, because a header written
+// by hand is a header the browser was never asked to compute: they pass
+// on a server nobody can sign in to. The fourth reads what the response
+// TELLS a browser to send, which is the only place the failure is
+// visible from this layer.
+async function testANativeFormSubmitIsAccepted(reader, routes, origin, target, agent) {
+  // Two different routes, so the acceptance is the chain rather than one
+  // route that happens not to read the header.
+  var themed = await reader.form("/prefs/theme", { theme: "dark" },
+    Object.assign({ Origin: origin }, NAVIGATION));
+  count("a form submitted the way a browser submits one is performed",
+    themed.status === 302, themed.status + " " + themed.body.slice(0, 160));
+
+  var flagged = await reader.form("/mail/actions?folder=INBOX",
+    { action: "flag", objectId: target.objectId },
+    Object.assign({ Origin: origin }, NAVIGATION));
+  count("and so is a submit that writes, on a second route",
+    flagged.status === 302, flagged.status + " " + flagged.body.slice(0, 160));
+  var after = await flagsOf(agent, target.accountId, target.storeFolder, target.objectId);
+  count("the write the submitted form asked for reached the message",
+    after !== null && after.indexOf("\\Flagged") !== -1, JSON.stringify(after));
+
+  // Put the message back, because the vectors after this one read the
+  // same flag and would be measuring this write rather than their own.
+  var cleared = await reader.form("/mail/actions?folder=INBOX",
+    { action: "unflag", objectId: target.objectId },
+    Object.assign({ Origin: origin }, NAVIGATION));
+  count("and the same submit takes it back off",
+    cleared.status === 302, cleared.status);
+
+  // The same navigation carrying the origin a browser serializes when it
+  // has been told to reveal nothing. It names no site, so it can never be
+  // shown to be this one, and it is refused on every route.
+  await sweepIsRefused(reader, routes,
+    "a submit carrying an opaque origin is refused",
+    function (path) {
+      return reader.form(path, SWEEP_FIELDS, Object.assign({ Origin: OPAQUE_ORIGIN },
+        NAVIGATION));
+    });
+
+  var opaque = await reader.form(routes[0], SWEEP_FIELDS,
+    Object.assign({ Origin: OPAQUE_ORIGIN }, NAVIGATION));
+  count("the refusal on an opaque origin is the origin cross check",
+    opaque.body.indexOf("cross-origin request refused") !== -1, opaque.body.slice(0, 160));
+
+  // And a submit that really did start somewhere else, in the shape a
+  // navigation from another site arrives in. Without this the acceptances
+  // above would be satisfied by a surface that reads no origin at all.
+  await sweepIsRefused(reader, routes,
+    "a navigation that started on another site is refused",
+    function (path) {
+      return reader.form(path, SWEEP_FIELDS, Object.assign({ Origin: FOREIGN_ORIGIN },
+        NAVIGATION, { "Sec-Fetch-Site": "cross-site" }));
+    });
+}
+
+// Whether a browser handed this page would send an origin the gate above
+// can read.
+//
+// This is the assertion the three before it cannot make. A test client
+// writes `Origin` itself, so it goes on passing however the response
+// tells a real browser to behave; the browser computes it from the
+// document's referrer policy and sends `null` when that policy is
+// `no-referrer`, which the vector above proves is refused. So the policy
+// on the wire is the whole of what decides whether a person can sign in,
+// and it is read on a rendered page and on a refusal, because a policy
+// set on one class of response and not another is a surface where some
+// forms work.
+async function testTheServedPolicyLeavesTheOriginReadable(reader, origin, caPem) {
+  var pages = [
+    { what: "the sign in page", answer: await browser.browserAt(origin,
+      { ca: caPem }).get("/sign-in") },
+    { what: "a page behind the session", answer: await reader.get("/mail?folder=INBOX") },
+    { what: "a refusal", answer: await reader.form("/prefs/theme", { theme: "dark" },
+      { Origin: FOREIGN_ORIGIN }) },
+  ];
+
+  for (var i = 0; i < pages.length; i += 1) {
+    var served = String(pages[i].answer.headers["referrer-policy"] || "");
+    count("the referrer policy on " + pages[i].what + " is not the one that makes a " +
+      "browser serialize its origin as " + OPAQUE_ORIGIN + " on every form submit",
+      served !== ORIGIN_ERASING_POLICY, JSON.stringify(served));
+    count("and it is the policy that reveals nothing to another origin while naming " +
+      "this one to itself, on " + pages[i].what,
+      served === REFERRER_POLICY, JSON.stringify(served));
+  }
+
+  // A document may restate the policy in a meta element, and a browser
+  // obeys the meta over the header. A page carrying one is a second
+  // place this value lives, and the header assertions above would go on
+  // passing while every browser read the other copy.
+  var rendered = await reader.get("/mail?folder=INBOX");
+  var meta = META_REFERRER_RE.exec(rendered.body);
+  count("no rendered page restates the referrer policy in a meta element, where it " +
+    "would override the header a browser was already sent",
+    meta === null, meta === null ? "none" : meta[0]);
+}
+
+// The same journey over the HTTP version a browser actually negotiates.
+//
+// Every vector above rides `node:https`, which speaks HTTP/1.1 and sends a
+// `Host` header. The framework binds this listener with
+// `http2.createSecureServer` and offers `["h2", "http/1.1"]` over ALPN, so
+// no browser ever sends that request: it negotiates h2 and carries the
+// authority in `:authority`, with no `Host` header at all. Node does not
+// synthesize one, so anything deriving this server's own origin from
+// `Host` reads `undefined` over the only version a browser uses.
+//
+// That is the whole gap this section closes. A reader that writes its own
+// headers cannot see it, and neither can one that only ever speaks the
+// version a browser does not. So the shape is the shape of the vectors
+// above, driven twice, and the two answers have to agree: a rule that
+// holds over HTTP/1.1 and not over HTTP/2 is a rule that holds for the
+// test client and not for the person.
+//
+// Sign in is driven first and separately, because it is the one route a
+// person cannot route around. Everything else on this surface is behind
+// it, so a surface that refuses this POST is a surface with no reachable
+// pages at all, whatever the rest of the chain would have done.
+async function testTheJourneyHoldsOverTheVersionABrowserNegotiates(origin, caPem, target) {
+  var browserSide = browser.browserAt(origin, { ca: caPem, http2: true });
+  count("the reader for this section speaks the version a browser negotiates",
+    browserSide.http2 === true, String(browserSide.http2));
+
+  var page = await browserSide.readCsrf("/sign-in");
+  count("the sign in page is served over HTTP/2",
+    page.page.status === 200, page.page.status + " " + page.page.body.slice(0, 120));
+  count("and it carries a token for the browser to send back",
+    page.token.length === 64, JSON.stringify(page.token));
+
+  // The measurement the whole file exists downstream of: a person filling
+  // in the sign in form and pressing the button.
+  var landed = await browserSide.signIn(READER_ADDRESS, READER_PASSWORD);
+  count("a person can sign in over the HTTP version their browser uses",
+    landed.status === 302, landed.status + " " + landed.body.slice(0, 200));
+  count("and the session lands them on their mailbox rather than back at the form",
+    String(landed.location) === "/mail?folder=INBOX", String(landed.location));
+
+  // A page behind the session, so the cookie the sign in issued is one the
+  // next request is actually served on.
+  var mailbox = await browserSide.get("/mail?folder=INBOX");
+  count("the session issued over HTTP/2 carries to the next page",
+    mailbox.status === 200, mailbox.status + " " + String(mailbox.location));
+
+  // A second state-changing route, so the acceptance is the chain rather
+  // than the one route sign in happens to take.
+  var themed = await browserSide.form("/prefs/theme", { theme: "dark" });
+  count("a form on a second route is performed over HTTP/2 too",
+    themed.status === 302, themed.status + " " + themed.body.slice(0, 200));
+
+  var flagged = await browserSide.form("/mail/actions?folder=INBOX",
+    { action: "flag", objectId: target.objectId });
+  count("and so is a submit that writes",
+    flagged.status === 302, flagged.status + " " + flagged.body.slice(0, 200));
+  var cleared = await browserSide.form("/mail/actions?folder=INBOX",
+    { action: "unflag", objectId: target.objectId });
+  count("the same submit takes the flag back off, so the state is where the next " +
+    "vector expects it", cleared.status === 302, cleared.status);
+
+  // The differential. A surface that accepted everything over HTTP/2 would
+  // satisfy every assertion above and would also have no origin check on
+  // the version a browser uses, which is the version that needs one.
+  var foreign = await browserSide.form("/prefs/theme", { theme: "light" },
+    { Origin: FOREIGN_ORIGIN });
+  count("a state change from another origin is still refused over HTTP/2",
+    foreign.status === 403, foreign.status + " " + foreign.body.slice(0, 200));
+  count("and the refusal is the origin cross check rather than a gate that reads " +
+    "nothing", foreign.body.indexOf("cross-origin request refused") !== -1,
+    foreign.body.slice(0, 200));
+
+  var opaque = await browserSide.form("/prefs/theme", { theme: "light" },
+    { Origin: OPAQUE_ORIGIN });
+  count("an opaque origin is still refused over HTTP/2",
+    opaque.status === 403, opaque.status + " " + opaque.body.slice(0, 200));
+
+  var tokenless = await browserSide.post("/prefs/theme",
+    "application/x-www-form-urlencoded", "theme=light", { "X-CSRF-Token": "" });
+  count("and a state change carrying no token is still refused over HTTP/2",
+    tokenless.status === 403, tokenless.status + " " + tokenless.body.slice(0, 200));
+  count("that refusal is the token compare, so both checks run on this version",
+    tokenless.body.indexOf("CSRF token mismatch") !== -1, tokenless.body.slice(0, 200));
+
+  // The pair the origin cross-check cannot survive if either half is
+  // taken on trust.
+  //
+  // Over HTTP/2 a caller writes `Origin`, and it can write a `Host`
+  // header too. The baseline the cross-check compares against is built
+  // from the authority, so a caller that supplies both halves and makes
+  // them agree names an origin this server does not serve and satisfies
+  // the comparison with it. RFC 9113 section 8.3.1 calls a `Host` that
+  // disagrees with `:authority` malformed, and that is what has to
+  // happen to it.
+  //
+  // Driven on the route where being wrong costs the most: a sign in that
+  // went through here is a session minted for a request the server
+  // believed came from somewhere else.
+  var forged = browser.browserAt(origin, { ca: caPem, http2: true });
+  await forged.readCsrf("/sign-in");
+  var forgedIn = await forged.post("/sign-in", "application/x-www-form-urlencoded",
+    "address=" + encodeURIComponent(READER_ADDRESS) +
+    "&password=" + encodeURIComponent(READER_PASSWORD) +
+    "&_csrf=" + encodeURIComponent(forged.csrf()),
+    { Host: "attacker.example.net", Origin: "https://attacker.example.net" });
+  count("a request naming one authority in :authority and another in Host is refused, " +
+    "so a caller cannot write both halves of the origin comparison",
+    forgedIn.status === 400, forgedIn.status + " " + forgedIn.body.slice(0, 200));
+  count("and it is refused before it mints anything, so no session came back",
+    String(forgedIn.setCookie).indexOf("__Host-bp_session=") === -1,
+    JSON.stringify(forgedIn.setCookie));
+
+  // The differential for that refusal. A `Host` that AGREES with the
+  // authority is an ordinary request and has to keep working, or the
+  // check above would be satisfied by refusing the header outright.
+  var agreeing = browser.browserAt(origin, { ca: caPem, http2: true });
+  await agreeing.readCsrf("/sign-in");
+  var agreed = await agreeing.post("/sign-in", "application/x-www-form-urlencoded",
+    "address=" + encodeURIComponent(READER_ADDRESS) +
+    "&password=" + encodeURIComponent(READER_PASSWORD) +
+    "&_csrf=" + encodeURIComponent(agreeing.csrf()),
+    { Host: new URL(origin).host, Origin: origin });
+  count("a Host that agrees with the authority is an ordinary request and still signs in",
+    agreed.status === 302, agreed.status + " " + agreed.body.slice(0, 200));
+
+  return browserSide;
+}
+
+// The cookie posture a browser is told to keep, read over the version a
+// browser negotiates.
+//
+// The `__Host-` prefix is resolved from the request scheme rather than
+// from a constant, and the scheme reaches the framework differently over
+// the two versions: HTTP/1.1 carries it on the socket, HTTP/2 carries it
+// in `:scheme`. A prefix that resolved on one and not the other is a
+// cookie a browser silently drops, and a dropped double submit cookie is
+// every state change failing for a reason nothing reports.
+function testTheCookiePostureHoldsOverHttp2(page, landing) {
+  var issued = page.setCookie.filter(function (line) {
+    return String(line).indexOf("__Host-csrf=") === 0;
+  });
+  count("the double submit cookie carries the host prefix over HTTP/2 as well",
+    issued.length === 1,
+    JSON.stringify(page.setCookie.map(function (l) { return String(l).split(";")[0]; })));
+  if (issued.length === 1) {
+    var csrfAttributes = String(issued[0]);
+    count("it is Secure over HTTP/2, which the prefix requires",
+      /;\s*Secure/i.test(csrfAttributes), csrfAttributes.slice(-140));
+    count("it is scoped to the whole origin over HTTP/2",
+      /;\s*Path=\/(?:;|$)/i.test(csrfAttributes), csrfAttributes.slice(-140));
+    count("it carries no Domain attribute over HTTP/2",
+      !/;\s*Domain=/i.test(csrfAttributes), csrfAttributes.slice(-140));
+    count("and its value is the full width token the compare accepts",
+      /^__Host-csrf=[a-f0-9]{64}(?:;|$)/.test(csrfAttributes), csrfAttributes.slice(0, 90));
+  }
+
+  var session = landing.setCookie.filter(function (line) {
+    return String(line).indexOf("__Host-bp_session=") === 0;
+  });
+  count("signing in over HTTP/2 writes exactly one session cookie, under the host " +
+    "prefixed name", session.length === 1,
+    JSON.stringify(landing.setCookie.map(function (l) { return String(l).split(";")[0]; })));
+  if (session.length !== 1) return;
+
+  var attributes = String(session[0]);
+  count("the session cookie is Secure over HTTP/2, which the prefix requires",
+    /;\s*Secure/i.test(attributes), attributes.slice(-140));
+  count("it is HttpOnly, so no script on the page can read it",
+    /;\s*HttpOnly/i.test(attributes), attributes.slice(-140));
+  count("it is scoped to the whole origin, which the prefix requires",
+    /;\s*Path=\/(?:;|$)/i.test(attributes), attributes.slice(-140));
+  count("it carries no Domain attribute, which the prefix also requires",
+    !/;\s*Domain=/i.test(attributes), attributes.slice(-140));
+  count("and it is same site, so it does not ride a cross site navigation",
+    /;\s*SameSite=(Lax|Strict)/i.test(attributes), attributes.slice(-140));
 }
 
 // The one shape that reached past the token compare and the origin cross
@@ -541,7 +884,7 @@ async function testAnAutomationAgentIsRefused(origin, caPem) {
   // Four route classes, because the guard is mounted on the chain and a
   // guard on the rendered pages alone leaves the API and the probe open
   // to exactly the traffic it was mounted for.
-  var paths = ["/sign-in", "/mail/INBOX", "/jmap/session", "/healthz"];
+  var paths = ["/sign-in", "/mail?folder=INBOX", "/jmap/session", "/healthz"];
   for (var i = 0; i < paths.length; i += 1) {
     var answer = await robot.get(paths[i]);
     count("an automation agent is refused on " + paths[i],
@@ -626,16 +969,31 @@ function policyCarriesTrustedTypes(response, what) {
 // is a route that can write them without this one. The refusal bodies
 // are in the list for the same reason: an error path is the one nobody
 // looks at, and it renders into the same browser.
+// One policy, split into the directives it names, so two policies can be
+// compared directive by directive rather than as one string.
+function _directives(policy) {
+  var out = {};
+  String(policy).split(";").forEach(function (part) {
+    var text = part.trim();
+    if (text.length === 0) return;
+    var space = text.indexOf(" ");
+    if (space === -1) { out[text] = ""; return; }
+    out[text.slice(0, space)] = text.slice(space + 1).trim();
+  });
+  return out;
+}
+
 async function testEveryResponseClassRequiresTrustedTypes(reader, target) {
   policyCarriesTrustedTypes(await reader.get("/sign-in"), "a rendered page");
-  policyCarriesTrustedTypes(await reader.get("/mail/INBOX"), "an authenticated page");
+  var authenticated = await reader.get("/mail?folder=INBOX");
+  policyCarriesTrustedTypes(authenticated, "an authenticated page");
   policyCarriesTrustedTypes(await reader.get("/static/blamepost.css"), "a static asset");
   policyCarriesTrustedTypes(await reader.get("/healthz"), "the health probe");
   policyCarriesTrustedTypes(await reader.get("/.well-known/mta-sts.txt"),
     "a well known document");
   policyCarriesTrustedTypes(await reader.get("/nowhere-at-all"), "a not found page");
   policyCarriesTrustedTypes(
-    await reader.post("/mail/INBOX/actions", "application/x-www-form-urlencoded",
+    await reader.post("/mail/actions?folder=INBOX", "application/x-www-form-urlencoded",
       "action=flag", { "X-CSRF-Token": "" }),
     "a refusal body");
   policyCarriesTrustedTypes(
@@ -645,13 +1003,230 @@ async function testEveryResponseClassRequiresTrustedTypes(reader, target) {
   // The one route in this application that writes a policy of its own,
   // which is where the directive is spelled out by hand and therefore
   // where it can be left out.
-  var widened = await reader.get("/mail/INBOX/" +
-    encodeURIComponent(target.objectId) + "?images=on");
+  var widened = await reader.get("/mail/" +
+    encodeURIComponent(target.objectId) + "?folder=INBOX&images=on");
   policyCarriesTrustedTypes(widened, "the response that widens the image policy");
   var widenedPolicy = String(widened.headers["content-security-policy"] || "");
   count("that response really is the widened one rather than the default",
     widenedPolicy.indexOf("img-src 'self' data: https:") !== -1,
     widenedPolicy.slice(0, 160));
+
+  // The widened policy is written out by hand, one directive at a time,
+  // beside a default the framework composes. Two policies written in two
+  // places drift, and the drift that matters is not the directive being
+  // widened: it is one of the other eleven arriving looser than the
+  // default and nobody reading past `img-src`. So the pair is compared
+  // directive by directive, and the reader asking to see the images buys
+  // exactly the images.
+  var defaultPolicy = String(authenticated.headers["content-security-policy"] || "");
+  var base = _directives(defaultPolicy);
+  var wide = _directives(widenedPolicy);
+  var baseNames = Object.keys(base).sort();
+  var wideNames = Object.keys(wide).sort();
+
+  count("the default policy was read, so the comparison below answers for something",
+    baseNames.length > 0, defaultPolicy.slice(0, 200));
+  count("asking for images adds no directive and drops none",
+    baseNames.join(" ") === wideNames.join(" "),
+    JSON.stringify([baseNames, wideNames]));
+
+  var moved = baseNames.filter(function (name) { return base[name] !== wide[name]; });
+  count("and exactly one directive says anything different, which is the image source",
+    moved.length === 1 && moved[0] === "img-src", JSON.stringify(moved));
+  count("every other directive is the default's, character for character",
+    moved.filter(function (name) { return name !== "img-src"; }).length === 0,
+    JSON.stringify(moved.map(function (n) { return n + ": " + base[n] + " -> " + wide[n]; })));
+
+  // What the widened `img-src` gained, and what it did not. `https:` is
+  // an image loading from wherever the sender pointed, which is what the
+  // reader asked for; a source expression admitting script is not.
+  count("the image source gained a transport and nothing that can run",
+    wide["img-src"] === base["img-src"] + " https:",
+    JSON.stringify([base["img-src"], wide["img-src"]]));
+  count("neither policy admits inline script, which is the fallback under every " +
+    "attribute the message body is screened for",
+    String(base["script-src"]).indexOf("unsafe-inline") === -1 &&
+    String(wide["script-src"]).indexOf("unsafe-inline") === -1 &&
+    String(base["script-src"]).indexOf("unsafe-eval") === -1 &&
+    String(wide["script-src"]).indexOf("unsafe-eval") === -1,
+    JSON.stringify([base["script-src"], wide["script-src"]]));
+}
+
+// ---- the message body a sender wrote ----------------------------------------
+
+// The conversation page is the one place this application interpolates
+// markup it did not build. Every other value is escaped on the way out;
+// the body of a message is not, because a message that renders as its own
+// source is not mail anybody can read. So the screening happens before the
+// value reaches the page, and this is where that is measured.
+//
+// It is measured over the WIRE, on a message that arrived through the
+// store, on the route a reader opens. The screening is composed in one
+// place and called from another, and every check that reads the policy
+// out of the source or calls the framework's sanitizer directly stays
+// green if the route stops reaching it: what those pin is the policy, and
+// what this pins is that the response carries it. Those are different
+// questions and the second is the one a reader is exposed to.
+//
+// The vectors are the encodings that have carried a scheme past a
+// sanitizer folding less than a browser does, plus the two differentials
+// that stop this from being satisfied by a page rendering nothing: an
+// ordinary off-site link in a body is legitimate mail and survives, and a
+// good target beside a dropped handler survives with the handler gone.
+
+var BODY_TAB = String.fromCharCode(9);
+var BODY_NUL = String.fromCharCode(0);
+
+// Attribute, value, for every attribute a browser resolves as a URL.
+function urlAttrsIn(html) {
+  var out = [];
+  var re = /\b(href|src|cite|action|formaction|poster|srcdoc|srcset)\s*=\s*"([^"]*)"/gi;
+  var m;
+  while ((m = re.exec(html)) !== null) out.push(m[1].toLowerCase() + "=" + m[2]);
+  return out;
+}
+
+// The rendered bodies on a conversation page, lifted out of the element
+// the template puts them in.
+function letterBodies(page) {
+  var html = String(page);
+  var out = [];
+  var re = /<div class="letter-body[^"]*">/g;
+  var m;
+  while ((m = re.exec(html)) !== null) {
+    var from = m.index + m[0].length;
+    var depth = 1;
+    var at = from;
+    while (depth > 0) {
+      var open  = html.indexOf("<div", at);
+      var close = html.indexOf("</div>", at);
+      if (close === -1) break;
+      if (open !== -1 && open < close) { depth += 1; at = open + 4; continue; }
+      depth -= 1;
+      at = close + 6;
+      if (depth === 0) out.push(html.slice(from, close));
+    }
+  }
+  return out;
+}
+
+var HOSTILE_BODIES = [
+  ["a scripting scheme on a link",
+    "<a href=\"javascript:alert(1)\">click</a>", "click"],
+  ["a document inlined as a scheme",
+    "<a href=\"data:text/html,<script>alert(1)</script>\">click</a>", "click"],
+  ["a scripting scheme on an image",
+    "<img src=\"javascript:alert(1)\">", ""],
+  ["a character reference for a tab inside the scheme",
+    "<a href=\"java&#9;script:alert(1)\">click</a>", "click"],
+  ["a literal tab inside the scheme",
+    "<a href=\"java" + BODY_TAB + "script:alert(1)\">click</a>", "click"],
+  ["a null inside the scheme",
+    "<a href=\"java" + BODY_NUL + "script:alert(1)\">click</a>", "click"],
+  ["a named reference for the colon",
+    "<a href=\"javascript&colon;alert(1)\">click</a>", "click"],
+  ["a script element of its own",
+    "<script>alert(1)</script>", ""],
+  ["a document redirected wholesale",
+    "<base href=\"https://evil.example/\">", ""],
+  ["an animation retargeting a good link",
+    "<svg><a href=\"/ok\"><animate attributeName=\"href\" values=\"javascript:alert(1)\"/>" +
+    "</a></svg>", ""],
+  ["a nested document",
+    "<iframe srcdoc=\"<script>alert(1)</script>\"></iframe>", ""],
+];
+
+function htmlBodyMessage(recipient, index, payload) {
+  return Buffer.from(
+    "Message-ID: <body" + index + "@example.net>\r\n" +
+    "From: Sender <sender@example.net>\r\n" +
+    "To: <" + recipient + ">\r\n" +
+    "Subject: body vector " + index + "\r\n" +
+    "Date: Sat, 22 Aug 2026 09:00:00 +0000\r\n" +
+    "MIME-Version: 1.0\r\n" +
+    "Content-Type: text/html; charset=utf-8\r\n" +
+    "\r\n" + payload + "\r\n", "utf8");
+}
+
+function textBodyMessage(recipient, payload) {
+  return Buffer.from(
+    "Message-ID: <bodytext@example.net>\r\n" +
+    "From: Sender <sender@example.net>\r\n" +
+    "To: <" + recipient + ">\r\n" +
+    "Subject: body vector text\r\n" +
+    "Date: Sat, 22 Aug 2026 09:00:00 +0000\r\n" +
+    "MIME-Version: 1.0\r\n" +
+    "Content-Type: text/plain; charset=utf-8\r\n" +
+    "\r\n" + payload + "\r\n", "utf8");
+}
+
+// The markup a plain text body is turned into. It is the SECOND producer
+// feeding the same un-escaped tag, it is assembled by concatenation, and
+// the only thing between a sender's angle bracket and the page is the
+// escape in the middle of that concatenation.
+var TEXT_BODY_PAYLOAD =
+  "<script>alert(1)</script> & \"quoted\" <a href=\"javascript:alert(2)\">x</a>";
+
+async function testAHostileMessageBodyRendersInert(reader, bodies) {
+  count("the vectors reached the store, so this section answers for something",
+    bodies.length === HOSTILE_BODIES.length,
+    bodies.length + " of " + HOSTILE_BODIES.length);
+
+  for (var i = 0; i < bodies.length; i += 1) {
+    var vector = HOSTILE_BODIES[i];
+    var at = "/mail/" + encodeURIComponent(bodies[i].objectId) + "?folder=INBOX";
+
+    var page = await reader.get(at);
+    var rendered = letterBodies(page.body).join("");
+    count("the reader's page carries a rendered body for " + vector[0],
+      page.status === 200, page.status + " " + rendered.slice(0, 120));
+    count("a message body cannot reach the page with " + vector[0],
+      urlAttrsIn(rendered).length === 0, JSON.stringify(rendered));
+    count("and nothing the sender wrote survives as markup the browser would run: " +
+      vector[0],
+      rendered.indexOf("<script") === -1 && rendered.indexOf("javascript:") === -1 &&
+      rendered.indexOf("srcdoc") === -1 && rendered.indexOf("<base") === -1,
+      JSON.stringify(rendered));
+    if (vector[2].length > 0) {
+      count("while what the sender actually wrote is still readable: " + vector[0],
+        rendered.indexOf(vector[2]) !== -1, JSON.stringify(rendered));
+    }
+
+    // The reader asking to see the images widens the tag set. It must not
+    // widen the schemes, and this is the route that writes its own
+    // response, so it is driven rather than assumed to share the first.
+    var shown = await reader.get(at + "?images=on");
+    var shownBody = letterBodies(shown.body).join("");
+    count("asking for the images does not re-admit " + vector[0],
+      urlAttrsIn(shownBody).length === 0, JSON.stringify(shownBody));
+  }
+}
+
+// The differentials. A surface that rendered every body as nothing would
+// satisfy every check above and would also be a mail client that cannot
+// show mail.
+async function testAnOrdinaryMessageBodyStillRenders(reader, ordinary, handler, textObjectId) {
+  var page = await reader.get("/mail/" + encodeURIComponent(ordinary) + "?folder=INBOX");
+  var rendered = letterBodies(page.body).join("");
+  count("a message may still link off site, which is what ordinary mail does",
+    rendered.indexOf("href=\"https://example.net/page\"") !== -1, JSON.stringify(rendered));
+
+  var beside = await reader.get("/mail/" + encodeURIComponent(handler) + "?folder=INBOX");
+  var besideBody = letterBodies(beside.body).join("");
+  count("a handler beside a good target is dropped and the target is kept",
+    besideBody.indexOf("href=\"/ok\"") !== -1 &&
+    besideBody.toLowerCase().indexOf("onclick") === -1 &&
+    besideBody.indexOf("style") === -1, JSON.stringify(besideBody));
+
+  // The plain text path reaches the same un-escaped tag by another road.
+  var text = await reader.get("/mail/" + encodeURIComponent(textObjectId) + "?folder=INBOX");
+  var textBody = letterBodies(text.body).join("");
+  count("a plain text body reaches the page as text rather than as markup",
+    textBody.indexOf("&lt;script&gt;") !== -1 && textBody.indexOf("<script") === -1,
+    JSON.stringify(textBody));
+  count("and every character the markup parser reads is escaped in it",
+    textBody.indexOf("&amp;") !== -1 && textBody.indexOf("&quot;") !== -1 &&
+    urlAttrsIn(textBody).length === 0, JSON.stringify(textBody));
 }
 
 // ---- encrypted sessions -----------------------------------------------------
@@ -679,7 +1254,7 @@ async function testTheSessionTokenOnTheWireIsSealed(landing, reader) {
 
   // And it still authenticates, so the sealing is a property of what
   // ships rather than of a cookie that stopped working.
-  var page = await reader.get("/mail/INBOX");
+  var page = await reader.get("/mail?folder=INBOX");
   count("the sealed cookie is what the reader is signed in with",
     page.status === 200, page.status + " " + String(page.location));
 }
@@ -791,6 +1366,28 @@ async function run() {
       inbox !== undefined && typeof stored.objectid === "string",
       JSON.stringify([inbox && inbox.name, stored && stored.objectid]));
 
+    // The bodies the sender wrote, delivered the way any other message
+    // arrives, so the page under test renders a row the store sealed
+    // rather than a string handed to a renderer.
+    var bodies = HOSTILE_BODIES.map(function (vector, index) {
+      return {
+        objectId: identity.mailbox.appendMessage("INBOX",
+          htmlBodyMessage(READER_ADDRESS, index, vector[1]),
+          { actor: { id: reader.id } }).objectid,
+      };
+    });
+    var ordinaryObjectId = identity.mailbox.appendMessage("INBOX",
+      htmlBodyMessage(READER_ADDRESS, "ordinary",
+        "<a href=\"https://example.net/page\">click</a>"),
+      { actor: { id: reader.id } }).objectid;
+    var handlerObjectId = identity.mailbox.appendMessage("INBOX",
+      htmlBodyMessage(READER_ADDRESS, "handler",
+        "<a href=\"/ok\" onclick=\"alert(1)\" style=\"width:expression(alert(1))\">click</a>"),
+      { actor: { id: reader.id } }).objectid;
+    var textObjectId = identity.mailbox.appendMessage("INBOX",
+      textBodyMessage(READER_ADDRESS, TEXT_BODY_PAYLOAD),
+      { actor: { id: reader.id } }).objectid;
+
     await testTheSealedValuesWereReallyWritten(identity, reader.id);
 
     server = blamepost.create({
@@ -840,11 +1437,31 @@ async function run() {
     await testTheCsrfGateRefusesAStateChangeWithoutAToken(session, routes, target, agentHandle);
     await testAForeignOriginIsRefusedWithAValidToken(session, routes, origin);
     await testACrossSiteStateChangeIsRefused(session, routes, origin);
+    await testANativeFormSubmitIsAccepted(session, routes, origin, target, agentHandle);
+    await testTheServedPolicyLeavesTheOriginReadable(session, origin, material.caPem);
+
+    // Everything above rides HTTP/1.1. This drives the same journey over
+    // the version a browser negotiates against this listener, which is
+    // the only version a person's requests ever take.
+    var overHttp2 = await testTheJourneyHoldsOverTheVersionABrowserNegotiates(
+      origin, material.caPem, target);
+    testTheCookiePostureHoldsOverHttp2(
+      await browser.browserAt(origin, { ca: material.caPem, http2: true })
+        .readCsrf("/sign-in").then(function (r) { return r.page; }),
+      await browser.browserAt(origin, { ca: material.caPem, http2: true })
+        .signIn(READER_ADDRESS, READER_PASSWORD));
+    count("the HTTP/2 reader is still signed in after the differentials, so the " +
+      "refusals above did not take the session with them",
+      (await overHttp2.get("/mail?folder=INBOX")).status === 200, "checked");
+
     await testAnAuthorizationHeaderDoesNotOpenACrossSitePath(session, routes, target, agentHandle);
     await testACookielessBearerClientIsStillServed(origin, material.caPem, reader.id);
     await testACookielessBearerClientIsStillHeldToTheOriginCheck(origin, material.caPem);
     await testTheSameActionWorksWithItsToken(session, target, agentHandle);
     await testEveryResponseClassRequiresTrustedTypes(session, target);
+    await testAHostileMessageBodyRendersInert(session, bodies);
+    await testAnOrdinaryMessageBodyStillRenders(session, ordinaryObjectId, handlerObjectId,
+      textObjectId);
     await testAnAutomationAgentIsRefused(origin, material.caPem);
 
     await server.stop({ timeoutMs: SHUTDOWN_TIMEOUT_MS });

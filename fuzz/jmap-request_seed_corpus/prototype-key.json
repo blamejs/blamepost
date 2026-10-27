@@ -1,0 +1,1 @@
+{"using":["urn:ietf:params:jmap:mail"],"methodCalls":[["Email/get",{"accountId":"a1","__proto__":{"polluted":true}},"c0"]],"__proto__":{"polluted":true}}

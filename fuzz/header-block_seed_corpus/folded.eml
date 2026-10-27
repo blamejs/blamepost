@@ -1,0 +1,7 @@
+From: "A very long display name that a client folds"
+ <alice@example.com>
+Subject: folded
+	across two lines
+Sender: bob@example.com
+
+body

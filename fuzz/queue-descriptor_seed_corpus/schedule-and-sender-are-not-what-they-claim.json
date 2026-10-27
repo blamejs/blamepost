@@ -1,0 +1,15 @@
+{
+  "id": "0123456789abcdef0123456789abcdef",
+  "from": { "address": "alice@example.com" },
+  "recipient": ["bob@example.net", "carol@example.net"],
+  "attempt": -1,
+  "nextAttemptAt": "whenever",
+  "reason": null,
+  "reasonCode": 4.7,
+  "requireTls": "yes",
+  "held": "no",
+  "heldBecause": 7,
+  "queuedAt": "1750000000000",
+  "attemptsRecorded": null,
+  "history": {}
+}

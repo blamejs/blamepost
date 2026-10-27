@@ -1,0 +1,26 @@
+{
+  "id": "0123456789abcdef0123456789abcdef",
+  "from": "alice@example.com",
+  "recipient": "bob@example.net",
+  "attempt": 999,
+  "nextAttemptAt": 1750000000000,
+  "reason": "451 4.4.1 connection timed out",
+  "reasonCode": "4.4.1",
+  "requireTls": false,
+  "held": false,
+  "heldBecause": "",
+  "queuedAt": 1749000000000,
+  "attemptsRecorded": 999,
+  "history": [
+    {
+      "at": 1749999000000,
+      "outcome": "deferred",
+      "attempt": 998,
+      "mxHost": "mx1.example.net",
+      "reason": "451 4.4.1 connection timed out",
+      "reasonCode": "4.4.1",
+      "requireTls": false,
+      "held": false
+    }
+  ]
+}

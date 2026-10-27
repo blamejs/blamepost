@@ -64,6 +64,12 @@ var BOB_PASSWORD     = "another quiet lantern 7715";
 // into something that happens to work.
 var FOREIGN_ORIGIN = "https://attacker.example:1";
 
+// The TLS port the configuration names when BLAMEPOST_HTTPS_PORT is not
+// set. The listener in this file binds an ephemeral port, and the
+// allowlist is built from the configured port, which is the one a
+// browser's Origin names.
+var CONFIGURED_HTTPS_PORT = 8443;
+
 // The capability a conforming client looks for before it prefers the
 // socket over polling, and the two urls the session document carries
 // beside it.
@@ -106,7 +112,10 @@ function wsConnect(port, opts) {
   opts = opts || {};
   var path = typeof opts.path === "string" ? opts.path : "/jmap/ws";
   var key  = nodeCrypto.randomBytes(16).toString("base64");
-  var host = LOOPBACK + ":" + port;
+  // The Host header a browser sends names the address it dialed, which
+  // is the public name rather than the loopback socket this client
+  // connects to.
+  var host = typeof opts.host === "string" ? opts.host : LOOPBACK + ":" + port;
 
   var lines = [
     "GET " + path + " HTTP/1.1",
@@ -526,13 +535,13 @@ async function testRequestFramesDispatchOverTheSocket(conn, accountId, otherAcco
 
 // Enable push and wait until the server has actually acted on it.
 //
-// The frame is written and forgotten otherwise, and a subscription
-// records the account's state as it stands when the subscription is
-// made, so a write that lands in the gap is folded into the baseline
+// The frame is written and forgotten otherwise, and a push subscription
+// records the account's state as it stands when the push subscription
+// is made, so a write that lands in the gap is folded into the baseline
 // and never reported as a change. Frames are processed in order, so a
 // Response to a Request sent after the enable is the barrier: the
 // dispatch behind it settles later than the subscribe the enable
-// started, which makes the arrival of the Response proof that the
+// started, which makes the arrival of the Response proof that the push
 // subscription exists.
 async function enablePush(conn, requestId, accountId, dataTypes) {
   conn.send({
@@ -551,7 +560,7 @@ async function enablePush(conn, requestId, accountId, dataTypes) {
     }).length > 0;
   }, {
     timeoutMs: 5000,
-    label:     "jmap-websocket-push: the subscription for " + requestId + " is in place",
+    label:     "jmap-websocket-push: the push subscription for " + requestId + " is in place",
   });
 }
 
@@ -640,7 +649,7 @@ async function testPushDisableStopsTheChannel(conn, identity, alice) {
   conn.send({ "@type": "WebSocketPushDisable" });
   // The same barrier the enable needs, for the same reason: a frame
   // this client has written is not a frame the server has read, and an
-  // append that lands in that gap would be reported through a
+  // append that lands in that gap would be reported through a push
   // subscription that was still live when it happened.
   conn.send({
     "@type": "Request",
@@ -706,7 +715,7 @@ async function testTheClientCanNarrowWhatItHearsAbout(port, cookie, advertised, 
   await enablePush(quiet, "quiet", alice.id, ["CalendarEvent"]);
 
   identity.mailbox.appendMessage("INBOX",
-    message("Arrival for a narrowed subscription", alice.address, "email only"),
+    message("Arrival for a narrowed push subscription", alice.address, "email only"),
     { actor: { id: alice.id } });
 
   var pushed = await helpers.waitUntil(function () {
@@ -714,12 +723,12 @@ async function testTheClientCanNarrowWhatItHearsAbout(port, cookie, advertised, 
     return seen.length > 0 ? seen : false;
   }, {
     timeoutMs: PUSH_BUDGET_MS,
-    label:     "jmap-websocket-push: the narrowed subscription hears about the arrival",
+    label:     "jmap-websocket-push: the narrowed push subscription hears about the arrival",
   });
   var types = Object.keys(pushed[0].changed[alice.id] || {});
-  count("a subscription narrowed to one type is told about that type alone",
+  count("a push subscription narrowed to one type is told about that type alone",
     types.join(",") === "Email", types.join(","));
-  count("a subscription naming nothing this server tracks is told nothing",
+  count("a push subscription naming nothing this server tracks is told nothing",
     quiet.typed("StateChange").length === 0,
     JSON.stringify(quiet.typed("StateChange")));
 
@@ -742,7 +751,7 @@ async function testTheUpgradeAlsoCompletesOverTls(port, ca, hostname, alice, pas
   var conn = await wsConnect(port, {
     path:       "/jmap/ws",
     cookie:     reader.cookies.header(),
-    origin:     "https://" + LOOPBACK + ":" + port,
+    origin:     "https://" + hostname + ":" + CONFIGURED_HTTPS_PORT,
     ca:         ca,
     servername: hostname,
   });
@@ -770,6 +779,47 @@ async function testTheUpgradeAlsoCompletesOverTls(port, ca, hostname, alice, pas
     replies[0].methodResponses[0][1].list.length === 6,
     String(replies[0].methodResponses[0][1].list.length));
   conn.stop();
+  return reader;
+}
+
+// The origins a signed-in browser may open the socket from. The server
+// accepts `https://` at BLAMEPOST_HOSTNAME on the default port and on
+// BLAMEPOST_HTTPS_PORT, refuses every other Origin with 403, and accepts
+// an upgrade that carries no Origin header. Each case sends the Host
+// header a browser at that origin would send, so a host-only same-origin
+// comparison would accept the two cleartext origins.
+async function testOnlyThePublicTlsOriginsMayUpgrade(port, ca, hostname, reader) {
+  var cookie = reader.cookies.header();
+  var cases = [
+    { label: "a cleartext page at the public name and port",
+      host: hostname + ":" + CONFIGURED_HTTPS_PORT,
+      origin: "http://" + hostname + ":" + CONFIGURED_HTTPS_PORT, upgrades: false },
+    { label: "a cleartext page at the public name on the default port",
+      host: hostname, origin: "http://" + hostname, upgrades: false },
+    { label: "a page on another site",
+      host: hostname, origin: "https://evil.example", upgrades: false },
+    { label: "the public TLS origin on the configured TLS port",
+      host: hostname + ":" + CONFIGURED_HTTPS_PORT,
+      origin: "https://" + hostname + ":" + CONFIGURED_HTTPS_PORT, upgrades: true },
+    { label: "the public TLS origin on the default port, which a TLS terminator serves",
+      host: hostname, origin: "https://" + hostname, upgrades: true },
+    { label: "a client that sends no Origin header",
+      host: hostname, origin: undefined, upgrades: true },
+  ];
+  for (var i = 0; i < cases.length; i += 1) {
+    var conn = await wsConnect(port, {
+      path: "/jmap/ws", cookie: cookie, origin: cases[i].origin, host: cases[i].host,
+      ca: ca, servername: hostname,
+    });
+    if (cases[i].upgrades) {
+      count("the upgrade completes for " + cases[i].label,
+        conn.upgraded === true, "status " + conn.status);
+    } else {
+      count("the upgrade is refused with 403 for " + cases[i].label,
+        conn.upgraded === false && conn.status === 403, "status " + conn.status);
+    }
+    if (conn.upgraded === true) conn.stop();
+  }
 }
 
 function threw(fn) {
@@ -868,6 +918,10 @@ async function run() {
       certFile: material.certFile, keyFile: material.keyFile }));
     var ports  = await listener.start();
     var origin = "http://" + LOOPBACK + ":" + ports.http;
+    // The Origin a signed-in browser sends on the upgrade. Every upgrade
+    // in this file carries the public TLS origin, whichever socket it
+    // dials, because the server accepts no other.
+    var pageOrigin = "https://" + HOSTNAME + ":" + CONFIGURED_HTTPS_PORT;
 
     var reader = browser.browserAt(origin);
     var landed = await reader.signIn("alice@example.com", ALICE_PASSWORD);
@@ -879,12 +933,12 @@ async function run() {
     var cookie = reader.cookies.header();
 
     await testAnOrdinaryRequestSaysToUpgrade(reader, advertised);
-    await testAnUnauthenticatedUpgradeIsRefused(ports.http, advertised, origin);
+    await testAnUnauthenticatedUpgradeIsRefused(ports.http, advertised, pageOrigin);
     await testAForeignOriginIsRefused(ports.http, cookie, advertised);
-    await testASocketWithoutTheSubprotocolIsClosed(ports.http, cookie, advertised, origin);
+    await testASocketWithoutTheSubprotocolIsClosed(ports.http, cookie, advertised, pageOrigin);
     await testRefusalsAreRecorded();
 
-    socket = await testTheAdvertisedUrlIsTheOneThatUpgrades(ports.http, cookie, doc, origin);
+    socket = await testTheAdvertisedUrlIsTheOneThatUpgrades(ports.http, cookie, doc, pageOrigin);
     if (socket !== null) {
       await testRequestFramesDispatchOverTheSocket(socket, alice.id, bob.id);
 
@@ -896,7 +950,7 @@ async function run() {
       var otherLanded = await otherReader.signIn("bob@example.com", BOB_PASSWORD);
       check("the second account holds a session of its own", otherLanded.status === 302);
       otherSocket = await wsConnect(ports.http, {
-        path: advertised, cookie: otherReader.cookies.header(), origin: origin });
+        path: advertised, cookie: otherReader.cookies.header(), origin: pageOrigin });
       count("the second account completes an upgrade of its own",
         otherSocket.upgraded === true, "status " + otherSocket.status);
 
@@ -904,7 +958,7 @@ async function run() {
         socket, otherSocket, identity, alice, bob);
       await testPushDisableStopsTheChannel(socket, identity, alice);
       await testTheClientCanNarrowWhatItHearsAbout(
-        ports.http, cookie, advertised, origin, identity, alice);
+        ports.http, cookie, advertised, pageOrigin, identity, alice);
       otherSocket.stop();
       otherSocket = null;
       socket.stop();
@@ -912,11 +966,13 @@ async function run() {
     }
 
     await testEventSourceServesTheSameChannel(ports.http, cookie, identity, alice);
-    await testTheUpgradeAlsoCompletesOverTls(
+    var tlsReader = await testTheUpgradeAlsoCompletesOverTls(
       ports.https, material.caPem, HOSTNAME, alice, ALICE_PASSWORD);
+    await testOnlyThePublicTlsOriginsMayUpgrade(
+      ports.https, material.caPem, HOSTNAME, tlsReader);
 
     await testTheDrainClosesTheSocketsItUpgraded(
-      listener, ports.http, cookie, advertised, origin);
+      listener, ports.http, cookie, advertised, pageOrigin);
     listener = null;
   } finally {
     if (socket !== null) socket.stop();

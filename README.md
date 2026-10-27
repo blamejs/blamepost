@@ -6,7 +6,7 @@
 
 <a href="https://github.com/blamejs/blamepost/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/blamejs/blamepost/ci.yml?branch=main&label=CI" alt="CI status"></a>
 <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
-<a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D24.19.0-2ea043" alt="Node.js 24.19.0 or newer"></a>
+<a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D24.22.1-2ea043" alt="Node.js 24.22.1 or newer"></a>
 <a href="https://slsa.dev"><img src="https://slsa.dev/images/gh-badge-level3.svg" alt="SLSA Level 3"></a>
 <a href="#vendoring"><img src="https://img.shields.io/badge/runtime%20deps-0-2ea043" alt="Zero runtime dependencies"></a>
 <a href="#security"><img src="https://img.shields.io/badge/crypto-PQC--first-d946ef" alt="PQC-first cryptography"></a>
@@ -30,7 +30,7 @@ on npm underneath it.
 **Status:** pre-1.0. The surface is still moving. Before upgrading across more
 than a few patches, read the notes for the versions you are skipping in
 [CHANGELOG.md](CHANGELOG.md). [ROADMAP.md](ROADMAP.md) marks every capability as
-shipped, targeted, planned or under design, so what is present today and what is
+shipped, targeted, accepted or under design, so what is present today and what is
 still coming are both legible.
 
 ## Quick start
@@ -101,20 +101,26 @@ Three of those need explaining before the first boot:
   have to exist before the first boot. Put the pair in the data volume's `tls/`
   folder, from certbot, lego, your own authority, or wherever your certificates
   come from now. Every mail listener requires TLS and none has a plaintext mode,
-  so a server with no certificate has nothing to start; the browser port on 8080
-  is the one that stays cleartext, for the health check and a proxy in front, and
-  the session cookie is only ever sent back over TLS. A renewal written to those two
-  paths is picked up in place: the mail listeners and the browser interface both
-  present the new certificate without a restart, and the health probes report a
-  certificate that is running out so a renewal that stopped is found before mail
-  is.
+  so a server with no certificate has nothing to start. The browser surface
+  answers on 8443 from that same pair and on 8080 in the clear, and 8080 is there
+  for the container health check and for a proxy in front. This server accepts a
+  password when the connection is TLS, when a proxy named in
+  `BLAMEPOST_TRUSTED_PROXIES` states that the browser's connection was, or when
+  the peer is on the loopback interface, and it refuses one otherwise. A request
+  published out of a container reaches the server from the bridge gateway rather
+  than over loopback, so 8443 is the port to sign in on. A renewal written to
+  those two paths is picked up in place: the mail listeners and the browser
+  interface both present the new certificate without a restart, and the health
+  probes report a certificate that is running out so a renewal that stopped is
+  found before mail is.
 
 The container comes up with no accounts in it, and it reports itself **degraded
 until you add one**. That is expected rather than a fault: port 25 withholds
 itself while no domain is hosted, because a server accepting mail for recipients
 it knows nothing about would be collecting a stranger's mail. Everything else is
-bound and serving, `/healthz` answers 200, and only `/readyz` refuses, so nothing
-restarts the container while you finish setting it up.
+bound and serving, and both probes answer 200 with a verdict of `degraded` that
+names the withheld listener and the reason, so nothing restarts the container or
+stops routing to it while you finish setting it up.
 
 `blamepost init` is the command that creates the administrator, and it is the one
 step between a running server and a server you can sign in to. It is also the only command that creates an
@@ -135,9 +141,10 @@ password would leave the server choosing a credential and writing it to a log,
 and a log is not where a password belongs. Setting one without the other is
 refused at start rather than half-honored.
 
-Once `init` has run, webmail and admin are on `http://localhost:8080`. Sign in
-as the address you passed it, then add further domains and accounts from the
-admin UI or the CLI:
+Once `init` has run, webmail and admin are on port 8443 over HTTPS, at the name
+the certificate covers: `https://mx.example.com:8443` for the settings above.
+Sign in as the address you passed it, then add further domains and accounts from
+the admin UI or the CLI:
 
 ```bash
 docker exec blamepost node bin/blamepost.js domain add example.com
@@ -185,10 +192,15 @@ docker compose --profile tls  up -d   # a reverse proxy in front of the web UI
 Neither is needed for mail to flow. Each attaches through an operator-supplied
 endpoint rather than being bundled into the server.
 
+The `tls` profile terminates TLS and reaches the web port in cleartext, so set
+`BLAMEPOST_TRUSTED_PROXIES` to the range it reaches the server from before
+anyone signs in through it. Without that, the browser is on HTTPS while this
+server reads its own socket as cleartext, and the sign-in post is refused.
+
 ### Without a container
 
 The server is a plain Node process and runs directly on a host with Node.js
-24.19.0 or newer:
+24.22.1 or newer:
 
 ```bash
 git clone https://github.com/blamejs/blamepost.git
@@ -204,6 +216,11 @@ node bin/blamepost.js serve --data-dir ./data
 
 The vendor step is required on a fresh clone. `lib/vendor/blamejs/` is not
 committed, and nothing boots until it is populated.
+
+A browser on that same host reaches this process over loopback, so
+`http://localhost:8080` takes a password there. Port 8443 takes one from any
+address, and a browser that reaches it by a name the certificate does not cover
+warns before it loads the page.
 
 Every command needs `BLAMEPOST_HOSTNAME` and `BLAMEPOST_VAULT_PASSPHRASE`, and
 refuses to run without them rather than picking a value for you. `serve`
@@ -226,7 +243,7 @@ on by default except POP3.
 | 25 | Inbound MX over SMTP | RFC 5321, with SPF (RFC 7208), DKIM (RFC 6376), DMARC (RFC 9989) and ARC (RFC 8617) evaluated at DATA |
 | 587 | Submission + STARTTLS | RFC 6409, SASL AUTH per RFC 4954 |
 | 465 | Submission over implicit TLS | RFC 8314 |
-| 143 | IMAP + STARTTLS | RFC 9051 (IMAP4rev2), CONDSTORE / QRESYNC per RFC 7162 |
+| 143 | IMAP + STARTTLS | RFC 9051 (IMAP4rev2), CONDSTORE per RFC 7162, METADATA per RFC 5464 |
 | 110 | POP3 + STLS, off by default | RFC 1939, RFC 2595 |
 | 4190 | ManageSieve | RFC 5804 |
 | 8080 | HTTP for webmail, admin and JMAP | RFC 8620 and RFC 8621 on the JMAP path |
@@ -243,7 +260,94 @@ that one fronts the web interface.
 
 JMAP (RFC 8620 Core, RFC 8621 Mail) is mounted inside the web app at `/jmap`
 rather than on a port of its own, so it inherits the same authentication,
-session and security middleware as the rest of the HTTP surface.
+session and security middleware as the rest of the HTTP surface. That includes
+the transport rule above: a session is read only from a connection this server
+can establish is encrypted, so point a JMAP client at 8443 rather than at the
+cleartext port.
+
+Binary data (RFC 8620 section 6) is served in one direction. A client fills in
+the `downloadUrl` the session document names,
+`/jmap/download/{accountId}/{blobId}/{name}?accept={type}`, and fetches a
+message's raw bytes or one file off it. A blob id is a message identifier,
+which is the value `Email.blobId` carries, or that identifier followed by `-p`
+and the body part number of RFC 9051 section 6.4.5 with each dot written as a
+dash, so the file at part `1.2` downloads under `<message>-p1-2`. Every blob is
+served as `application/octet-stream` with `nosniff` whatever the sender declared
+and whatever `accept` asked for, disposed as an attachment under the name the
+message carries. Upload is not served: `uploadUrl` answers `503` with the type
+`urn:ietf:params:jmap:error:serverUnavailable`, the session document advertises
+`maxSizeUpload` as 0, and a client that uploads an attachment before sending
+fails at that step. IMAP `FETCH` returns the same bytes. ROADMAP.md tracks blob
+upload.
+
+**Whether a message carries files** is recorded on the message when it is filed,
+as the IMAP keyword `$HasAttachment` or `$HasNoAttachment`. `hasAttachment` on
+JMAP `Email/get` is read from that mark rather than derived per request, an IMAP
+client sees the keyword in `FETCH FLAGS`, and the folder listing marks the rows
+that have one. A message above the 8 MiB read bound is not opened, so it records
+neither keyword: the listing says the answer is not known for it and
+`hasAttachment` answers true, which RFC 8621 §4.1.4 leaves to the server and
+which hides no file. Both keywords are server-set, so `Email/set` and IMAP
+`STORE` refuse to write either. `blamepost attachments backfill` records the mark
+for mail that was already on the volume.
+
+**Which files a message carries** is answered by `Email/get` in the `attachments`
+list of RFC 8621 §4.1.4, to a call that names `attachments` in `properties`. Each
+part carries `partId`, `blobId`, `size`, `name`, `type`, `charset`, `disposition`,
+`cid`, `language` and `location`, so a client takes a blob id out of the answer
+rather than building one from the grammar above. A call that does not name the
+property carries no list: building one opens each message and walks its
+structure, and one call may name 50 identifiers against the 8 MiB read bound. A
+message with no file answers an empty list; a message above that bound carries no
+`attachments` property at all. `headers`, `subParts` and `bodyProperties` are not
+served, and ROADMAP.md tracks `bodyStructure`, `textBody`, `htmlBody` and
+`bodyValues`.
+
+**The mailbox tree** is the same one over JMAP as over IMAP. `Mailbox/get` gives
+each mailbox a `parentId` naming the level above it and a `name` carrying the
+last level alone, as RFC 8621 §2 requires, and every `parentId` in an answer
+names another mailbox in that answer. A level that no mailbox answers to, which
+is what IMAP `DELETE` leaves listed as `\NonExistent \HasChildren`, is answered
+with every right false. The session document advertises `maxMailboxDepth` as
+`null`, which RFC 8621 §1.6.2 defines as no limit. What is capped is the length
+of a name, which `maxSizeMailboxName` reports, and the 1000 mailboxes one account
+may hold. A mailbox id is the full path, which is the value `Email/query` takes
+in `inMailbox`.
+
+**IMAP `CREATE`** makes a mailbox for the account that sent it, so a client's new
+folder control works. A trailing `/` is the declaration RFC 9051 §6.3.4 describes
+and is not part of the name created; a `/` inside the name creates the superior
+levels it needs, and each of them is selectable. A name that is already there is
+refused with `[ALREADYEXISTS]`, a name this server will not keep with `[CANNOT]`,
+and an account holding the 1000 mailboxes one account may have with `[LIMIT]`. A
+mailbox name is screened before it is stored, so the screen a client's `SELECT`
+passes is the screen the stored name passed: the characters that make one name
+render as another are refused, and so is a level spelled `.` or `..`, which in a
+path names somewhere other than where it reads.
+
+**IMAP `DELETE`, `RENAME`, `SUBSCRIBE` and `UNSUBSCRIBE`** finish the folder
+controls. `DELETE` destroys the mail the mailbox holds through the same delete
+path as `EXPUNGE`, so a message a legal hold or the retention floor keeps stops
+the removal: the client is answered `NO [CONTACTADMIN]` with the count that was
+kept, and the mailbox is still there holding it. `INBOX` and the five mailboxes
+carrying an RFC 6154 role are refused, because this server files into those by
+name. Removing a name that has names underneath it leaves them where they are
+and leaves the level listed as `\NonExistent \HasChildren`. `RENAME` moves the
+inferior names with it, creates the superior levels the new name needs, and
+keeps the mailbox's `UIDVALIDITY`, so a client's cache survives; renaming
+`INBOX` moves the messages and leaves `INBOX` in place, empty, which RFC 9051
+§6.3.6 requires. A subscribed name outlives the mailbox it names, per §6.3.8, and
+`LIST` now matches its reference and patterns and serves the `SUBSCRIBED`,
+`CHILDREN` and `STATUS` options a client reads that set back with.
+
+**IMAP `SELECT` and `EXAMINE`** send the `PERMANENTFLAGS` response RFC 9051
+§6.3.2 requires, so a client knows which flags survive the session instead of
+assuming all of them do. A read-write selection names the five system flags plus
+`\*`, which says a client may invent keywords of its own and this server keeps
+them. A selection opened with `EXAMINE` names none, because §6.3.2 permits no
+permanent change from one and `STORE` from it is refused. The `$HasAttachment`
+and `$HasNoAttachment` keywords are in the `FLAGS` list and not in
+`PERMANENTFLAGS`: a message carries them, and a client may not set them.
 
 **IMAP `SEARCH`** answers flags and keywords, arrival dates, sizes, sequence and
 UID sets, `SUBJECT`, `FROM`, `TO`, the header fields the server stores, and any
@@ -258,14 +362,23 @@ sessions gets numbers that still mean something in the next one.
 
 **Webmail** is server-rendered: read, search, compose, reply, forward, move,
 flag, mark read, trash and purge, with client JavaScript as opt-in islands
-rather than the foundation. An account that holds more than one sending address
+rather than the foundation. A conversation lists the files each message carries,
+with the name, the declared media type and the size, and serves each one as a
+download: `application/octet-stream`, `Content-Disposition: attachment` and
+`nosniff` on every part whatever the sender declared it to be, so a part
+claiming `text/html` does not render as a page on this server's origin. A
+message above 8 MiB is not opened, so its files are neither listed nor served.
+An account that holds more than one sending address
 picks between them when it composes, and JMAP offers the same set as one
 identity per address. Sieve rules (RFC 5228) are not editable here: scripts are
 uploaded, listed, activated and deleted over ManageSieve on 4190, so an account
 holder who wants filtering needs a ManageSieve client, and `blamepost account
-sieve` reads back what an account holds. Creating, renaming and deleting a folder is not
-offered yet, on any protocol, and [ROADMAP.md](ROADMAP.md) carries the reason
-under Filing into a folder that does not exist.
+sieve` reads back what an account holds. Creating, renaming and deleting a
+folder is not offered in the browser; an IMAP client does all three. An account
+holder can open a folder at any depth, including one whose name carries the
+hierarchy delimiter or a backslash. The folder is named in the query string, so a
+mailbox page is `/mail?folder=<name>` and a message page is
+`/mail/<message>?folder=<name>`.
 
 **Admin** covers domains, accounts, aliases, quotas, DKIM selectors and their
 rotation, sign-in lockouts and the release of one, the outbound queue, and the
@@ -274,14 +387,38 @@ what changed, when, how it came out, and who did it: a command-line invocation
 records the operating-system account and host it ran as, and a console action
 records the signed-in account. Delivery and the wire rows are deliberately
 different, because a message arriving from a stranger has a peer rather than a
-principal. Parsing DMARC and TLS-RPT reports into that surface is on the roadmap
-and is not in this release.
+principal. DMARC aggregate reports are parsed and shown per domain on the
+DMARC page. Parsing TLS-RPT reports into that surface is on the roadmap and
+is not in this release.
+
+**Reference** pages at `/wiki` cover every module and primitive in the running
+build: signature, status, options, examples, source location and the
+specifications each one cites, with an index of every cited RFC and standard.
+The server generates them from the documentation comments in `lib/`. A signed-in
+account can read them, and a visitor with no session can read them while the
+public site is published. [docs/operator-guide.md](docs/operator-guide.md)
+lists the paths and the cache header each page carries.
+
+**Sending credentials** are the shape an application takes when it sends under
+many local parts of one domain and holds no mailbox. `blamepost credential add`
+issues one scoped to a hosted domain, prints its token once and never again, and
+gives it a return path of `bounces+<id>@<domain>` so the bounces reach a mailbox
+you named rather than an address in the domain that holds none. Each carries two
+ceilings over a rolling window, one on messages and one on recipients, and a list
+of local parts it refuses that starts with `postmaster`, `abuse` and every
+mailbox in the domain holding the operator role. `blamepost credential list`,
+`blamepost credential show` and `blamepost credential bounces` resolve where each
+credential's bounces are actually landing, and answer while the server runs,
+which is what finds a bounce mailbox archived after the credential was issued.
+An application presents one on 587 or 465, signing in over SASL with the hosted
+domain as the user name, or posts JSON to `POST /api/send` on the browser port,
+which takes the token in an `Authorization: Bearer` header, requires an
+`Idempotency-Key` and binds no port of its own.
 
 **Outbound delivery** runs one path: MX lookup, MTA-STS policy enforcement
 (RFC 8461), DANE once you declare your resolver DNSSEC-validating (RFC 7672),
-retry with backoff, and DSN generation (RFC 3464). REQUIRETLS (RFC 8689) is not
-among them: the parameter does not reach the wire, and the setting that asks for
-it stops the boot rather than being accepted and ignored. Mail the server sends
+REQUIRETLS when you ask for it (RFC 8689), retry with backoff, and DSN generation
+(RFC 3464). Mail the server sends
 on its own behalf takes that same path, delivery status notifications included,
 and the reports that come back about it are read. A repository gate refuses a raw
 transport call anywhere in `lib/`, so no second, less careful sender exists.
@@ -321,14 +458,14 @@ found by your monitoring rather than by the person whose message never arrived.
 
 ## Requirements
 
-- **Node.js 24.19.0 or newer**, or Docker. Nothing is transpiled; the source in
+- **Node.js 24.22.1 or newer**, or Docker. Nothing is transpiled; the source in
   the repository is the code the runtime executes.
 - **A domain you control, with DNS access.** MX, SPF, DMARC, DKIM, MTA-STS and
   TLS-RPT records are operator-side prerequisites, not something the server can
   publish for you. The full recipe is in
   [docs/operator-guide.md](docs/operator-guide.md).
 - **Unfiltered outbound TCP/25.** Many hosting providers block it by default.
-  Confirm yours does not before you plan a migration.
+  Confirm yours does not before you schedule a migration.
 - **A public IP with matching forward and reverse DNS.** Receivers weigh this
   heavily, and some refuse mail without it.
 - **Inbound TCP/25, 587, 465, 143 and 4190** open at the firewall, plus 110 when
@@ -354,30 +491,41 @@ you it is missing.
 |---|---|---|
 | `BLAMEPOST_HOSTNAME` | *required* | Public hostname the MX listener announces, for example `mx.example.com`. Must match the MX record and the reverse DNS of the sending IP. |
 | `BLAMEPOST_VAULT_PASSPHRASE` | *required* | Seals DKIM private keys and account secrets in the data directory. No recovery if lost. |
-| `BLAMEPOST_DNS_ACKNOWLEDGED` | unset | Must be `1` before the MX listener binds. The operator's confirmation that this server's DNS posture is published. Each hosted domain is confirmed separately with `blamepost domain acknowledge`, so a domain added later does not inherit this one. |
+| `BLAMEPOST_DNS_ACKNOWLEDGED` | `false` | Must be `1` before the MX listener binds. The operator's confirmation that this server's DNS posture is published. Each hosted domain is confirmed separately with `blamepost domain acknowledge`, so a domain added later does not inherit this one. |
 | `BLAMEPOST_DATA_DIR` | `/var/lib/blamepost` | The single data volume: database, message blobs, outbound queue, sealed keys, certificates. |
 | `BLAMEPOST_CONFIG` | `/etc/blamepost/blamepost.config.json` | Optional config file. Anything set in the environment wins over it. |
 | `BLAMEPOST_HTTP_PORT` | `8080` | Webmail, admin and JMAP over HTTP. |
 | `BLAMEPOST_HTTPS_PORT` | `8443` | The same surface over HTTPS, when TLS terminates in-process. |
+| `BLAMEPOST_TRUSTED_PROXIES` | *nobody* | Address ranges of the reverse proxies whose `X-Forwarded-Proto` decides whether the browser reached this server over TLS. From any other peer the header is ignored. Set it when a proxy terminates TLS in front of `BLAMEPOST_HTTP_PORT`, as the `tls` compose profile does; without it, signing in through that proxy is refused. Entries need a mask, as in `["192.0.2.0/24"]`. |
 | `BLAMEPOST_ADMIN_EMAIL` | unset | Address of the administrator account. Read by `blamepost init`, which is the command that creates it, and by nothing else. |
 | `BLAMEPOST_ADMIN_PASSWORD` | unset | Password for that account, read by `blamepost init`. Omit it and `init` generates one and prints it once. Change it from the UI afterwards. |
 | `BLAMEPOST_TLS_CERT` | *required by `serve`* | Path to the certificate chain every listener presents. |
 | `BLAMEPOST_TLS_KEY` | *required by `serve`* | Path to the matching private key. It may be sealed with the vault passphrase; the loader unseals it in memory. |
+| `BLAMEPOST_PUBLIC_SITE_ENABLED` | `false` | Answer `/` with a public page describing blamepost, and `/wiki` with the reference wiki, rather than sending a visitor with no session to the sign-in page. It sets the posture this server boots with; the switch on the console overview page changes it while the server runs, and the console wins. With it off, `/robots.txt` asks crawlers to index nothing and there is no sitemap. |
 | `BLAMEPOST_POP3_ENABLED` | `false` | Bind the POP3 listener on 110, which negotiates TLS in band with STLS. Nothing binds 995 on any setting. Off unless you have clients that need it. |
-| `BLAMEPOST_LOG_LEVEL` | `info` | The lowest severity written to the log: `debug`, `info`, `warn`, `error` or `fatal`. |
+| `BLAMEPOST_LOG_LEVEL` | `info` | `debug` adds the entries this server writes about what it recovered from, and prints the stack behind a command that failed. `warn`, `error` and `fatal` are accepted and remove nothing: the info, warning and error entries are written at every level. |
 | `BLAMEPOST_PROFILE` | `strict` | How strictly the wire protocols judge a domain, a HELO name and a command line. `balanced` widens `strict` to accept punycode and non-latin scripts, which you need in order to receive mail from internationalized domains. |
 | `BLAMEPOST_POSTMASTER` | `mailer-daemon@<hostname>` | Envelope sender on every delivery status notification this server composes, and the address whose arriving mail is read for reports about this server's own sending. Point it at a real mailbox on a domain you host: the default is built from the MX hostname, which is usually not one, so those reports are refused at the recipient and never arrive. |
-| `BLAMEPOST_REQUIRE_TLS` | `false` | Whether every outbound envelope asks for REQUIRETLS (RFC 8689). This server cannot put that parameter on the wire, so turning it on stops the boot rather than being accepted and ignored: a protection that silently does not apply looks exactly like one that does. MTA-STS applies to every outbound message, and DANE once you declare your resolver DNSSEC-validating. [ROADMAP.md](ROADMAP.md) tracks it under REQUIRETLS. |
+| `BLAMEPOST_REQUIRE_TLS` | `false` | Whether every outbound envelope asks for REQUIRETLS (RFC 8689). With it on, the keyword goes on `MAIL FROM` for a peer that advertises the extension, and a peer that does not advertise it is not delivered to at all, which RFC 8689 §4.1 requires. Most receivers do not implement it, so leave it off unless your correspondents do. MTA-STS applies to every outbound message either way, and DANE once you declare your resolver DNSSEC-validating. |
 | `BLAMEPOST_MTA_STS_MODE` | `enforce` | Mode in the MTA-STS policy this server publishes. `testing` collects reports without asking senders to refuse delivery; `none` withdraws the policy. |
 | `BLAMEPOST_COMPLIANCE_POSTURE` | `none` | `soc2` sets a one year retention floor: a hard delete of anything younger is refused, for the account owner as much as for an administrator. Leave it at `none` unless that is the promise you mean to make. |
+| `BLAMEPOST_DMARC_FORENSIC_ENABLED` | `false` | Whether the per-message DMARC failure reports of RFC 6591, sent to the address your `ruf=` tag names, are stored. Turning it on stores personal data belonging to people who are not your users: the sending address, the envelope sender and the recipients of somebody else's message. The failing message itself is never stored whatever this is set to. |
+| `BLAMEPOST_DMARC_AGGREGATE_RETENTION_DAYS` | `30` | Days the counting from aggregate DMARC reports is kept. Between `1` and `400`. |
+| `BLAMEPOST_DMARC_FORENSIC_RETENTION_DAYS` | `7` | Days a stored forensic report is kept. Between `1` and `30`, and never longer than `BLAMEPOST_DMARC_AGGREGATE_RETENTION_DAYS`; a pair written the other way round stops the start. |
 | `BLAMEPOST_MTA_STS_MAX_AGE` | `604800` | Seconds a sender caches that policy. Between `86400` and `31557600`. |
 | `BLAMEPOST_SECURITY_TXT_EXPIRES` | one year from start | RFC 3339 timestamp after which the published `security.txt` stops being authoritative. A timestamp that has already passed is refused at start. |
+| `BLAMEPOST_ZONE_PROVIDER` | `none` | Which hosted DNS provider this server may edit records at. `none` and `cloudflare` are the two values. At `none` no credential is opened and nothing is sent to a DNS provider. |
+| `BLAMEPOST_ZONE_API_TOKEN` | unset | The provider API token, as this server's vault sealed it. An unsealed value is refused at start. Leave it unset to use the sealed token `blamepost zone token set` writes to the data volume; supplying both stops the start. |
+| `BLAMEPOST_ZONE_ALLOW_MX_WRITES` | `false` | Whether the zone writer may edit the `MX` record at a hosted domain's apex. Repointing `MX` moves delivery away from this server, which is the one change it cannot report on afterwards. |
+| `BLAMEPOST_ZONE_ENDPOINT` | unset | The provider API address the zone writer sends to, for a deployment whose outbound traffic goes through a proxy of its own. |
+| `BLAMEPOST_ZONE_ALLOW_INTERNAL_ENDPOINT` | `false` | Whether that address may resolve inside a private, loopback or link-local range. Setting it without an endpoint stops the start. |
 | `BLAMEPOST_LISTENERS` | *see below* | Which protocol listeners bind, and on which port and interface. |
 | `BLAMEPOST_LIMITS` | *see below* | The ceilings every listener holds against one source address: connections, connection rate, sign-in failures, refused recipients. The largest message accepted sits in the same setting and bounds one message on the two SMTP listeners. |
 | `BLAMEPOST_RELAY_ALLOWED_FOR` | *unset* | Declared and refused. This server does not relay for a source address, so a range written here stops the start rather than being ignored. Explained below. |
 | `BLAMEPOST_INBOUND` | *see below* | What the MX listener does with the SPF, DKIM and DMARC verdict it computes at the end of `DATA`. The ARC chain is evaluated at the same point and reported in `Authentication-Results`; it does not change what happens to the message. |
 | `BLAMEPOST_OUTBOUND_POLICY` | *see below* | MTA-STS and DANE posture this server demands of the peers it delivers to. |
 | `BLAMEPOST_OUTBOUND_RETRY` | *see below* | How long a deferred message stays in the spool before its sender is told it failed. |
+| `BLAMEPOST_OUTBOUND_SPOOL` | *see below* | How much undelivered outbound mail the spool holds before new mail is refused with a temporary code. A message count and a byte total, whichever is reached first. |
 | `BLAMEPOST_OUTBOUND_TIMEOUTS` | *see below* | How long an outbound attempt waits for an MX answer and for the peer itself. |
 | `BLAMEPOST_SECURITY_CONTACT` | `mailto:postmaster@<hostname>` | Contact URIs published at `/.well-known/security.txt`. |
 | `BLAMEPOST_SECURITY_POLICY_URL` | unset | Disclosure policy page named in that same file. |
@@ -393,11 +541,11 @@ reference, every variable in one table with its default and its effect.
 
 ### Settings that hold more than one value
 
-Ten of those carry structure. In the config file they are written as JSON,
+Eleven of those carry structure. In the config file they are written as JSON,
 because the file already is JSON. In the environment they are the same JSON on
 one line. Both go through the same checks, so the two forms cannot disagree
-about what is valid. Nine of the ten are below; the tenth, `relayAllowedFor`,
-is refused rather than honored and is covered after them.
+about what is valid. Ten of the eleven are below; the eleventh,
+`relayAllowedFor`, is refused rather than honored and is covered after them.
 
 ```json
 {
@@ -410,6 +558,7 @@ is refused rather than honored and is covered after them.
   "outboundPolicy":   { "mtaSts": "enforce", "dane": "opportunistic" },
   "outboundRetry":    { "maxAttempts": 35,
                         "backoffMs": [60000, 300000, 900000, 3600000, 14400000] },
+  "outboundSpool":    { "maxMessages": 10000, "maxBytes": 2147483648 },
   "outboundTimeouts": { "mxLookupMs": 10000, "perHostMs": 60000 },
   "securityContact":  [ "mailto:security@example.com" ],
   "securityPolicyUrl": [ "https://example.com/security" ],
@@ -426,8 +575,8 @@ BLAMEPOST_LIMITS='{"maxConcurrentConnectionsPerIp":64}'
 
 A listener you do not name keeps its documented port. `listeners` accepts
 `mx`, `submission`, `submissions`, `imap`, `pop3` and `managesieve`, each with
-`enabled`, `port` and `address`. A name or a field outside those is a typo, and
-it is refused rather than ignored.
+`enabled`, `port`, `address` and `maxLineBytes`. A name or a field outside
+those is a typo, and it is refused rather than ignored.
 
 `relayAllowedFor` names source ranges the MX listener would accept a recipient
 outside the hosted domains for, and setting it stops the start with a message
@@ -469,10 +618,12 @@ accepts `5` to `10000`; it bounds address enumeration rather than load, because
 a recipient refused at `RCPT` tells the peer whether a mailbox exists, and past
 the ceiling the listener answers `421` and closes rather than going on
 answering. `maxMessageBytes` ships at 50 MiB and accepts `65536` to
-`536870912`. A field you leave out keeps its shipped value.
-Per-command line lengths and idle timeouts are deliberately not settable: both
-have floors the mail RFCs require a server to meet, and a value under one of
-them refuses correct clients.
+`52428800`, so it lowers and does not raise: the sealed file holding one stored
+message is sixteen ninths of it, and the read path serving `BODY[]` opens at
+most 96 MiB. A field you leave out keeps its shipped value.
+Idle timeouts are not settable: they have floors the mail RFCs require a server
+to meet, and a value under one of them refuses correct clients. The longest
+command line a listener reads is set per listener as `maxLineBytes`.
 
 Anything the server cannot honor stops the start with a message naming the
 setting, where the value came from, and what was expected, down to the position
@@ -492,10 +643,54 @@ MTA-STS policy in `enforce` mode with its `_mta-sts` TXT id; a TLS-RPT
 aggregate-report endpoint; and forward-confirmed reverse DNS on the sending IP.
 Publish DANE/TLSA as well, but only when the zone is signed.
 
+Left alone, this server publishes none of it. It prints the records and you put
+them in the zone. Naming a hosted DNS provider in `BLAMEPOST_ZONE_PROVIDER` and
+sealing a token with `blamepost zone token set` adds four read-only commands
+over that: `blamepost zone preview` holds a zone up against the DKIM selector
+records this server expects to find in it, `blamepost zone verify` reads each one
+twice, from the provider and through a resolver, so a record that has not
+propagated yet is told apart from one that resolves to something else,
+`blamepost zone verify-token` asks the provider whether the sealed token is
+live, and `blamepost zone allowlist` prints the names and types a write may
+touch. It also lets the DMARC page in the administration console publish the
+`_dmarc` record for one hosted domain through that same credential. The
+setting names no provider by default, and at that default no credential is
+opened and nothing is sent to a DNS provider.
+
+The reports receivers send back to the `rua=` address in your DMARC record are
+read and kept. `blamepost reports list` gives the reading a policy is moved on,
+per domain: the volume counted, how much of it aligned, the sending addresses
+failing both alignments largest first, and which organizations reported and when.
+A hosted domain nothing has reported on says so rather than printing zeroes, and
+reports whose carrier this server could not authenticate are left out of the
+counting with the volume they held printed beside it. `blamepost reports show`
+opens one report, and `blamepost reports forget` answers an erasure request from
+somebody who has no account here.
+
+That counting is what decides a policy step. `blamepost dmarc status` says whether
+a domain's evidence carries the move from `p=none` to `p=quarantine`, and from
+there to `p=reject`, with every rule printed beside what the domain has and the
+`_dmarc` record text for all three levels either way. A sending address failing
+both alignments holds the step until `blamepost dmarc mark` records what it is,
+and the reporters contradict a claim that an address was fixed if it keeps
+failing. Stepping down is not gated: `blamepost dmarc preview` prints the weaker
+record without opening the data volume, so the way back is available on a server
+that is down.
+
+The DMARC page in the administration console is where that reading becomes a
+record. With a hosted DNS provider named, it shows the change set publishing a
+level would make at `_dmarc.<domain>`, and publishes it once the operator
+confirms against that diff. The zone is read again at the moment of the write, so
+a record that moved underneath stops it; afterwards the record is read back at
+the provider and through a resolver, and the two disagreeing is reported rather
+than read as a clean publish. Without a provider named, the page reads reports
+and you put the record in the zone yourself.
+
 [docs/operator-guide.md](docs/operator-guide.md) has the record-by-record
 recipe with the exact values, followed by day-2 operations: account and domain
-management, DKIM rotation, queue inspection, deletion and erasure, preservation
-orders, backup and restore, and incident response.
+management, DKIM rotation, reading a zone at a hosted DNS provider, reading what
+peers report about your domains, queue inspection, deletion and erasure,
+preservation orders, backup and restore, and incident response.
 
 ## Vendoring
 
@@ -536,7 +731,10 @@ project's to make: ML-KEM-1024 for key agreement, ML-DSA-65 for release
 signatures, XChaCha20-Poly1305 for sealing, SHAKE256 and SHA3-512 for digests,
 HKDF-SHA3-512 for derivation, and Argon2id for passwords. Stored mail,
 credentials and signing keys are sealed with those primitives, so a stolen
-database is not worth harvesting now to decrypt later.
+database is not worth harvesting now to decrypt later. Each DKIM private key is
+sealed to the domain, selector and algorithm it belongs to, and each stored
+message body to the content digest it is filed under, so a value sealed as
+anything else does not open as that key or as that message.
 
 Mail on the wire is a different question, and the honest answer is that the
 formats set the ceiling. Outbound mail carries two DKIM signatures by default,

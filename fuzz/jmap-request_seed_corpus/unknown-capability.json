@@ -1,0 +1,1 @@
+{"using":["urn:ietf:params:jmap:calendars"],"methodCalls":[["Calendar/get",{"accountId":"a1"},"c0"]]}

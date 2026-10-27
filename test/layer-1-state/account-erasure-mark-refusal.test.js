@@ -32,10 +32,10 @@
  * Run standalone: node test/layer-1-state/account-erasure-mark-refusal.test.js
  */
 
-var helpers = require("../helpers");
-var config  = require("../../lib/config");
-var store   = require("../../lib/store");
-var tables  = require("../../lib/store/tables");
+var helpers    = require("../helpers");
+var writeFault = require("../helpers/account-status-write-fault");
+var config     = require("../../lib/config");
+var store      = require("../../lib/store");
 
 var count = helpers.count;
 var fs    = helpers.fs;
@@ -68,39 +68,14 @@ async function raisedBy(fn) {
   catch (e) { return e; }
 }
 
-// The one write under examination, refused. Every other write the
-// erasure makes goes through untouched, so what runs ahead of the mark
-// is the shipped path rather than a fixture.
-function refuseTheErasingMark() {
-  var real = tables.updateRow;
-  tables.updateRow = function (table, id, values) {
-    if (values && values.status === "erasing") {
-      throw new Error("the data volume refused this write");
-    }
-    return real.apply(null, arguments);
-  };
-  return function () { tables.updateRow = real; };
-}
-
-// The same fault taken all the way: not one value the row will not
-// accept, but a row the volume will not write at all. A mount that has
-// gone read-only under a running server does this, and so does a
-// write-once posture applied to the table rather than to one column.
-//
-// It is the state no marker on the row can survive, which makes it the
-// one that says whether anything OTHER than the row is holding the
-// account. A fixture that lets any write through cannot ask that
-// question, because whatever it let through is what answers.
-function refuseEveryWriteTo(accountId) {
-  var real = tables.updateRow;
-  tables.updateRow = function (table, id) {
-    if (table === tables.ACCOUNTS && id === accountId) {
-      throw new Error("the data volume refused this write");
-    }
-    return real.apply(null, arguments);
-  };
-  return function () { tables.updateRow = real; };
-}
+// The two faults are `test/helpers/account-status-write-fault.js`, which
+// the delivery-refusal case beside this one drives as well. The first
+// refuses the status transition and lets the marker through. The second
+// refuses every write to one account row, which is the state no marker
+// on the row can survive, and it is the one that says whether anything
+// OTHER than the row is holding the account: a fixture that lets any
+// write through cannot ask that question, because whatever it let
+// through is what answers.
 
 async function testAnErasureThatCouldNotBeMarkedStaysOutOfService(identity) {
   var doomed = await identity.accounts.create({
@@ -112,7 +87,7 @@ async function testAnErasureThatCouldNotBeMarkedStaysOutOfService(identity) {
   var kept = identity.mailbox.appendMessage("INBOX", heldMail(SUBJECT), { actor: owner });
   identity.messageStore.setLegalHold([kept.objectid], { hold: true });
 
-  var restore = refuseTheErasingMark();
+  var restore = writeFault.refuseErasingStatusWrite();
   var partial;
   try {
     partial = await identity.accounts["delete"]({
@@ -170,7 +145,7 @@ async function testAnErasureNoWriteCouldMarkStaysOutOfService(identity) {
   var kept = identity.mailbox.appendMessage("INBOX", heldMail(UNWRITABLE), { actor: owner });
   identity.messageStore.setLegalHold([kept.objectid], { hold: true });
 
-  var restore = refuseEveryWriteTo(doomed.id);
+  var restore = writeFault.refuseEveryWriteTo(doomed.id);
   var partial;
   try {
     partial = await identity.accounts["delete"]({

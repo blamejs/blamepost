@@ -1,4 +1,4 @@
-<form method="post" action="{{ actionPath }}" class="listform" data-island="mailbox">
+<form method="post" action="/{{ actionHref }}" class="listform" data-island="mailbox">
   <input type="hidden" name="_csrf" value="{{ csrfToken }}">
 
   <div class="bulkbar" role="group" aria-label="Actions for the selected messages">
@@ -23,7 +23,7 @@
         <label class="visually-hidden" for="pick-{{ m.objectId }}">Select message from {{ m.from }}</label>
       </span>
       <span class="msg-avatar" aria-hidden="true">{{ m.initial }}</span>
-      <a class="msg-body" href="{{ m.href }}">
+      <a class="msg-body" href="/{{ m.href }}">
         <span class="msg-top">
           <span class="msg-from" title="{{ m.fromAddr }}">{{ m.from }}</span>
           <span class="msg-when">{{ m.received }}</span>
@@ -32,6 +32,8 @@
         <span class="msg-preview">{{ m.preview }}</span>
       </a>
       <span class="msg-marks">
+        {% if m.carriesFiles %}<span class="mark mark-files" title="Carries files">Files</span>{% endif %}
+        {% if m.filesUnknown %}<span class="mark mark-files-unknown" title="This message was not opened here, so whether it carries files is not known">Files?</span>{% endif %}
         {% if m.flagged %}<span class="mark mark-flag" title="Flagged">Flagged</span>{% endif %}
         {% if m.answered %}<span class="mark" title="Answered">Answered</span>{% endif %}
         {% if m.legalHold %}<span class="mark mark-hold" title="Under legal hold">Hold</span>{% endif %}

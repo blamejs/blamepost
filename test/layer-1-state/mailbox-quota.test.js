@@ -44,12 +44,14 @@
 var nodeFs   = require("node:fs");
 var nodePath = require("node:path");
 
-var helpers   = require("../helpers");
-var certs     = require("../helpers/certs");
-var wire      = require("../helpers/wire");
-var config    = require("../../lib/config");
-var store     = require("../../lib/store");
-var blamepost = require("../../lib");
+var helpers       = require("../helpers");
+var certs         = require("../helpers/certs");
+var wire          = require("../helpers/wire");
+var b             = require("../../lib/vendor/blamejs");
+var config        = require("../../lib/config");
+var mailboxModule = require("../../lib/mail/mailbox");
+var store         = require("../../lib/store");
+var blamepost     = require("../../lib");
 
 var count = helpers.count;
 
@@ -64,6 +66,7 @@ var VAULT_PASSPHRASE = "a long enough vault passphrase for one test run";
 var ALICE_PASSWORD   = "quiet lantern bicycle 4291";
 var BOB_PASSWORD     = "another quiet lantern 7715";
 var CARLA_PASSWORD   = "a third quiet lantern 3308";
+var DAVE_PASSWORD    = "a fourth quiet lantern 9126";
 
 // Small enough that two messages cross it and one does not, so the
 // refusal is about the cap rather than about anything else.
@@ -156,6 +159,81 @@ function testTheCapIsCountedPerAccount(mailbox, bob, carla) {
                     uncappedThird.thrown && uncappedThird.thrown.code]));
 }
 
+// `blamepost.mail.mailbox.accountQuota`, the reading a surface shows a
+// person, against the gate that refuses the next message.
+//
+// Two answers to one question is how a page comes to say a mailbox is
+// empty while a client is told it is full, so the reading and the gate
+// are asked about the same account in the same run: the used figure has
+// to be the total the gate measured, and the cap has to be the cap the
+// gate compared it against. `quota(name)` is the wire's own reader and
+// is asked here too, because it answers a different question and must go
+// on answering it: a folder name names no account, so it names no
+// mailbox to measure and no cap to measure one against.
+function testTheReadingAgreesWithTheGate(mailbox, bob, carla) {
+  var actor = { id: bob.id };
+  var held = mailbox.accountQuota(actor);
+  count("the reading names the cap the operator set on the account",
+    held.capBytes === CAP_BYTES, JSON.stringify(held));
+  count("and the bytes the account is holding against it",
+    held.usedBytes > 0 && held.usedBytes <= CAP_BYTES, JSON.stringify(held));
+  count("and the number of messages behind that figure",
+    held.usedCount > 0, JSON.stringify(held));
+  count("it caps bytes and not messages, so there is no message limit to report",
+    held.capCount === null, JSON.stringify(held));
+
+  var refused = appendOrThrown(mailbox, bob.id, "INBOX",
+    messageOf(bob.address, "One past the reading", FILLER_PAD));
+  count("the gate refuses the next message on the same cap the reading named",
+    refused.thrown !== undefined && refused.thrown.limit === held.capBytes,
+    JSON.stringify({ gate: refused.thrown && refused.thrown.limit, reading: held.capBytes }));
+  count("and on the same used figure",
+    refused.thrown !== undefined &&
+      String(refused.thrown.message).indexOf("holds " + held.usedBytes + " bytes") !== -1,
+    refused.thrown && refused.thrown.message);
+
+  var uncapped = mailbox.accountQuota({ id: carla.id });
+  count("an account the operator left uncapped reports no cap rather than a cap of zero",
+    uncapped.capBytes === null, JSON.stringify(uncapped));
+  count("and still reports what it holds, because there is mail in it either way",
+    uncapped.usedBytes > 0 && uncapped.usedCount > 0, JSON.stringify(uncapped));
+
+  // The wire's reader, unchanged. A folder name belongs to every account
+  // that has one, so this call has no mailbox to measure, and the
+  // listener's pre-check reads a null cap and leaves the refusal to the
+  // append below it.
+  var byFolder = mailbox.quota("INBOX");
+  count("the reader a wire folder name reaches still answers no cap, so the append stays " +
+    "the place a cap is enforced",
+    byFolder.capBytes === null && byFolder.usedBytes === 0, JSON.stringify(byFolder));
+}
+
+// The reading writes nothing. It is asked for every account on a page an
+// operator opens, and one of those accounts may be one whose mail was
+// erased, so a reading that provisioned the default folders would put six
+// of them back under it on every render.
+async function testTheReadingProvisionsNothing(identity, dave) {
+  var before = b.db.from(mailboxModule.FOLDERS).where({ account: dave.id }).count();
+  count("an account that has never been reached for holds no folder rows yet",
+    before === 0, String(before));
+
+  var held = identity.mailbox.accountQuota({ id: dave.id });
+  count("the reading answers that it holds nothing",
+    held.usedBytes === 0 && held.usedCount === 0, JSON.stringify(held));
+
+  var after = b.db.from(mailboxModule.FOLDERS).where({ account: dave.id }).count();
+  count("and left no folder row behind it", after === 0, String(after));
+
+  // The control, so the run says the folders exist to be created rather
+  // than that nothing creates them at all: the append path does provision,
+  // which is why the reading must not.
+  await identity.mailbox.appendMessage("INBOX",
+    messageOf(dave.address, "The first one", 10), { actor: { id: dave.id } });
+  count("the append path is what provisions them",
+    b.db.from(mailboxModule.FOLDERS).where({ account: dave.id }).count() > 0,
+    String(b.db.from(mailboxModule.FOLDERS).where({ account: dave.id }).count()));
+}
+
 // Zero already means no limit, so it cannot also stand for an account
 // nobody holds: answering zero for one would hand an unlimited mailbox
 // to an identity that does not exist.
@@ -242,16 +320,15 @@ async function testTheWireRefusalCarriesTheResponseCode(port, caPem, alice) {
     count("a message under the cap is accepted over the wire",
       /OK \[APPENDUID/.test(accepted.reply), visible(accepted.reply));
     // The second half of the same wire defect. RFC 9051 section 4.3 has
-    // the CRLF after the literal terminate the command, and the
-    // vendored listener completes the command as soon as the announced
-    // octets arrive, so that CRLF is then read as a fresh line and
-    // answered as an empty one. Every APPEND a conforming client sends
-    // draws an untagged BAD it did nothing to earn. Pinned for the same
-    // reason as the continuation above.
-    count("the trailing CRLF of the literal is still answered as an empty command, " +
-      "so an APPEND draws an untagged refusal beside its own reply. Tighten this " +
-      "file when a refresh fixes it",
-      /^\* BAD [^\r\n]*empty command line/m.test(accepted.reply), visible(accepted.reply));
+    // the CRLF after the literal terminate the command, so it belongs to
+    // that command and is consumed with it. Read as a fresh line instead,
+    // it is an empty one, and every APPEND a conforming client sends
+    // draws an untagged BAD beside its own reply that it did nothing to
+    // earn. Pinned for the same reason as the continuation above.
+    count("the trailing CRLF of the literal is consumed by the command it ends, so an " +
+      "APPEND is answered once rather than drawing an untagged refusal beside its " +
+      "own reply",
+      !/^\* BAD/m.test(accepted.reply), visible(accepted.reply));
 
     var refused = await appendOverTheWire(session,
       messageOf(alice.address, "Wire over the cap", OVER_CAP_PAD).toString("utf8"), "over-cap");
@@ -288,9 +365,8 @@ async function testAnotherAccountOnTheSameListenerIsUnaffected(port, caPem, carl
 
 async function run() {
   var root    = helpers.tempDir("quota");
-  var dataDir = nodePath.join(root, "data");
+  var dataDir = helpers.dataDir(root);
   var workDir = nodePath.join(root, "work");
-  nodeFs.mkdirSync(dataDir, { recursive: true });
   nodeFs.mkdirSync(workDir, { recursive: true });
 
   var hadTmp   = Object.prototype.hasOwnProperty.call(process.env, "BLAMEJS_TMPDIR");
@@ -322,6 +398,10 @@ async function run() {
       address: "bob@" + DOMAIN, password: BOB_PASSWORD, quotaBytes: CAP_BYTES });
     var carla = await identity.accounts.create({
       address: "carla@" + DOMAIN, password: CARLA_PASSWORD });
+    // Created and then left alone, so the reading below is the first
+    // thing that ever names it.
+    var dave = await identity.accounts.create({
+      address: "dave@" + DOMAIN, password: DAVE_PASSWORD, quotaBytes: CAP_BYTES });
     count("the two capped accounts carry the cap the operator set",
       alice.quotaBytes === CAP_BYTES && bob.quotaBytes === CAP_BYTES,
       JSON.stringify([alice.quotaBytes, bob.quotaBytes]));
@@ -332,6 +412,8 @@ async function run() {
     var filler = testAMessageUnderTheCapIsStored(mailbox, alice);
     testAMessageOverTheCapIsRefused(mailbox, alice);
     testTheCapIsCountedPerAccount(mailbox, bob, carla);
+    testTheReadingAgreesWithTheGate(mailbox, bob, carla);
+    await testTheReadingProvisionsNothing(identity, dave);
     testAnAppendForNoLiveAccountIsRefused(mailbox, alice);
     var replacement = await testExpungingReturnsTheBudget(mailbox, alice, filler);
 

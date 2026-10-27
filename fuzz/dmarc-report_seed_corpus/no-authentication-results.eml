@@ -1,0 +1,24 @@
+From: dmarc-noreply@reporter.example
+To: dmarc-reports@example.com
+Subject: Report Domain: example.com Submitter: reporter.example
+MIME-Version: 1.0
+Content-Type: text/xml
+
+<?xml version="1.0" encoding="UTF-8" ?>
+<feedback>
+  <report_metadata>
+    <org_name>reporter.example</org_name>
+    <email>dmarc-noreply@reporter.example</email>
+    <report_id>bare-0001</report_id>
+    <date_range><begin>1750000000</begin><end>1750086400</end></date_range>
+  </report_metadata>
+  <policy_published>
+    <domain>example.com</domain><p>none</p>
+  </policy_published>
+  <record>
+    <row><source_ip>203.0.113.10</source_ip><count>5</count>
+      <policy_evaluated><disposition>none</disposition><dkim>pass</dkim></policy_evaluated>
+    </row>
+    <identifiers><header_from>example.com</header_from></identifiers>
+  </record>
+</feedback>

@@ -31,6 +31,7 @@
 **/.vscode
 **/.idea
 **/.claude
+**/.playwright-mcp
 **/.DS_Store
 **/Thumbs.db
 **/desktop.ini
@@ -61,6 +62,7 @@
 **/data-e2e
 **/blobs
 **/queue
+**/tlsrpt
 **/tls
 **/acme
 **/var
@@ -78,6 +80,24 @@
 **/*.log
 **/*.pid
 **/*.pid.lock
+
+# The fuzz harnesses, their seed corpora and the ClusterFuzzLite build
+# definition. Nothing in the image reads them: the Dockerfile copies bin,
+# lib and docs by name, and the harnesses run against the tree in CI
+# rather than against the image. A seed corpus also grows without bound
+# during a local run, because libFuzzer writes every input it keeps back
+# into the seed directory.
+**/fuzz
+**/.clusterfuzzlite
+
+# The reproducer a fuzz run writes when it finds something. libFuzzer puts
+# it in the directory the run started from, which for the documented
+# command is the context root.
+**/crash-*
+**/leak-*
+**/timeout-*
+**/oom-*
+**/slow-unit-*
 
 # Credential and secret material, excluded at every depth rather than in
 # the context root alone.

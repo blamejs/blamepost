@@ -97,17 +97,17 @@ function _transcript(result) {
 // The decision, exercised without generating anything
 // ---------------------------------------------------------------------------
 
-function _planCases() {
+function _decisionCases() {
   check("the generator exports its rotation decision",
-    typeof keygen._rotationPlan === "function");
+    typeof keygen._rotationDecision === "function");
 
   // First setup. Nothing to retire, so nothing to confirm.
-  var fresh = keygen._rotationPlan(_outPath("fresh"), []);
-  check("no key on disk plans a first mint", fresh.action === "create");
+  var fresh = keygen._rotationDecision(_outPath("fresh"), []);
+  check("no key on disk decides on a first mint", fresh.action === "create");
 
   // A key is present and the operator did not say to replace it.
   var present = _outPath("present", _existingKeyDoc());
-  var refused = keygen._rotationPlan(present, []);
+  var refused = keygen._rotationDecision(present, []);
   check("a key already on disk refuses", refused.action === "refuse");
   check("the refusal names the flag that means it on purpose",
     /--rotate/.test(refused.reason));
@@ -115,18 +115,18 @@ function _planCases() {
     /verif/i.test(refused.reason) && /publish/i.test(refused.reason));
 
   // The deliberate replacement, with the outgoing key recorded.
-  var rotate = keygen._rotationPlan(present, ["--rotate"]);
+  var rotate = keygen._rotationDecision(present, ["--rotate"]);
   check("the deliberate replacement is allowed", rotate.action === "rotate");
-  check("the plan records the fingerprint being retired",
+  check("the decision records the fingerprint being retired",
     rotate.replacing && rotate.replacing.fingerprint === _standInFingerprint());
-  check("the plan records when the retired key was created",
+  check("the decision records when the retired key was created",
     rotate.replacing && rotate.replacing.createdAt === "2026-01-15");
 
   // A file with no recorded fingerprint still has one, derived from the
   // public key it carries. An operator who hand-trimmed the file must not
   // lose the record of what is being retired.
   var nofp = _outPath("nofp", _existingKeyDoc({ fingerprint_sha3_512: undefined }));
-  var derived = keygen._rotationPlan(nofp, ["--rotate"]);
+  var derived = keygen._rotationDecision(nofp, ["--rotate"]);
   check("a missing fingerprint is derived from the recorded public key",
     derived.action === "rotate" &&
     derived.replacing.fingerprint === _standInFingerprint());
@@ -135,20 +135,20 @@ function _planCases() {
   // point of the guard is the record of what is being replaced, and a
   // rotation that cannot make that record has not made it.
   var unreadable = _outPath("unreadable", "{ not json\n");
-  var refusedUnreadable = keygen._rotationPlan(unreadable, ["--rotate"]);
+  var refusedUnreadable = keygen._rotationDecision(unreadable, ["--rotate"]);
   check("a key file that cannot be read refuses even with the flag",
     refusedUnreadable.action === "refuse");
   check("the refusal says the outgoing key could not be identified",
     /could not/i.test(refusedUnreadable.reason));
 
   var empty = _outPath("nofields", JSON.stringify({ algorithm: "ml-dsa-65" }, null, 2) + "\n");
-  var refusedEmpty = keygen._rotationPlan(empty, ["--rotate"]);
+  var refusedEmpty = keygen._rotationDecision(empty, ["--rotate"]);
   check("a key file carrying no identifying material refuses",
     refusedEmpty.action === "refuse");
 
   // Asking to replace a key that is not there means the operator is
   // pointed somewhere they did not intend.
-  var nothing = keygen._rotationPlan(_outPath("nothing"), ["--rotate"]);
+  var nothing = keygen._rotationDecision(_outPath("nothing"), ["--rotate"]);
   check("replacing a key that is not there refuses", nothing.action === "refuse");
   check("that refusal names the path it looked at",
     typeof nothing.reason === "string" && nothing.reason.length > 0);
@@ -214,11 +214,11 @@ function _recordCases() {
   check("the generator exports the document builder",
     typeof keygen._publicKeyDocument === "function");
 
-  var plan = { action: "create", replacing: null };
+  var decision = { action: "create", replacing: null };
   var first = keygen._publicKeyDocument({
     publicKey:   STAND_IN_PUB,
     fingerprint: _standInFingerprint(),
-    plan:        plan,
+    decision:    decision,
   });
   check("a first mint records the algorithm", first.algorithm === "ml-dsa-65");
   check("a first mint records its own fingerprint",
@@ -229,7 +229,7 @@ function _recordCases() {
   var rotated = keygen._publicKeyDocument({
     publicKey:   STAND_IN_PUB,
     fingerprint: _standInFingerprint(),
-    plan:        {
+    decision:    {
       action:    "rotate",
       replacing: { fingerprint: "abc123", createdAt: "2026-01-15" },
     },
@@ -285,7 +285,7 @@ function _requireSafetyCases() {
 // ---------------------------------------------------------------------------
 
 async function run() {
-  _planCases();
+  _decisionCases();
   _recordCases();
   _requireSafetyCases();
   await _refusalCases();

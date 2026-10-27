@@ -158,15 +158,33 @@ function keysFor(keyDir, domain) {
 // whole SubjectPublicKeyInfo for RSA. Read off the file rather than off
 // the row, so the two can be held against each other.
 //
+// Both seals are opened. A key this server minted is sealed to the
+// selector it belongs to and opens only under that selector's context; a
+// key on a volume that has not been through `blamepost dkim reseal`
+// carries the plain volume seal. A reader that knew only one of the two
+// would answer null for every key of the other kind, and null is one of
+// the answers a vector below asserts on, so it would report a whole
+// domain as disagreeing with its own records.
+//
 // Answers null for a key that is not there or will not open, which is
 // itself one of the answers a vector asserts on.
-function publishedHalfOnDisk(keyDir, keyRef, algorithm) {
+function publishedHalfOnDisk(keyDir, row) {
+  var keyRef = row.keyRef;
+  var algorithm = row.algorithm;
   var sealed;
   try { sealed = nodeFs.readFileSync(keyPath(keyDir, keyRef), "utf8"); }
   catch (_e) { return null; }
   var pem;
-  try { pem = b.vault.unseal(sealed); }
-  catch (_e) { return null; }
+  try {
+    pem = b.vault.aad.isAadSealed(sealed)
+      ? b.vault.aad.unseal(sealed, {
+        purpose:   "blamepost.mail.dkim.signing-key",
+        domain:    row.domain,
+        selector:  row.selector,
+        algorithm: algorithm,
+      })
+      : b.vault.unseal(sealed);
+  } catch (_e) { return null; }
   var der;
   try {
     der = nodeCrypto.createPublicKey(pem).export({ type: "spki", format: "der" });
@@ -182,7 +200,7 @@ function publishedHalfOnDisk(keyDir, keyRef, algorithm) {
 function rowsTheKeysDisagreeWith(identity, keyDir, domain) {
   return identity.domains.listSelectors({ domain: domain })
     .filter(function (row) {
-      return publishedHalfOnDisk(keyDir, row.keyRef, row.algorithm) !== row.publicKey;
+      return publishedHalfOnDisk(keyDir, row) !== row.publicKey;
     })
     .map(function (row) { return row.selector + ":" + row.algorithm; });
 }
@@ -243,7 +261,7 @@ async function twoMintsCannotWriteOverEachOthersKey(identity, cfg, keyDir) {
   var dkim = dkimMod.create({ store: identity, dataDir: cfg.paths.dataDir });
 
   // The first selector row this domain writes, held so the second mint
-  // runs its whole plan against a domain that still publishes nothing.
+  // runs all of its checks against a domain that still publishes nothing.
   var gate = installCallGate(identity.domains, "addSelector", function (args) {
     return !!args[0] && args[0].domain === domain && args[0].algorithm === "ed25519";
   });

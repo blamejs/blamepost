@@ -29,6 +29,17 @@
  * the account at boot, which is precisely the behavior the documents
  * used to claim.
  *
+ * Whether the port the documents send an operator to is the port that
+ * takes a password. This server accepts a credential over TLS, from a
+ * peer a named proxy speaks for, or from loopback, and from nowhere
+ * else. A request published out of a container arrives from the bridge
+ * gateway rather than from the loopback interface, so the cleartext port
+ * refuses one whatever address the host dialed, and the TLS port is
+ * where the first sign in happens. Both directions are driven here: the
+ * form renders and a correct password is accepted on 8443, and the same
+ * password is refused on 8080 with no session written. A run that only
+ * proved the refusal would pass against a server nobody can sign in to.
+ *
  * And whether either documented way of reaching the mail ports works.
  * The default lowers the unprivileged port floor inside the container's
  * own network namespace and lets the listeners take 25, 465, 587, 143
@@ -76,8 +87,10 @@ var nodeNet  = require("node:net");
 var nodePath = require("node:path");
 
 var helpers = require("../helpers");
+var browser = require("../helpers/browser");
 var wire    = require("../helpers/wire");
 var harness = require("./container-harness");
+var web     = require("../../lib/web");
 var b       = require("../../lib/vendor/blamejs");
 
 var Wire  = wire.Wire;
@@ -103,6 +116,12 @@ var DEFAULT_MX_PORT = 25;
 // literals that drift apart stop being about the same listener.
 var POP3_PORT          = 110;
 var POP3_IMPLICIT_PORT = 995;
+
+// The browser pair. Both are published by every run below, because the
+// two carry different answers to the same request and a run holding one
+// of them can only ask half the question.
+var WEB_PORT     = 8080;
+var WEB_TLS_PORT = 8443;
 
 // What a peer writes when it dials the MX port. Nobody here owns the
 // sender, and nobody here hosts the second recipient's domain, which is
@@ -148,58 +167,48 @@ function greeting(port, label) {
 
 // ---- a browser --------------------------------------------------------------
 
-function jar() {
-  var store = Object.create(null);
+// The part of the refusal that names what turned the reader away. A page
+// carrying it says the connection was the problem, and a page without it
+// says something else was, which is the difference between the two
+// directions driven below.
+var TRANSPORT_MARK = "not accept a password";
+
+// A reader on the published TLS port, verifying the chain against the
+// authority this run minted. The name is passed rather than left to the
+// address the port is dialed at, so the identity check is made against
+// the hostname the certificate was issued for.
+function tlsReader(hostPort, caPem) {
+  return browser.browserAt("https://" + LOOPBACK + ":" + hostPort, {
+    ca: caPem, servername: HOSTNAME,
+  });
+}
+
+// A reader on the published cleartext port. The host dials 127.0.0.1 and
+// the request still arrives at the server from the bridge gateway, which
+// is the whole reason this port and the one above answer differently.
+function cleartextReader(hostPort) {
+  return browser.browserAt("http://" + LOOPBACK + ":" + hostPort);
+}
+
+// One sign in, carrying the token the form handed out and the cookies
+// that came with it. The status is the verdict: a redirect means the
+// session exists, anything else means the server declined and the page
+// says why.
+async function signIn(reader, address, password) {
+  var posted = await reader.signIn(address, password);
   return {
-    absorb: function (res) {
-      var raw = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
-      raw.forEach(function (line) {
-        var first = line.split(";")[0];
-        var eq = first.indexOf("=");
-        if (eq === -1) return;
-        store[first.slice(0, eq).trim()] = first.slice(eq + 1).trim();
-      });
-    },
-    header: function () {
-      return Object.keys(store).map(function (k) { return k + "=" + store[k]; }).join("; ");
-    },
-    names: function () { return Object.keys(store); },
+    accepted:  posted.status === 302 || posted.status === 303,
+    status:    posted.status,
+    page:      posted.body,
+    setCookie: posted.setCookie || [],
   };
 }
 
-// One sign in against the published port, carrying the token the form
-// handed out and the cookies that came with it. The status is the
-// verdict: a redirect means the session exists, anything else means the
-// server declined and the page says why.
-async function signIn(port, address, password) {
-  var origin  = "http://" + LOOPBACK + ":" + port;
-  var cookies = jar();
-  var form = await fetch(origin + "/sign-in");
-  cookies.absorb(form);
-  var page = await form.text();
-  var found = /name="_csrf" value="([^"]*)"/.exec(page);
-  if (!found) {
-    throw new Error("the sign in page carried no token: " + page.slice(0, 300));
-  }
-  var body = "address=" + encodeURIComponent(address) +
-    "&password=" + encodeURIComponent(password) +
-    "&_csrf=" + encodeURIComponent(found[1]);
-  var posted = await fetch(origin + "/sign-in", {
-    method:   "POST",
-    redirect: "manual",
-    headers:  {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "Origin":       origin,
-      "Cookie":       cookies.header(),
-    },
-    body: body,
+// Whether a sign in left the browser holding a session.
+function sessionWritten(result) {
+  return result.setCookie.some(function (line) {
+    return String(line).indexOf(web.SESSION_COOKIE + "=") === 0;
   });
-  var text = await posted.text();
-  return {
-    accepted: posted.status === 302 || posted.status === 303,
-    status:   posted.status,
-    page:     text,
-  };
 }
 
 // ---- a mail client that verifies the certificate ---------------------------
@@ -466,7 +475,7 @@ async function run() {
     // that setting them is not enough.
     before = await harness.Container.start(image, "blamepost-before", {
       volume:  volume,
-      publish: [8080],
+      publish: [WEB_PORT, WEB_TLS_PORT],
       extra:   PORT_FLOOR_LOWERED,
       env:     baseEnv().concat([
         "BLAMEPOST_ADMIN_EMAIL=" + ADMIN,
@@ -485,7 +494,7 @@ async function run() {
       "before the one command that creates the first domain has been run",
       healthyBefore.health === "healthy", JSON.stringify(healthyBefore.health));
 
-    var beforePort = await before.hostPort(8080);
+    var beforePort = await before.hostPort(WEB_PORT);
     var beforeState = await before.state();
     count("the container is running", beforeState.status === "running", beforeState.status);
 
@@ -590,14 +599,33 @@ async function run() {
       beforeProbeLog !== null && beforeProbeLog.indexOf("degraded") !== -1,
       JSON.stringify(beforeProbeLog));
 
-    var landing = await fetch("http://" + LOOPBACK + ":" + beforePort + "/sign-in");
-    count("the sign in page renders over the published port",
+    // The port the quick start sends an operator to. A container publishes
+    // both, and only this one takes a password: the cleartext port sees
+    // the bridge gateway as its peer whatever the host dialed, and this
+    // one is TLS end to end from the browser to the listener.
+    var beforeTlsPort = await before.hostPort(WEB_TLS_PORT);
+    var beforeReader  = tlsReader(beforeTlsPort, leaf.ca);
+    var landing = await beforeReader.get("/sign-in");
+    count("the sign in page renders over the published TLS port, against the certificate " +
+      "the documents told the operator to place in the data volume",
       landing.status === 200, String(landing.status));
+    count("and it offers a password field, so what came back is the form rather than the " +
+      "page a connection that cannot carry a password gets",
+      landing.body.indexOf("type=\"password\"") !== -1 &&
+      landing.body.indexOf(TRANSPORT_MARK) === -1,
+      landing.body.replace(/\s+/g, " ").slice(0, 240));
 
-    var refused = await signIn(beforePort, ADMIN, ADMIN_PASSWORD);
+    var refused = await signIn(beforeReader, ADMIN, ADMIN_PASSWORD);
     count("serve creates no account, so the administrator address cannot sign in yet " +
       "however the administrator variables are set",
       refused.accepted === false, "status " + refused.status);
+    // The refusal has to be about the credential. A transport refusal
+    // would satisfy the line above without the account question ever
+    // being asked, which is the reading this whole file exists to avoid.
+    count("and it is the credential that was turned away rather than the connection, so " +
+      "the absence of an account is what the refusal above measured",
+      refused.page.indexOf(TRANSPORT_MARK) === -1,
+      refused.page.replace(/\s+/g, " ").slice(0, 240));
 
     await before.remove();
     before = null;
@@ -649,7 +677,7 @@ async function run() {
     // in the two runs that were already happening.
     after = await harness.Container.start(image, "blamepost-after", {
       volume:  volume,
-      publish: [8080, 143, 4190, MOVED_MX_PORT, DEFAULT_MX_PORT, POP3_PORT],
+      publish: [WEB_PORT, WEB_TLS_PORT, 143, 4190, MOVED_MX_PORT, DEFAULT_MX_PORT, POP3_PORT],
       extra:   HARDENING,
       env:     baseEnv().concat([
         "BLAMEPOST_MX_PORT=" + MOVED_MX_PORT,
@@ -658,16 +686,48 @@ async function run() {
     });
     await after.waitHealthy("the server reports itself healthy after init");
 
-    var httpPort = await after.hostPort(8080);
-    var accepted = await signIn(httpPort, ADMIN, ADMIN_PASSWORD);
-    count("the administrator init created can sign in, so the documented sequence " +
-      "leaves an operator with a server they can use",
+    var httpPort    = await after.hostPort(WEB_PORT);
+    var httpsPort   = await after.hostPort(WEB_TLS_PORT);
+    var accepted = await signIn(tlsReader(httpsPort, leaf.ca), ADMIN, ADMIN_PASSWORD);
+    count("the administrator init created signs in over the published TLS port, so the " +
+      "documented sequence leaves an operator with a server they can use",
       accepted.accepted === true, "status " + accepted.status +
       " page " + accepted.page.slice(0, 200));
+    count("and the session that sign in minted is written to the browser",
+      sessionWritten(accepted), JSON.stringify(accepted.setCookie));
 
-    var wrongPassword = await signIn(httpPort, ADMIN, "not the password 0000");
+    var wrongPassword = await signIn(tlsReader(httpsPort, leaf.ca), ADMIN, "not the password 0000");
     count("a wrong password is still refused after init",
       wrongPassword.accepted === false, "status " + wrongPassword.status);
+
+    // ---- the port that does not take a password ------------------------------
+    //
+    // The other direction, and the one that needs an account to mean
+    // anything: this run holds a credential that has just been proved
+    // correct on the port beside this one, so a refusal here is about the
+    // connection rather than about the password. Both shapes are driven,
+    // because a gate that fired only on the post would fire after the
+    // password had already crossed the wire.
+    var cleartextForm = await cleartextReader(httpPort).get("/sign-in");
+    count("the sign in page reached over the published cleartext port refuses rather " +
+      "than rendering, because a request published out of the container arrives from the " +
+      "bridge gateway rather than over the loopback interface",
+      cleartextForm.status === 403, String(cleartextForm.status));
+    count("and it carries no password field and names the connection as the reason, so " +
+      "no password reaches that wire at all",
+      cleartextForm.body.indexOf("type=\"password\"") === -1 &&
+      cleartextForm.body.indexOf(TRANSPORT_MARK) !== -1,
+      cleartextForm.body.replace(/\s+/g, " ").slice(0, 240));
+
+    var overCleartext = await signIn(cleartextReader(httpPort), ADMIN, ADMIN_PASSWORD);
+    count("the same correct password posted to that port is refused, naming the " +
+      "connection rather than the credential",
+      overCleartext.accepted === false && overCleartext.status === 403 &&
+      overCleartext.page.indexOf(TRANSPORT_MARK) !== -1,
+      "status " + overCleartext.status + " " +
+      overCleartext.page.replace(/\s+/g, " ").slice(0, 240));
+    count("and no session cookie is written, so nothing was recorded as a sign in",
+      sessionWritten(overCleartext) === false, JSON.stringify(overCleartext.setCookie));
 
     // ---- the listeners, from outside and from inside -------------------------
     var mxBanner = await greeting(await after.hostPort(MOVED_MX_PORT), "mx");
@@ -820,7 +880,7 @@ async function run() {
       "the MX listener bound the port the variable named");
     portVerdict(bound, DEFAULT_MX_PORT, false,
       "nothing was left listening on the MX default once the variable moved it");
-    [587, 465, 143, 4190, 8080, 8443].forEach(function (port) {
+    [587, 465, 143, 4190, WEB_PORT, WEB_TLS_PORT].forEach(function (port) {
       portVerdict(bound, port, true,
         "the listener on port " + port + " bound inside the container");
     });

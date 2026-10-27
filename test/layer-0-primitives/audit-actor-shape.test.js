@@ -42,6 +42,12 @@ var count = helpers.count;
 // none of its own.
 var BELL = String.fromCharCode(7);
 
+// The two codepoints a control-character screen does not see: the
+// right-to-left override, which reorders everything after it, and the
+// zero-width space, which renders as nothing.
+var RLO  = String.fromCharCode(0x202E);
+var ZWSP = String.fromCharCode(0x200B);
+
 // A namespace the store registers, so an action written here is one the
 // framework will accept, and one that nothing registers, so the refusal
 // the framework raises for itself can be exercised too.
@@ -88,13 +94,31 @@ function whatArrivesFromAPeerIsBounded() {
   count("and so is the address it arrived from",
     long.ip.length > 0 && long.ip.length <= 64, long.ip.length);
 
+  // The screen removes what a terminal would act on and keeps the rest,
+  // so a client string carrying one byte of noise still says which
+  // client it was.
   var noisy = auditActor.build({ userAgent: "curl/8" + BELL + "and the rest" });
-  count("a character a terminal would act on rather than print ends the field there",
-    noisy.userAgent === "curl/8", JSON.stringify(noisy.userAgent));
+  count("a character a terminal would act on rather than print is removed from the field",
+    noisy.userAgent === "curl/8and the rest", JSON.stringify(noisy.userAgent));
 
   var allNoise = auditActor.build({ userAgent: BELL + BELL });
   count("and a field that is nothing else records an absence rather than the noise",
     allNoise.userAgent === null, JSON.stringify(allNoise.userAgent));
+
+  // Two of these fields come off the wire, and an audit row is read in a
+  // terminal. A codepoint that reorders what follows it, or that renders
+  // as nothing at all, is what a forged row is written with: neither is a
+  // control character, so a screen that stops at the first control
+  // character passes both straight through.
+  var reordered = auditActor.build({ userAgent: "curl/8" + RLO + "evil" });
+  count("a codepoint that reorders the text after it does not reach the row",
+    reordered.userAgent !== null && reordered.userAgent.indexOf(RLO) === -1,
+    JSON.stringify(reordered.userAgent));
+
+  var invisible = auditActor.build({ userId: "acc-1" + ZWSP + "9" });
+  count("and neither does one that renders as nothing",
+    invisible.userId !== null && invisible.userId.indexOf(ZWSP) === -1,
+    JSON.stringify(invisible.userId));
 
   var padded = auditActor.build({ userId: "   ", ip: "  203.0.113.4  " });
   count("whitespace on its own is an absence, and whitespace around a value is not " +

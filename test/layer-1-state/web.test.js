@@ -533,7 +533,7 @@ function messageFor(recipient, subject, body) {
 // folder as `/mail/<name>` and a message as `/mail/<name>/<id>`, so the
 // trailing quote is what separates the two.
 function linkedFolders(body) {
-  var pattern = /href="\/mail\/([^"/]*)"/g;
+  var pattern = /href="\/mail\?folder=([^"&]*)"/g;
   var names = [];
   var seen = Object.create(null);
   var hit = pattern.exec(body);
@@ -548,6 +548,37 @@ function linkedFolders(body) {
   return names;
 }
 
+// What the sign in page tells a reader about the connection it arrived
+// on, read on the cleartext port.
+//
+// This page renders its form here rather than the transport refusal,
+// because a request that reached this process over loopback crossed no
+// network and a password is accepted over it. That is the shape a host
+// install has when the browser and this process are on the same
+// machine, and it is the one configuration in which the form is served
+// on a connection that is not TLS.
+//
+// So a sentence on it that states the transport is a sentence that can
+// be wrong, and this is the page a reader is looking at while deciding
+// whether to type a password into it. The cookie attributes it names
+// are facts about the cookie; the connection is not one of them.
+async function testTheSignInPageStatesNoTransportItDoesNotHave(reader) {
+  var page = await reader.get("/sign-in");
+  count("the sign in page renders its form on the cleartext port over loopback, " +
+    "which is the connection a password is accepted over there",
+    page.status === 200 && page.body.indexOf("name=\"password\"") !== -1,
+    page.status + " " + page.body.slice(0, 160));
+
+  // The whole rendered page, because the sentence moves between the
+  // template's two branches and a reader anchored on one of them goes
+  // quiet the day it moves to the other.
+  var claimed = /\bTLS\b/.exec(page.body);
+  count("and it tells the reader nothing about TLS, which is a claim this connection " +
+    "would not bear out", claimed === null,
+    claimed === null ? "none" :
+      page.body.slice(Math.max(0, claimed.index - 120), claimed.index + 60));
+}
+
 async function testSigningInReachesTheReadersOwnMail(reader) {
   var landed = await reader.signIn("alice@" + DOMAIN, ALICE_PASSWORD);
   count("the sign in form carried a token for the reader to send back",
@@ -555,7 +586,7 @@ async function testSigningInReachesTheReadersOwnMail(reader) {
   count("a correct credential is answered with a redirect rather than the form again",
     landed.status === 302, landed.status + " " + landed.body.slice(0, 160));
   count("the redirect names a mailbox path",
-    typeof landed.location === "string" && landed.location.indexOf("/mail/") === 0,
+    typeof landed.location === "string" && landed.location.indexOf("/mail?") === 0,
     landed.location);
 
   var inbox = await reader.get(landed.location);
@@ -588,14 +619,14 @@ function testTheFolderListHoldsOnlyTheReadersFolders(inbox, otherFolder) {
 async function testAnotherAccountsMailIsUnreachable(reader, other) {
   var otherFolder = other.storeFolder;
   var otherMessage = other.objectId;
-  var folderPage = await reader.get("/mail/" + encodeURIComponent(otherFolder));
+  var folderPage = await reader.get("/mail?folder=" + encodeURIComponent(otherFolder));
   count("a URL naming the other account's folder is refused rather than served",
     folderPage.status === 404 || folderPage.status === 403, folderPage.status);
   count("the refusal carries none of that account's mail",
     folderPage.body.indexOf(BOB_SUBJECT) === -1, folderPage.body.slice(0, 200));
 
-  var messagePage = await reader.get("/mail/" + encodeURIComponent(otherFolder) +
-    "/" + encodeURIComponent(otherMessage));
+  var messagePage = await reader.get("/mail/" + encodeURIComponent(otherMessage) +
+    "?folder=" + encodeURIComponent(otherFolder));
   count("a message inside the other account's folder is refused the same way",
     messagePage.status === 404 || messagePage.status === 403, messagePage.status);
   count("that refusal carries none of the message body",
@@ -605,7 +636,8 @@ async function testAnotherAccountsMailIsUnreachable(reader, other) {
   // name resolves, so the refusal has to come from the message lookup
   // being scoped to the folder behind that name rather than from the
   // name failing to match.
-  var borrowed = await reader.get("/mail/INBOX/" + encodeURIComponent(otherMessage));
+  var borrowed = await reader.get("/mail/" + encodeURIComponent(otherMessage) +
+    "?folder=INBOX");
   count("the other account's message is refused under a folder name this reader does own",
     borrowed.status === 404 || borrowed.status === 403, borrowed.status);
   count("that refusal carries none of the message body either",
@@ -617,7 +649,8 @@ async function testAnotherAccountsMailIsUnreachable(reader, other) {
 // mutation that lands empties the folder, and every read assertion after
 // it would then pass by finding nothing where the leak used to be.
 async function testAMutationAimedAtAnotherAccountIsRefused(reader, identity, other) {
-  var mutation = await reader.post("/mail/" + encodeURIComponent(other.storeFolder) + "/actions",
+  var mutation = await reader.post("/mail/actions?folder=" +
+    encodeURIComponent(other.storeFolder),
     "application/x-www-form-urlencoded",
     "action=trash&objectId=" + encodeURIComponent(other.objectId));
   count("a mutation aimed at the other account's folder is refused",
@@ -735,6 +768,7 @@ async function testIsolationOverTheBrowserSurface(identity, wiring) {
       storeFolder: bobsInbox.storeName,
       objectId:   bobsStored.objectid,
     };
+    await testTheSignInPageStatesNoTransportItDoesNotHave(reader);
     var inbox = await testSigningInReachesTheReadersOwnMail(reader);
     testTheFolderListHoldsOnlyTheReadersFolders(inbox, other.storeFolder);
     await testAnotherAccountsMailIsUnreachable(reader, other);

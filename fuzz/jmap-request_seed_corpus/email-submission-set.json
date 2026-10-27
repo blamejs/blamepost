@@ -1,0 +1,1 @@
+{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:submission"],"methodCalls":[["EmailSubmission/set",{"accountId":"a1","create":{"s1":{"emailId":"m1","envelope":{"mailFrom":{"email":"alice@example.com"},"rcptTo":[{"email":"bob@example.net"}]}}}},"c0"]],"createdIds":{}}

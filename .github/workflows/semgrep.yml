@@ -81,7 +81,7 @@ jobs:
         # a configuration error above.
         if: ${{ hashFiles('semgrep.sarif') != '' }}
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28  # v4.37.8
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd  # v4.38.1
         with:
           sarif_file: semgrep.sarif
           category: semgrep
@@ -108,7 +108,7 @@ jobs:
           # regression, and each targets a web framework or crypto library
           # reachable only through a runtime dependency. This package
           # declares none, so nothing they look for can be present.
-          TIER = "only supported in the Pro engine"
+          PRO_ONLY = "only supported in the Pro engine"
 
           # Registry rule metadata reaches the SARIF carrying whatever bytes
           # its author wrote, and semgrep does not re-encode it, so the file
@@ -131,10 +131,10 @@ jobs:
               print("every rule completed")
               sys.exit(0)
 
-          lost = [n for n in notes if TIER not in n[1]]
-          tier = [n for n in notes if TIER in n[1]]
+          lost = [n for n in notes if PRO_ONLY not in n[1]]
+          pro_only = [n for n in notes if PRO_ONLY in n[1]]
           print("rule executions that did not complete: %d" % len(notes))
-          print("  unavailable to the open-source engine: %d" % len(tier))
+          print("  unavailable to the open-source engine: %d" % len(pro_only))
           print("  incomplete for another reason:         %d" % len(lost))
 
           if lost:

@@ -1,0 +1,45 @@
+# libFuzzer dictionary for the ManageSieve reader.
+#
+# The line terminators are here for the reason given in
+# fuzz/smtp-command.dict: a curated seed is a text file and cannot carry
+# a CR byte, so the framing arrives from the dictionary.
+#
+# The quoting tokens matter separately. RFC 5804 section 1.2 lets a
+# string arrive quoted or as a literal, and the quoted form carries its
+# own escape handling that the SASL continuation reader depends on.
+
+crlf="\x0d\x0a"
+bare_cr="\x0d"
+bare_lf="\x0a"
+nul="\x00"
+
+dquote="\""
+escaped_dquote="\\\""
+escaped_backslash="\\\\"
+literal="{32+}"
+literal_sync="{32}"
+
+authenticate="AUTHENTICATE \"PLAIN\""
+capability="CAPABILITY"
+starttls="STARTTLS"
+logout="LOGOUT"
+listscripts="LISTSCRIPTS"
+putscript="PUTSCRIPT \"personal\" "
+getscript="GETSCRIPT \"personal\""
+setactive="SETACTIVE \"personal\""
+deletescript="DELETESCRIPT \"personal\""
+renamescript="RENAMESCRIPT "
+checkscript="CHECKSCRIPT "
+havespace="HAVESPACE \"personal\" 1024"
+noop="NOOP"
+unauthenticate="UNAUTHENTICATE"
+
+sieve_require="require [\"fileinto\"];"
+sieve_if="if header :contains "
+sieve_fileinto="fileinto \"Junk\";"
+sieve_keep="keep;"
+sieve_discard="discard;"
+sieve_stop="stop;"
+sieve_size="if size :over "
+sieve_vacation="vacation :days 7 "
+sieve_redirect="redirect \"bob@example.net\";"

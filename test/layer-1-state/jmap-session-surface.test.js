@@ -53,21 +53,28 @@ var SHUTDOWN_TIMEOUT_MS = 5000;
 
 // The session fields that name a route. Each carries templated segments
 // in braces that a client substitutes before it sends anything, and
-// substituting a value the server will refuse is fine and is the point:
+// substituting a value the server will refuse is fine for most of them:
 // a refusal is an answer, and a route that is not mounted at all is not.
 // The four RFC 8620 section 2 makes mandatory. A server advertises them
 // whether or not a backend stands behind them, so what matters is that
 // each is mounted and answers.
+//
+// The download route is the exception, and it is asked with a blob id
+// this account really holds. Its own refusal for a blob it cannot find
+// is a 404, which is the same status the router answers for a path it
+// does not serve, so a made-up id cannot tell a mounted route from an
+// absent one here. Naming a real blob asks the question this file exists
+// to ask and asks a stronger one: the route answers the octets.
 var MANDATORY_URL_FIELDS = ["apiUrl", "downloadUrl", "uploadUrl", "eventSourceUrl"];
 
 // The fifth is the one RFC 8887 section 3 ties to a capability, so it
 // is asserted through the capability rather than beside the others.
 var URL_FIELDS = MANDATORY_URL_FIELDS.concat(["webSocketUrl"]);
 
-function _concreteUrl(template, accountId) {
+function _concreteUrl(template, accountId, blobId) {
   return String(template)
     .replace(/\{accountId\}/g, encodeURIComponent(accountId))
-    .replace(/\{blobId\}/g, "blob-that-does-not-exist")
+    .replace(/\{blobId\}/g, encodeURIComponent(blobId))
     .replace(/\{name\}/g, "attachment.txt")
     .replace(/\{type\}/g, encodeURIComponent("text/plain"))
     .replace(/\{types\}/g, "*")
@@ -137,11 +144,11 @@ function testEveryAdvertisedCapabilityIsOneThisServerSupports(session, mounted) 
 // assertion inside the loop stops at the first route that fails, and
 // the routes after it are then neither reported nor counted, which
 // turns one broken route into an unknown number of untested ones.
-async function askEveryAdvertisedRoute(reader, session, accountId) {
+async function askEveryAdvertisedRoute(reader, session, accountId, blobId) {
   var reached = {};
   for (var i = 0; i < URL_FIELDS.length; i += 1) {
     var field = URL_FIELDS[i];
-    var url = _concreteUrl(session[field], accountId);
+    var url = _concreteUrl(session[field], accountId, blobId);
     // An event source streams, so it is asked for its response head alone.
     // Waiting for the body to end reports no answer for a route that
     // answered at once, and that reading passed only while the endpoint was
@@ -154,7 +161,14 @@ async function askEveryAdvertisedRoute(reader, session, accountId) {
     } else {
       answer = await reader.get(url, { Accept: "application/json" });
     }
-    reached[field] = { status: answer.status, url: url, contentType: answer.contentType };
+    // A streamed answer carries `contentType`; one read to the end does
+    // not, so the header is what both are read from.
+    var headers = answer.headers || {};
+    reached[field] = {
+      status:      answer.status,
+      url:         url,
+      contentType: String(answer.contentType || headers["content-type"] || ""),
+    };
   }
   return reached;
 }
@@ -177,6 +191,18 @@ function testEveryAdvertisedRouteAnswers(reached) {
     "because a client reads it with an event-stream parser or not at all",
     stream.status === 200 && /^text\/event-stream/.test(stream.contentType),
     stream.status + " " + JSON.stringify(stream.contentType));
+
+  // Mounted is the weaker half for the download route too. RFC 8620
+  // section 6.2 has a client fetch octets here, and this route answers
+  // its own 404 for a blob it cannot resolve, which a status check alone
+  // cannot separate from a route that is not mounted. Asked for a blob
+  // the account holds, a working route answers the octets under the one
+  // media type this server serves them as.
+  var blob = reached.downloadUrl;
+  count("and the download route answers a blob this account holds rather than merely " +
+    "answering, because a client fetches octets there or not at all",
+    blob.status === 200 && /^application\/octet-stream/.test(blob.contentType),
+    blob.status + " " + JSON.stringify(blob.contentType));
 }
 
 // ---- runner ----------------------------------------------------------------
@@ -247,7 +273,28 @@ async function run() {
 
     testTheDocumentNamesTheRoutesAClientWillUse(session);
 
-    var reached = await askEveryAdvertisedRoute(reader, session, alice.id);
+    // The blob id the download probe uses, found the way a client finds
+    // one: query the mailbox, then read `blobId` off the message. Taking
+    // it from the store instead would ask this file to know how a blob
+    // id is spelled, which is the server's answer rather than a fact a
+    // client brings with it.
+    var queried = await reader.post("/jmap/api", "application/json", JSON.stringify({
+      using: ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+      methodCalls: [
+        ["Email/query", { accountId: alice.id, filter: { inMailbox: "INBOX" } }, "c0"],
+        ["Email/get", {
+          accountId: alice.id,
+          "#ids": { resultOf: "c0", name: "Email/query", path: "/ids" },
+          properties: ["id", "blobId"],
+        }, "c1"],
+      ],
+    }), { Accept: "application/json" });
+    var fetched = JSON.parse(queried.body).methodResponses[1][1].list[0];
+    count("a client reads a blob id off the message it queried for",
+      fetched !== undefined && typeof fetched.blobId === "string" && fetched.blobId.length > 0,
+      queried.status + " " + queried.body.slice(0, 200));
+
+    var reached = await askEveryAdvertisedRoute(reader, session, alice.id, fetched.blobId);
     // The mandatory routes first. They hold today, and asserting them
     // before the capability keeps the four passes on the record when
     // the fifth claim fails.

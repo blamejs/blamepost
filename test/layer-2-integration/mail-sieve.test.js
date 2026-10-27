@@ -189,7 +189,15 @@ function anUnparseableScriptIsRefusedAtUpload(identity, alice, address) {
   count("and the refusal says it was the parse that failed",
     threw !== null && /did not parse/.test(threw.message),
     threw ? threw.message.slice(0, 90) : "");
-  count("so nothing unparseable is left active",
+  // What the refusal has to leave behind, asked of the script table
+  // rather than of the active slot. This account has activated nothing
+  // yet, so an empty active slot is what it would read whether the upload
+  // was refused or never attempted, and the stored row is the value that
+  // separates those two.
+  count("so nothing unparseable is stored for the delivery path to find",
+    identity.mailbox.sieveScripts.get(actor, "unparseable") === null,
+    JSON.stringify(identity.mailbox.sieveScripts.get(actor, "unparseable")));
+  count("and nothing unparseable is left active",
     identity.mailbox.sieveScripts.active(actor) === null,
     JSON.stringify(identity.mailbox.sieveScripts.active(actor)));
 }

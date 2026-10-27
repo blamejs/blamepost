@@ -93,3 +93,27 @@ release-notes/*.json text eol=lf
 
 # Message fixtures are byte-exact RFC 5322 artifacts. Never normalize them.
 *.eml -text binary
+
+# Fuzz seeds are what a coverage-guided run feeds a wire-protocol reader,
+# byte for byte. A line-ending rewrite on a Windows checkout would change
+# what the reader is handed, and libFuzzer writes its own entries into
+# these directories during a run, so the whole tree is binary rather than
+# a list per extension.
+fuzz/*_seed_corpus/** -text binary
+
+# libFuzzer reads a dictionary as text and refuses a malformed line, so
+# these stay LF on every platform. The CR and LF sequences they carry are
+# written as \x escapes inside the entries and are not affected.
+fuzz/*.dict text eol=lf
+
+# The harnesses and the workspace manifest, pinned the same way `scripts/`
+# and `test/` are, so the whole tracked JavaScript surface agrees on a line
+# ending instead of this one directory drifting to CRLF. Without these git
+# warns on every add that it will convert them, which is a warning nobody
+# reads after the second time.
+#
+# Deliberately `fuzz/*` and not `fuzz/**`: a seed corpus is byte-exact and
+# is claimed as binary above, and a recursive rule here would reach into
+# those directories and undo it for anything that happened to end in .js.
+fuzz/*.js   text eol=lf
+fuzz/*.json text eol=lf

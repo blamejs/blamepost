@@ -118,25 +118,11 @@ async function accountWith(identity, address, subjects) {
   return account;
 }
 
-// The message numbers and unique ids a UIDL listing carries, in the
-// order the listener wrote them. Read as a pair rather than as two
-// lists, because the claim is about which id sits at which number.
-function uidlPairs(text) {
-  var out = [];
-  var lines = String(text).split("\r\n");
-  for (var i = 0; i < lines.length; i += 1) {
-    var m = /^(\d+) (\S+)$/.exec(lines[i]);
-    if (m) out.push({ msgNum: parseInt(m[1], 10), uid: m[2] });
-  }
-  return out;
-}
-
-function statCount(text) {
-  var found = /^\+OK (\d+) (\d+)/m.exec(text);
-  return found === null
-    ? { messages: -1, bytes: -1 }
-    : { messages: parseInt(found[1], 10), bytes: parseInt(found[2], 10) };
-}
+// The UIDL listing and the STAT line, read from `test/helpers/wire.js`.
+// More than one file now asks a maildrop what it is holding, and two
+// copies of these are two ideas about what a listing line looks like.
+var uidlPairs = wire.pop3Uidl;
+var statCount = wire.pop3Stat;
 
 // A session raised to the point where a credential can be offered, with
 // the credential left to the caller. The shared ladder throws on a
@@ -199,6 +185,23 @@ var NOT_THIS_DOMAIN = [
 // told so, and has to be left unable to read or delete anything. Being
 // refused the drop but admitted to the transaction state would be the
 // worse half of both outcomes: two sessions numbering one mailbox.
+//
+// The refused session's ENDING is the other half of the rule, and this
+// is the arrangement on the wire that can show it. The listener reports
+// every session's ending, one refused the maildrop included, and the
+// report carries an actor for the account that session named. A release
+// that looked its maildrop up by ACCOUNT rather than by session would
+// find the HOLDER's, hand it back, and throw away the marks the holder
+// is carrying: RFC 1939 section 6 gives a DELE one place to become a
+// deletion, so the account holder is offered the mail they deleted all
+// over again. The holder marks a message before the contender arrives,
+// so a release that reached past it has something to lose, and the
+// assertions after the contender ends are what report the loss.
+//
+// The ordering is fixed rather than raced. The listener reports the
+// ending inside the refused session's own dispatch, before the reply to
+// its QUIT is written, and nothing is sent to the holder until that
+// reply has been read.
 async function aSecondSessionIsRefusedTheMaildrop(port, ladder, address) {
   var first = await Wire.pop3(port, Object.assign({ label: "pop3-holder" }, ladder));
   try {
@@ -206,6 +209,12 @@ async function aSecondSessionIsRefusedTheMaildrop(port, ladder, address) {
     var held = await first.read(/^(\+OK|-ERR)/m, "STAT answered");
     count("the first session holds a maildrop it can read",
       statCount(held).messages === 3, visible(held));
+
+    first.send("DELE 1");
+    var holderMark = await first.read(/^(\+OK|-ERR)/m, "DELE answered");
+    count("and it marks a message, so the maildrop it is holding carries something a " +
+      "release reaching past it would destroy",
+      /^\+OK/m.test(holderMark), visible(holderMark));
 
     var second = await unauthenticatedPop3(port, ladder, "pop3-contender");
     try {
@@ -234,8 +243,22 @@ async function aSecondSessionIsRefusedTheMaildrop(port, ladder, address) {
       second.close();
     }
 
+    // The contender has ended, and its ending has already been reported.
+    // Read as a verdict rather than waited on as a `+OK`: a holder whose
+    // maildrop was released underneath it answers `-ERR` here, and a
+    // read that only accepts the success runs out its budget and reports
+    // a timeout instead of the property that broke.
+    first.send("STAT");
+    var survived = await first.read(/^(\+OK|-ERR)/m, "STAT answered");
+    count("a refused session ending released nothing, so the session that opened the " +
+      "maildrop is still the one holding it, with the mark it made still on it",
+      statCount(survived).messages === 2, visible(survived));
+
     first.send("QUIT");
-    await first.read(/^\+OK/m, "QUIT answered");
+    var goodbye = await first.read(/^(\+OK|-ERR)/m, "QUIT answered");
+    count("and the holder's own QUIT applies what it marked rather than failing on a " +
+      "maildrop handed back on somebody else's ending",
+      /^\+OK/m.test(goodbye), visible(goodbye));
   } finally {
     first.close();
   }
@@ -247,8 +270,9 @@ async function aSecondSessionIsRefusedTheMaildrop(port, ladder, address) {
   try {
     next.send("STAT");
     var again = await next.read(/^(\+OK|-ERR)/m, "STAT answered");
-    count("a clean QUIT releases the maildrop, so the next session opens straight away",
-      statCount(again).messages === 3, visible(again));
+    count("a clean QUIT releases the maildrop, so the next session opens straight away, " +
+      "onto the mailbox the holder's UPDATE state left behind",
+      statCount(again).messages === 2, visible(again));
     next.send("QUIT");
     await next.read(/^\+OK/m, "QUIT answered");
   } finally {
@@ -340,20 +364,41 @@ async function anotherProtocolDoesNotRenumberTheMaildrop(ports, ladder, address,
     // hold against exactly the implementation it exists to refuse.
     imap = await Wire.imap(ports.imap, Object.assign({ label: "imap-writer" }, ladder, {
       address: address, password: PASSWORD }));
+    // Read by the tag each command was sent under. RFC 9051 section 7
+    // gives a result the command's tag and gives a remark the asterisk,
+    // and a `\S+` pattern matches both, so a read written that way
+    // returns whichever line lands first. This listener writes a remark
+    // after every APPEND (blamejs issue 699: the CRLF ending a
+    // synchronizing literal's command line is taken as a line of its
+    // own on the next turn of the read loop, and there is no branch for
+    // an empty one), so the two orders are both reachable and only one
+    // of them reads as a pass.
+    //
+    // The NOOP after each APPEND is a barrier rather than a wait. The
+    // remark is written on the turn after the APPEND, so a command sent
+    // now is answered after it and reading that answer clears it,
+    // leaving the next literal's continuation nothing stale to read as
+    // a refusal.
     for (var arrival = 1; arrival <= 2; arrival += 1) {
-      await imap.sendLiteral(imap.tag() + " APPEND INBOX",
+      var appendTag = imap.tag();
+      await imap.sendLiteral(appendTag + " APPEND INBOX",
         messageFor(address, "arrived mid session " + arrival),
         "<a message that arrives mid session>");
-      var appended = await imap.read(/^\S+ (OK|NO|BAD)/m, "APPEND answered");
+      var appended = await imap.read(new RegExp("^" + appendTag + " (OK|NO|BAD)", "m"),
+        "APPEND answered");
       count("a message can arrive over IMAP while a POP3 session is open",
-        /^\S+ OK/m.test(appended), visible(appended));
+        new RegExp("^" + appendTag + " OK", "m").test(appended), visible(appended));
+      var barrier = imap.tag();
+      imap.send(barrier + " NOOP");
+      await imap.read(new RegExp("^" + barrier + " (OK|NO|BAD)", "m"), "NOOP answered");
     }
 
     var selectTag = imap.tag();
     imap.send(selectTag + " SELECT INBOX");
     await imap.read(new RegExp("^" + selectTag + " (OK|NO|BAD)", "m"), "SELECT answered");
-    imap.send(imap.tag() + " STORE 1 +FLAGS (\\Deleted)");
-    await imap.read(/^\S+ (OK|NO|BAD)/m, "STORE answered");
+    var storeTag = imap.tag();
+    imap.send(storeTag + " STORE 1 +FLAGS (\\Deleted)");
+    await imap.read(new RegExp("^" + storeTag + " (OK|NO|BAD)", "m"), "STORE answered");
     var expungeTag = imap.tag();
     imap.send(expungeTag + " EXPUNGE");
     var expunged = await imap.read(new RegExp("^" + expungeTag + " (OK|NO|BAD)", "m"),
@@ -475,10 +520,12 @@ async function malformedCommandsAreRefusedAndTheSessionSurvives(port, ladder) {
 // the mailbox untouched, because the alternative is mail destroyed by a
 // session that never confirmed it wanted to destroy anything.
 //
-// The lock the dead session was holding is the other half, and this
-// server has no signal from the listener that a connection ended, so it
-// is a duration that releases it. What this case pins is the part that
-// must never depend on a duration: the mail.
+// The lock the dead session was holding is the other half. The listener
+// reports a session that ended by any route, a link that dropped without
+// a QUIT included, and that report is what releases the maildrop, so the
+// account holder collects their mail on the next connection rather than
+// waiting out a timer that cannot tell a finished session from a slow
+// one.
 async function aDeadSessionDeletesNothing(ports, ladder, address) {
   var session = await Wire.pop3(ports.pop3, Object.assign({ label: "pop3-dies" }, ladder));
   session.send("DELE 1");
@@ -504,6 +551,169 @@ async function aDeadSessionDeletesNothing(ports, ladder, address) {
     imap.send(imap.tag() + " LOGOUT");
   } finally {
     imap.close();
+  }
+
+  // The listener reports the end after any store work the session left
+  // in flight has settled, so the release lands a moment after the
+  // socket does. Polled rather than slept: a fixed budget here is the
+  // shape that passes alone and fails under load.
+  var reopened = null;
+  await helpers.waitUntil(async function () {
+    var attempt = await popSignIn(ports.pop3, ladder, "pop3-reconnects", address);
+    if (/^\+OK/m.test(attempt.verdict)) { reopened = attempt; return true; }
+    await endPop3(attempt.session);
+    return false;
+  }, {
+    timeoutMs: 5000,
+    label:     "pop3 wire: the maildrop a dropped connection was holding is released",
+  });
+
+  try {
+    count("a client reconnecting after its own connection dropped opens its maildrop " +
+      "again, because the session ending is what releases the hold rather than a timer",
+      /^\+OK/m.test(reopened.verdict), visible(reopened.verdict));
+    reopened.session.send("STAT");
+    var back = await reopened.session.read(/^(\+OK|-ERR)/m, "STAT answered");
+    count("and the mail the dropped session had marked is still there for them",
+      statCount(back).messages === 2, visible(back));
+  } finally {
+    await endPop3(reopened.session);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The other direction: QUIT still applies what it marked
+// ---------------------------------------------------------------------------
+
+// The release above runs on a report that fires however a session ended,
+// and QUIT is the one route where the marks are not discarded. RFC 1939
+// section 6 applies them in the UPDATE state, so the release has to land
+// after that commit rather than instead of it. A release that ran first
+// would answer the client `+OK` for a removal the server never
+// performed, and the message it was told was gone would be offered again
+// on the next collection.
+//
+// Which session a release NAMES is asserted by
+// `aSecondSessionIsRefusedTheMaildrop` above rather than here, and this
+// arrangement cannot reach it. Measured on the shipped composition, the
+// listener reports a quitting session's ending inside that session's own
+// QUIT dispatch, one millisecond after the UPDATE state commits and
+// before the `+OK` for the QUIT is written. A successor cannot begin its
+// own connection until it has read that reply, so it always opens after
+// the ending has landed, whatever is or is not done between the two. No
+// ordering of POP3 clients puts a live successor in front of a previous
+// session's ending, which is why the case that earns the claim is the
+// one whose ending belongs to a session refused the maildrop its holder
+// is still using.
+async function quitAppliesTheMarksTheSessionMade(ports, ladder, address) {
+  var quitting = await Wire.pop3(ports.pop3, Object.assign({ label: "pop3-quits" }, ladder));
+  try {
+    quitting.send("DELE 1");
+    var marked = await quitting.read(/^(\+OK|-ERR)/m, "DELE answered");
+    count("a session marks a message and then ends the way the protocol asks",
+      /^\+OK/m.test(marked), visible(marked));
+    quitting.send("DELE 2");
+    await quitting.read(/^(\+OK|-ERR)/m, "second DELE answered");
+    quitting.send("QUIT");
+    var goodbye = await quitting.read(/^(\+OK|-ERR)/m, "QUIT answered");
+    count("QUIT reports the removal rather than a partial one",
+      /^\+OK/m.test(goodbye), visible(goodbye));
+  } finally {
+    quitting.close();
+  }
+
+  var imap = await Wire.imap(ports.imap, Object.assign({ label: "imap-after-quit" }, ladder, {
+    address: address, password: PASSWORD }));
+  try {
+    var tag = imap.tag();
+    imap.send(tag + " SELECT INBOX");
+    var selected = await imap.read(new RegExp("^" + tag + " (OK|NO|BAD)", "m"), "SELECT answered");
+    count("QUIT applied the marks the session made, so releasing a maildrop when its session " +
+      "ends does not discard what the UPDATE state already committed",
+      /^\* 1 EXISTS/m.test(selected), visible(selected));
+    imap.send(imap.tag() + " LOGOUT");
+  } finally {
+    imap.close();
+  }
+
+  var next = await Wire.pop3(ports.pop3, Object.assign({ label: "pop3-follows" }, ladder));
+  try {
+    next.send("STAT");
+    var still = await next.read(/^(\+OK|-ERR)/m, "STAT answered");
+    count("a maildrop opens straight after the session before it quit, onto the mailbox " +
+      "that session's UPDATE state left rather than the one it opened with",
+      statCount(still).messages === 1, visible(still));
+
+    next.send("DELE 1");
+    var marks = await next.read(/^(\+OK|-ERR)/m, "DELE answered");
+    count("so it can still mark what it is holding", /^\+OK/m.test(marks), visible(marks));
+
+    next.send("QUIT");
+    var last = await next.read(/^(\+OK|-ERR)/m, "QUIT answered");
+    count("and its own QUIT applies rather than failing on a maildrop taken from underneath it",
+      /^\+OK/m.test(last), visible(last));
+  } finally {
+    next.close();
+  }
+
+  var reader = await Wire.imap(ports.imap, Object.assign({ label: "imap-after-second" }, ladder, {
+    address: address, password: PASSWORD }));
+  try {
+    var tag2 = reader.tag();
+    reader.send(tag2 + " SELECT INBOX");
+    var emptied = await reader.read(new RegExp("^" + tag2 + " (OK|NO|BAD)", "m"),
+      "SELECT answered");
+    count("and the mailbox holds what the two sessions between them left in it",
+      /^\* 0 EXISTS/m.test(emptied), visible(emptied));
+    reader.send(reader.tag() + " LOGOUT");
+  } finally {
+    reader.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NOOP is the keepalive the protocol defines, and it has to count
+// ---------------------------------------------------------------------------
+
+// A hold that ages out on idleness has to see every command, and NOOP is
+// the one the listener answers entirely on its own. A client sitting on
+// a maildrop it is not reading issues nothing else, so a hold that never
+// saw the keepalive would age out under a live connection and take that
+// session's deletion marks with it.
+//
+// Measured as a window rather than as a flag: the idle reading is taken
+// after a deliberate pause, then again immediately after one NOOP. A
+// keepalive that reached the hold moves the second reading back behind
+// the first.
+var IDLE_OBSERVATION_MS = 600;
+
+async function noopIsAKeepaliveTheHoldCanSee(port, ladder, identity) {
+  var session = await Wire.pop3(port, Object.assign({ label: "pop3-keepalive" }, ladder));
+  try {
+    session.send("STAT");
+    await session.read(/^(\+OK|-ERR)/m, "STAT answered");
+
+    await helpers.passiveObserve(IDLE_OBSERVATION_MS,
+      "pop3 wire: letting an open maildrop go quiet");
+
+    var beforeIdle = identity.mailbox.describe().dropIdleMs;
+    count("an open maildrop reports how long it has been since anything touched it",
+      Array.isArray(beforeIdle) && beforeIdle.length === 1,
+      JSON.stringify(beforeIdle));
+    count("and the reading has grown over a window nothing was sent in",
+      beforeIdle[0] >= IDLE_OBSERVATION_MS / 2, String(beforeIdle[0]) + "ms");
+
+    session.send("NOOP");
+    var noop = await session.read(/^(\+OK|-ERR)/m, "NOOP answered");
+    count("the listener answers NOOP itself", /^\+OK/m.test(noop), visible(noop));
+
+    var afterIdle = identity.mailbox.describe().dropIdleMs;
+    count("and the keepalive reached the hold, so a session doing nothing but NOOP does " +
+      "not age out of the maildrop it is holding",
+      afterIdle[0] < beforeIdle[0],
+      String(beforeIdle[0]) + "ms before, " + String(afterIdle[0]) + "ms after");
+  } finally {
+    await endPop3(session);
   }
 }
 
@@ -706,6 +916,8 @@ async function run() {
     var dave  = await accountWith(identity, "dave@" + DOMAIN,  ["first", "second", "third"]);
     var erin  = await accountWith(identity, "erin@" + DOMAIN,  ["first", "second", "third"]);
     var frank = await accountWith(identity, "frank@" + DOMAIN, ["first", "second", "third"]);
+    var grace = await accountWith(identity, "grace@" + DOMAIN, ["first", "second"]);
+    var heidi = await accountWith(identity, "heidi@" + DOMAIN, ["first", "second", "third"]);
 
     var sections = {
       mx:          { enabled: false, port: await reservePort(), address: LOOPBACK },
@@ -770,6 +982,14 @@ async function run() {
           carol.address);
       });
 
+    await helpers.withTestTimeout("pop3 wire: QUIT applies the marks the session made",
+      function () {
+        return quitAppliesTheMarksTheSessionMade(
+          { pop3: sections.pop3.port, imap: sections.imap.port },
+          Object.assign({}, base, { address: heidi.address, password: PASSWORD }),
+          heidi.address);
+      });
+
     await helpers.withTestTimeout("pop3 wire: one account however its domain is spelled",
       function () {
         return everySpellingOfTheDomainOpensTheSameMaildrop(sections.pop3.port, base, frank, 3);
@@ -785,29 +1005,25 @@ async function run() {
         return aDomainThisServerDoesNotHostIsRefused(sections.pop3.port, base, frank);
       });
 
-    // ---- the restart ------------------------------------------------------
-    //
-    // carol's session above died holding the maildrop, so the lock is
-    // still recorded when this server goes down. What comes back up must
-    // not inherit it.
-    var openDrops = identity.mailbox.describe().openDrops;
-    count("the maildrop the dead session was holding is still recorded before the restart",
-      openDrops >= 1, String(openDrops));
+    await helpers.withTestTimeout("pop3 wire: NOOP is a keepalive the hold can see",
+      function () {
+        return noopIsAKeepaliveTheHoldCanSee(sections.pop3.port, ladderFor(grace), identity);
+      });
 
-    var lockedOut = await unauthenticatedPop3(sections.pop3.port, base, "pop3-locked-out");
-    try {
-      lockedOut.send("USER " + carol.address);
-      await lockedOut.read(/^(\+OK|-ERR)/m, "USER answered");
-      lockedOut.send("PASS " + PASSWORD);
-      var stillHeld = await lockedOut.read(/^(\+OK|-ERR)/m, "PASS answered");
-      count("and a client reconnecting after its own connection dropped is refused its " +
-        "mailbox until that lock is released",
-        /^-ERR/m.test(stillHeld), visible(stillHeld));
-      lockedOut.send("QUIT");
-      await lockedOut.read(/^(\+OK|-ERR)/m, "QUIT answered");
-    } finally {
-      lockedOut.close();
-    }
+    // ---- nothing is held once the sessions have ended ---------------------
+    //
+    // Every session above has ended, one of them by dropping its
+    // connection rather than by quitting. A hold left standing after
+    // that is a mailbox its own owner cannot open.
+    await helpers.waitUntil(function () {
+      return identity.mailbox.describe().openDrops === 0;
+    }, {
+      timeoutMs: 5000,
+      label:     "pop3 wire: every maildrop is released once its session has ended",
+    });
+    count("no maildrop is held once every session has ended, whichever way each ended",
+      identity.mailbox.describe().openDrops === 0,
+      String(identity.mailbox.describe().openDrops));
 
     // Anything on either volume naming the drop, or any lock file at
     // all, would be a hold that could outlive the process that took it.

@@ -2,15 +2,23 @@
 // Copyright (c) blamejs contributors
 "use strict";
 /**
- * One retention floor, four ways to ask for a hard delete.
+ * One retention floor, six ways to ask for a hard delete.
  *
  * An operator who sets a compliance posture is promised one thing: a
  * message younger than the floor does not go, for the account owner as
  * much as for an administrator. That promise is only worth the wire it
- * is weakest on. IMAP EXPUNGE, POP3 QUIT, JMAP `Email/set` `destroyed`
- * and the webmail purge button all end at the same hard delete, so all
- * four are driven here, on real listeners, by clients speaking the
- * protocol rather than by a call into the adapter.
+ * is weakest on. IMAP EXPUNGE, IMAP CLOSE, POP3 QUIT, JMAP `Email/set`
+ * `destroyed` and the webmail purge button all end at the same hard
+ * delete, so all five are driven here, on real listeners, by clients
+ * speaking the protocol rather than by a call into the adapter.
+ *
+ * The sixth is UID EXPUNGE, and it is here because a command that
+ * removes nothing today is one release away from removing something.
+ * RFC 9051 section 6.4.9 gives it its own arguments and its own subset
+ * rule, so serving it means a second route into the store rather than a
+ * spelling of the first, and the vector that would notice is one that
+ * already runs. What it pins now is that the command is refused and the
+ * messages stay, in both configurations.
  *
  * Both directions are asserted, because either one alone is a test that
  * passes for the wrong reason. Under a posture the message stays and
@@ -58,14 +66,16 @@ var ALICE_PASSWORD   = "quiet lantern bicycle 4291";
 
 var SHUTDOWN_TIMEOUT_MS = 5000;
 
-// One folder per protocol. POP3 has no folder vocabulary and reads the
-// inbox, so it takes INBOX and the other three take one each, which
-// keeps a delete driven on one wire from carrying a message another
-// wire is about to ask for.
-var POP3_FOLDER = "INBOX";
-var IMAP_FOLDER = "Archive";
-var JMAP_FOLDER = "Junk";
-var WEB_FOLDER  = "Trash";
+// One folder per way of deleting. POP3 has no folder vocabulary and
+// reads the inbox, so it takes INBOX and the other four take one each,
+// which keeps a delete driven on one wire from carrying a message
+// another wire is about to ask for.
+var POP3_FOLDER       = "INBOX";
+var IMAP_FOLDER       = "Archive";
+var IMAP_CLOSE_FOLDER = "Drafts";
+var IMAP_UID_FOLDER   = "Sent";
+var JMAP_FOLDER       = "Junk";
+var WEB_FOLDER        = "Trash";
 
 // Distinctive enough that finding one in a page, a fetch or a listing
 // is proof that message is still there rather than a coincidence of
@@ -256,8 +266,9 @@ async function jmapRefusesADestroyInsideTheFloor(session, accountId, ids) {
 }
 
 async function theWebPurgeButtonIsRefusedInsideTheFloor(session, identity, entry) {
-  var base = "/mail/" + encodeURIComponent(WEB_FOLDER);
-  var purge = await session.post(base + "/actions", "application/x-www-form-urlencoded",
+  var base = "/mail?folder=" + encodeURIComponent(WEB_FOLDER);
+  var purge = await session.post("/mail/actions?folder=" + encodeURIComponent(WEB_FOLDER),
+    "application/x-www-form-urlencoded",
     "action=purge&objectId=" + encodeURIComponent(entry.ordinaryId));
   count("the purge button redirects rather than erroring", purge.status === 302,
     purge.status + " " + purge.body.slice(0, 120));
@@ -301,6 +312,86 @@ async function imapExpungeIsRefusedInsideTheFloor(port, caPem, address) {
   count("and the message is still in the folder", /^\* 1 EXISTS/m.test(after), visible(after));
 
   client.send("b4 LOGOUT");
+  client.close();
+}
+
+// RFC 9051 section 6.4.1 has CLOSE remove every message flagged
+// `\Deleted` and send no untagged EXPUNGE, so the only thing a client
+// can read is the tagged completion. The message is counted again from
+// a fresh SELECT, which is the answer that shows whether it went.
+async function imapCloseIsRefusedInsideTheFloor(port, caPem, address) {
+  var client = await imapSession(port, caPem, address, "imap-close-floor");
+
+  client.send("e0 SELECT " + IMAP_CLOSE_FOLDER);
+  var selected = await client.read(/^e0 (OK|NO|BAD)/m, "SELECT answered");
+  count("the folder CLOSE is driven on holds the message to begin with",
+    /^\* 1 EXISTS/m.test(selected), visible(selected));
+
+  client.send("e1 STORE 1 +FLAGS (\\Deleted)");
+  await client.read(/^e1 (OK|NO|BAD)/m, "STORE answered");
+
+  client.send("e2 CLOSE");
+  var closed = await client.read(/^e2 (OK|NO|BAD)/m, "CLOSE answered");
+  count("CLOSE completes rather than erroring", /^e2 OK/m.test(closed), visible(closed));
+
+  client.send("e3 SELECT " + IMAP_CLOSE_FOLDER);
+  var after = await client.read(/^e3 (OK|NO|BAD)/m, "SELECT answered");
+  count("and the message inside the floor is still in the folder after CLOSE",
+    /^\* 1 EXISTS/m.test(after), visible(after));
+
+  client.send("e4 LOGOUT");
+  client.close();
+}
+
+// The UIDs a selected mailbox holds, in the order it reports them. UID
+// EXPUNGE names messages by unique identifier rather than by sequence
+// number (RFC 9051 section 6.4.9), so a vector that guessed `1` would
+// be naming whatever UID the store happened to issue first.
+async function uidsIn(client, tag) {
+  client.send(tag + " UID FETCH 1:* (UID)");
+  var listing = await client.read(new RegExp("^" + tag + " (OK|NO|BAD)", "m"),
+    "UID FETCH answered");
+  return (listing.match(/UID (\d+)/g) || []).map(function (piece) {
+    return parseInt(piece.slice(4), 10);
+  });
+}
+
+// The sixth way to ask, and the one a client reaches for when it has
+// two connections open. RFC 9051 section 6.4.9 removes only the
+// messages the UID set names AND the `\Deleted` flag marks, so it is a
+// second removal path rather than a spelling of the first: a session
+// that flagged three messages and names one of them here expects the
+// other two to stay. The floor is asked of it separately because it
+// arrives at the store through its own arguments.
+async function imapUidExpungeIsRefusedInsideTheFloor(port, caPem, address) {
+  var client = await imapSession(port, caPem, address, "imap-uid-floor");
+
+  client.send("g0 SELECT " + IMAP_UID_FOLDER);
+  var selected = await client.read(/^g0 (OK|NO|BAD)/m, "SELECT answered");
+  count("the folder UID EXPUNGE is driven on holds the message to begin with",
+    /^\* 1 EXISTS/m.test(selected), visible(selected));
+
+  var uids = await uidsIn(client, "g1");
+  count("the message's UID can be read, so the set below names it rather than a guess",
+    uids.length === 1 && uids[0] > 0, JSON.stringify(uids));
+
+  client.send("g2 STORE 1 +FLAGS (\\Deleted)");
+  await client.read(/^g2 (OK|NO|BAD)/m, "STORE answered");
+
+  client.send("g3 UID EXPUNGE " + uids[0]);
+  var expunged = await client.read(/^g3 (OK|NO|BAD)/m, "UID EXPUNGE answered");
+  count("UID EXPUNGE is refused rather than answered, because this server does not serve " +
+    "the command RFC 9051 section 6.4.9 defines",
+    /^g3 NO/m.test(expunged), visible(expunged));
+  count("the client is NOT told a message inside the floor was removed by UID EXPUNGE",
+    !/^\* \d+ EXPUNGE/m.test(expunged), visible(expunged));
+
+  client.send("g4 SELECT " + IMAP_UID_FOLDER);
+  var after = await client.read(/^g4 (OK|NO|BAD)/m, "SELECT answered");
+  count("and the message inside the floor is still in the folder after UID EXPUNGE",
+    /^\* 1 EXISTS/m.test(after), visible(after));
+
+  client.send("g5 LOGOUT");
   client.close();
 }
 
@@ -373,8 +464,9 @@ async function jmapDestroysWhatIsNotHeld(session, accountId, ordinaryId, heldId)
 }
 
 async function theWebPurgeButtonDestroysWhatIsNotHeld(session, identity, entry) {
-  var base = "/mail/" + encodeURIComponent(WEB_FOLDER);
-  var purge = await session.post(base + "/actions", "application/x-www-form-urlencoded",
+  var base = "/mail?folder=" + encodeURIComponent(WEB_FOLDER);
+  var purge = await session.post("/mail/actions?folder=" + encodeURIComponent(WEB_FOLDER),
+    "application/x-www-form-urlencoded",
     "action=purge" +
     "&objectId=" + encodeURIComponent(entry.ordinaryId) +
     "&objectId=" + encodeURIComponent(entry.heldId));
@@ -419,6 +511,78 @@ async function imapExpungeDestroysWhatIsNotHeld(port, caPem, address) {
     /^c4 OK/m.test(fetched) && fetched.indexOf(HELD) !== -1, visible(fetched));
 
   client.send("c5 LOGOUT");
+  client.close();
+}
+
+// The same path with no posture set, where the hold is the only gate
+// left. Both messages are flagged and both UIDs are named, so a UID
+// EXPUNGE that reached the store past the hold would take both.
+async function imapUidExpungeDestroysWhatIsNotHeld(port, caPem, address) {
+  var client = await imapSession(port, caPem, address, "imap-uid-open");
+
+  client.send("h0 SELECT " + IMAP_UID_FOLDER);
+  var selected = await client.read(/^h0 (OK|NO|BAD)/m, "SELECT answered");
+  count("the folder UID EXPUNGE is driven on holds both messages to begin with",
+    /^\* 2 EXISTS/m.test(selected), visible(selected));
+
+  var uids = await uidsIn(client, "h1");
+  count("both UIDs can be read", uids.length === 2, JSON.stringify(uids));
+
+  client.send("h2 STORE 1:2 +FLAGS (\\Deleted)");
+  await client.read(/^h2 (OK|NO|BAD)/m, "STORE answered");
+
+  client.send("h3 UID EXPUNGE " + uids.join(","));
+  var expunged = await client.read(/^h3 (OK|NO|BAD)/m, "UID EXPUNGE answered");
+  count("UID EXPUNGE is refused with no posture set either, so the command is closed " +
+    "rather than gated",
+    /^h3 NO/m.test(expunged), visible(expunged));
+  count("and it removes nothing on its way to being refused",
+    (expunged.match(/^\* \d+ EXPUNGE/gm) || []).length === 0, visible(expunged));
+
+  client.send("h4 SELECT " + IMAP_UID_FOLDER);
+  var after = await client.read(/^h4 (OK|NO|BAD)/m, "SELECT answered");
+  count("both messages are still in the folder, the held one and the one beside it",
+    /^\* 2 EXISTS/m.test(after), visible(after));
+
+  // The ordinary message is the one an EXPUNGE in this folder WOULD
+  // take, so reading it back is what says the refusal above stopped the
+  // removal rather than the hold stopping half of it.
+  client.send("h5 FETCH 1:2 BODY[]");
+  var fetched = await client.read(/^h5 (OK|NO|BAD)/m, "FETCH answered");
+  count("and both are still readable",
+    fetched.indexOf(HELD) !== -1 && fetched.indexOf(ORDINARY) !== -1, visible(fetched));
+
+  client.send("h6 LOGOUT");
+  client.close();
+}
+
+async function imapCloseDestroysWhatIsNotHeld(port, caPem, address) {
+  var client = await imapSession(port, caPem, address, "imap-close-open");
+
+  client.send("f0 SELECT " + IMAP_CLOSE_FOLDER);
+  var selected = await client.read(/^f0 (OK|NO|BAD)/m, "SELECT answered");
+  count("the folder CLOSE is driven on holds both messages to begin with",
+    /^\* 2 EXISTS/m.test(selected), visible(selected));
+
+  client.send("f1 STORE 1:2 +FLAGS (\\Deleted)");
+  await client.read(/^f1 (OK|NO|BAD)/m, "STORE answered");
+
+  client.send("f2 CLOSE");
+  var closed = await client.read(/^f2 (OK|NO|BAD)/m, "CLOSE answered");
+  count("CLOSE succeeds", /^f2 OK/m.test(closed), visible(closed));
+  count("without the untagged EXPUNGE RFC 9051 section 6.4.1 says CLOSE does not send",
+    !/^\* \d+ EXPUNGE/m.test(closed), visible(closed));
+
+  client.send("f3 SELECT " + IMAP_CLOSE_FOLDER);
+  var after = await client.read(/^f3 (OK|NO|BAD)/m, "SELECT answered");
+  count("CLOSE removed the message that was not held", /^\* 1 EXISTS/m.test(after), visible(after));
+
+  client.send("f4 FETCH 1 BODY[]");
+  var fetched = await client.read(/^f4 (OK|NO|BAD)/m, "FETCH answered");
+  count("and the one left is the held one, still readable",
+    /^f4 OK/m.test(fetched) && fetched.indexOf(HELD) !== -1, visible(fetched));
+
+  client.send("f5 LOGOUT");
   client.close();
 }
 
@@ -568,7 +732,8 @@ function appendAndIdentify(identity, alice, wireName, marker) {
 // message beside one under a preservation order.
 function plant(identity, alice, withHeld) {
   var placed = {};
-  [POP3_FOLDER, IMAP_FOLDER, JMAP_FOLDER, WEB_FOLDER].forEach(function (name) {
+  [POP3_FOLDER, IMAP_FOLDER, IMAP_CLOSE_FOLDER, IMAP_UID_FOLDER, JMAP_FOLDER,
+    WEB_FOLDER].forEach(function (name) {
     var ordinary = appendAndIdentify(identity, alice, name, ORDINARY);
     var entry = { folder: ordinary.folder, ordinaryId: ordinary.objectId, heldId: "" };
     if (withHeld) {
@@ -601,6 +766,8 @@ async function run() {
     await aHeldMessageNamesTheHoldAndNotTheFloor(session, ctx.alice.id, held.objectId);
     await theWebPurgeButtonIsRefusedInsideTheFloor(session, ctx.identity, placed[WEB_FOLDER]);
     await imapExpungeIsRefusedInsideTheFloor(ctx.ports.imap, ctx.caPem, ctx.alice.address);
+    await imapCloseIsRefusedInsideTheFloor(ctx.ports.imap, ctx.caPem, ctx.alice.address);
+    await imapUidExpungeIsRefusedInsideTheFloor(ctx.ports.imap, ctx.caPem, ctx.alice.address);
     await pop3DeleteIsRefusedInsideTheFloor(ctx.ports.pop3, ctx.caPem, ctx.alice.address);
   });
 
@@ -616,6 +783,8 @@ async function run() {
       placed[JMAP_FOLDER].ordinaryId, placed[JMAP_FOLDER].heldId);
     await theWebPurgeButtonDestroysWhatIsNotHeld(session, ctx.identity, placed[WEB_FOLDER]);
     await imapExpungeDestroysWhatIsNotHeld(ctx.ports.imap, ctx.caPem, ctx.alice.address);
+    await imapCloseDestroysWhatIsNotHeld(ctx.ports.imap, ctx.caPem, ctx.alice.address);
+    await imapUidExpungeDestroysWhatIsNotHeld(ctx.ports.imap, ctx.caPem, ctx.alice.address);
     await pop3DeleteDestroysWhatIsNotHeld(ctx.ports.pop3, ctx.caPem, ctx.alice.address);
   });
 
