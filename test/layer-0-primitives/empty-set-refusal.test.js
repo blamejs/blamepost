@@ -739,12 +739,17 @@ async function aProbeListOfAbsentOptionalListenersIsRefused() {
   count("services: the table still declares an optional row to drive the empty set with",
     optional.length > 0, JSON.stringify(optional));
 
+  // The process check is off for this case. It reads the host's socket
+  // table, which on a host with nothing listening is empty and is refused
+  // as a missing tool before the probe set is reached, so the verdict
+  // this case pins would depend on what else the host runs.
   var rv = await _services(optional, {
     BLAMEPOST_SERVICE_HOST:  "127.0.0.1",
     BLAMEPOST_SERVICE_PORTS: optional.map(function (name) {
       return name + "=" + CLOSED_PORT;
     }).join(","),
     BLAMEPOST_SERVICE_PROBE_TIMEOUT_MS: "1500",
+    BLAMEPOST_SERVICE_PROCESS_CHECK:    "off",
   });
   count("services: a run that identified nothing fails the gate", rv.code === 2, tail(rv.out, 4));
   count("services: and says it identified nothing rather than that nothing was down",

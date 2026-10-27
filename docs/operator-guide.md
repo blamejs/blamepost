@@ -947,12 +947,16 @@ different name or port, a browser JMAP client there cannot open the socket;
 
 | Limit | Value | A request past it gets |
 |---|---|---|
-| `maxSizeRequest` | 1 MiB | `413` from the request body parser |
+| `maxSizeRequest` | 10 MiB, on `POST /jmap/api` and per WebSocket frame | `413` from the request body parser |
 | `maxCallsInRequest` | 32 | `400` with problem type `urn:ietf:params:jmap:error:limit` |
 | `maxConcurrentRequests` | 4 per account on `POST /jmap/api` | `400` with problem type `urn:ietf:params:jmap:error:limit` |
-| `maxObjectsInGet` | 50 ids per `/get` call | method error `requestTooLarge` |
-| `maxObjectsInSet` | 50 objects per `/set` call | method error `requestTooLarge` |
-| `maxSizeUpload` | 0 | blob upload answers `503` |
+| `maxObjectsInGet` | 500 ids per `/get` call | method error `requestTooLarge` |
+| `maxObjectsInSet` | 500 objects per `/set` call | method error `requestTooLarge` |
+| `maxSizeUpload` | 1 octet, the smallest value the framework accepts | blob upload answers `503` whatever its size |
+
+These are the values of the framework's strict JMAP profile, which the listener
+enforces and requires the session document to name. The 10 MiB request limit is
+also the JSON body limit of every other route, `/api/send` included.
 
 **Fetching a file.** The `downloadUrl` in the session document is
 `/jmap/download/{accountId}/{blobId}/{name}?accept={type}`. A blob id is a
@@ -1015,7 +1019,7 @@ to a file on a message.
 messages of the mailbox `filter.inMailbox` names, or of `INBOX` when the filter
 names none. `position` and `limit` page through that range, and a negative
 `position` counts back from the oldest message in it. A `limit` asks for up to
-50 ids and is capped there, which is the same ceiling `Email/get` takes in one
+500 ids and is capped there, which is the same ceiling `Email/get` takes in one
 call. The answer reports the `position` it started at and the `limit` it
 applied, and carries `total` when the request set `calculateTotal` to true. A
 request reaching past the newest 1000 messages is refused `requestTooLarge`;
@@ -3190,7 +3194,7 @@ records and the audit trail are where the rest of that history lives.
 
 ### The body a send takes
 
-The body is JSON of at most 1048576 bytes, which bounds every field together; a
+The body is JSON of at most 10485760 bytes, which bounds every field together; a
 larger body is refused with `413` before any field is read. `from` is required,
 at least one address across `to`, `cc` and `bcc` is required, and at least one of
 `text` and `html` is required.
@@ -3202,8 +3206,8 @@ at least one address across `to`, `cc` and `bcc` is required, and at least one o
 | `envelopeFrom` | The envelope sender. Defaults to the credential's return path, `bounces+<id>@<domain>`. At most 320 characters. |
 | `to`, `cc`, `bcc` | Arrays of addresses, at most 100 across the three together, each at most 320 characters. |
 | `subject` | At most 998 characters. |
-| `text` | The plain-text body. At most 1048576 characters, and `text` and `html` together fit inside the body limit above. |
-| `html` | The HTML body. At most 1048576 characters, and `text` and `html` together fit inside the body limit above. |
+| `text` | The plain-text body. At most 2097152 characters, and `text` and `html` together fit inside the body limit above. |
+| `html` | The HTML body. At most 2097152 characters, and `text` and `html` together fit inside the body limit above. |
 | `inReplyTo` | The `In-Reply-To` header. At most 998 characters. |
 | `references` | The `References` header, as an array of at most 20 entries, each at most 998 characters. |
 

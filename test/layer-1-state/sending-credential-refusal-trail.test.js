@@ -191,7 +191,7 @@ async function testABrokenBindingReachesTheTrail(registry) {
   var meta  = JSON.parse(b.db.from("_blamejs_api_keys").where({ id: rowId }).first().metadata);
   meta.maxRecipients = 1000000;
   b.db.from("_blamejs_api_keys").where({ id: rowId })
-    .updateOne({ metadata: JSON.stringify(meta) });
+    .updateOne({ id: rowId, metadata: JSON.stringify(meta) });
 
   var expected = {
     reason:       "binding-mismatch",

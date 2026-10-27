@@ -149,7 +149,11 @@ var CASES = [
   {
     label:  "an unanchored negated-class matcher in lib/ is named",
     expect: "fail",
-    names:  "superlinear",
+    // Measured alone it grows at a slope near 2.00. On a slower host, or
+    // beside the other cases' lanes, it reaches the probe budget before a
+    // slope can be fitted and is refused as over-budget instead, which
+    // the gate counts as named in the same way.
+    names:  /superlinear|over-budget/,
     mutate: function (tree) {
       tree["lib/web/index.js"] = '"use strict";\n' +
         "function stripTags(html) { return String(html).replace(/<[^>]*>/g, \" \"); }\n" +
@@ -415,8 +419,9 @@ async function run() {
       return;
     }
     count(c.label + " (non-zero exit)", r.code === 1, flat.slice(0, 400));
-    count(c.label + ": the finding names " + JSON.stringify(c.names),
-      flat.indexOf(c.names) !== -1, flat.slice(0, 400));
+    var named = c.names instanceof RegExp ? c.names.test(flat) : flat.indexOf(c.names) !== -1;
+    count(c.label + ": the finding names " + String(c.names),
+      named, flat.slice(0, 400));
   });
 }
 

@@ -529,7 +529,7 @@ async function testRequestFramesDispatchOverTheSocket(conn, accountId, otherAcco
   });
   var refused = second[0].methodResponses[0];
   count("a Request naming another account's id is refused over the socket too",
-    refused[0] === "error" && refused[1].type === "urn:ietf:params:jmap:error:accountNotFound",
+    refused[0] === "error" && refused[1].type === "accountNotFound",
     JSON.stringify(refused));
 }
 

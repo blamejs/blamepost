@@ -180,6 +180,15 @@ function _escapeForRegExp(text) {
   return String(text).replace(REGEXP_SPECIAL_RE, "\\$&");
 }
 
+// Whether `part` is `whole` with zero or more characters taken out.
+function _isSubsequence(part, whole) {
+  var at = 0;
+  for (var i = 0; i < whole.length && at < part.length; i += 1) {
+    if (whole[i] === part[at]) at += 1;
+  }
+  return at === part.length;
+}
+
 function _angleCount(text) {
   var n = neverThrows("blamepost.mail.compose.angleAddressCount", function () {
     return compose.angleAddressCount(text);
@@ -230,8 +239,14 @@ function _addressOfEntry(entry) {
   // address that really was cut at one.
   var pairs = _angleCount(entry);
   if (pairs === 0) {
+    // RFC 5322 §3.2.2 comments around a bare addr-spec are not part of
+    // it, so they are the one thing taken out: an entry with no `(` is
+    // the address whole, and any other entry gives an address made of
+    // its own characters in their own order.
+    var whole = entry.trim();
     holds("normalizeAddress: an entry carrying no angle address is cut at none",
-      cut.address === entry.trim(), { entry: entry, address: cut.address });
+      entry.indexOf("(") === -1 ? cut.address === whole : _isSubsequence(cut.address, whole),
+      { entry: entry, address: cut.address });
   } else {
     // The address has to sit between a `<` and a `>` somewhere in the
     // entry, allowing the whitespace the cut trims off either end.

@@ -683,7 +683,7 @@ async function testJmapAnswersForTheReaderAlone(reader, readerId, otherId, other
   var borrowedAnswer = JSON.parse(borrowed.body).methodResponses[0];
   count("a JMAP call naming the other account's id is refused",
     borrowedAnswer[0] === "error" &&
-    borrowedAnswer[1].type === "urn:ietf:params:jmap:error:accountNotFound",
+    borrowedAnswer[1].type === "accountNotFound",
     JSON.stringify(borrowedAnswer));
 
   var query = await reader.jmap([

@@ -627,6 +627,9 @@ async function run() {
       refused.page.indexOf(TRANSPORT_MARK) === -1,
       refused.page.replace(/\s+/g, " ").slice(0, 240));
 
+    // Stopped as the operator guide stops it, so the server shuts down and
+    // gives the volume lock back before the next container opens it.
+    await before.stop();
     await before.remove();
     before = null;
 
@@ -929,6 +932,7 @@ async function run() {
     count("the published MX default carries no protocol once the listener moved",
       quiet === null, String(quiet));
 
+    await after.stop();
     await after.remove();
     after = null;
 

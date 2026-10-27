@@ -145,14 +145,17 @@ Wire.prototype._take = function () {
 };
 
 // Wait for the listener to say something matching `pattern`, then take
-// everything said so far off the buffer and return it.
-Wire.prototype.read = function (pattern, what) {
+// everything said so far off the buffer and return it. `opts.timeoutMs`
+// replaces the default wait for an answer that takes longer to produce,
+// such as the reply to a message near the size ceiling.
+Wire.prototype.read = function (pattern, what, opts) {
   var self = this;
+  var timeoutMs = opts && typeof opts.timeoutMs === "number" ? opts.timeoutMs : WIRE_TIMEOUT_MS;
   return helpers.waitUntil(function () {
     if (!pattern.test(self.buf)) return false;
     return self._take();
   }, {
-    timeoutMs: WIRE_TIMEOUT_MS,
+    timeoutMs: timeoutMs,
     label:     self.label + ": " + what,
   }).then(function (hit) { return hit.text; });
 };

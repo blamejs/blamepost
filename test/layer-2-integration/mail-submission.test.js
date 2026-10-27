@@ -1295,13 +1295,12 @@ async function theSubmissionPathSignsWithoutRewriting(ports, caPem, alice, bob, 
   sender.send("DATA");
   await sender.read(/^354 /m, "DATA answered");
   // RFC 5321 section 4.1.1.4 terminates the mail data with CRLF, a
-  // period and CRLF, and the CRLF that opens that sequence is not part
-  // of the message. So the terminator is written in full here rather
-  // than borrowing the message's own last line ending for it, which
-  // leaves the stored copy comparable to the fixture octet for octet
-  // instead of two bytes short of it for a reason that has nothing to do
-  // with signing.
-  sender.sendRaw(Buffer.concat([message, Buffer.from("\r\n.\r\n", "latin1")]),
+  // period and CRLF, where the first CRLF is the end of the message's
+  // own last line. The fixture already ends in CRLF, so only the period
+  // line is written after it, and the stored copy is comparable to the
+  // fixture octet for octet. Writing a further CRLF first would add an
+  // empty last line to the message.
+  sender.sendRaw(Buffer.concat([message, Buffer.from(".\r\n", "latin1")]),
     "<a message carrying octets that are not valid UTF-8>");
   var accepted = await sender.read(/^\d{3} /m, "message answered");
   count("an 8-bit message is accepted for delivery", /^250 /m.test(accepted), visible(accepted));

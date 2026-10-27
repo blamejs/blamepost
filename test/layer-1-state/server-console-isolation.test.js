@@ -364,7 +364,7 @@ async function testJmapAnswersForTheReaderAlone(reader, own, victim) {
     foreign[0] === "error", JSON.stringify(foreign));
   count("and the refusal is the one RFC 8620 section 3.6.1 defines for an account " +
     "the actor may not touch",
-    foreign[1] && foreign[1].type === "urn:ietf:params:jmap:error:accountNotFound",
+    foreign[1] && foreign[1].type === "accountNotFound",
     JSON.stringify(foreign[1]));
 
   var email = browser.answer(await reader.jmap([

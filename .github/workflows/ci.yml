@@ -58,7 +58,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node 24.22.1 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '24.22.1'
 
@@ -145,7 +145,7 @@ jobs:
         # be read. The whole directory is uploaded rather than the one
         # file, so a gate that persisted its own log arrives with it.
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: smoke-log-${{ matrix.os }}
           path: .test-output/
@@ -163,7 +163,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node 24.22.1 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '24.22.1'
 
@@ -204,7 +204,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node 24.22.1 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '24.22.1'
 
@@ -264,7 +264,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node 24.22.1 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '24.22.1'
 
@@ -288,7 +288,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node 24.22.1 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '24.22.1'
 
@@ -377,7 +377,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node 24.22.1 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '24.22.1'
 
@@ -414,7 +414,7 @@ jobs:
         # scannable dependency surface is the dev toolchain the
         # committed lockfile pins, which is exactly the supply chain
         # that runs during a release.
-        uses: google/osv-scanner-action/osv-scanner-action@a345acffa64b0eaede81a3d9aae6141214d9c8fc  # v2.6.0
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36  # v2.7.0
         with:
           scan-args: |-
             --lockfile=package-lock.json
@@ -424,7 +424,7 @@ jobs:
         # vendored: refresh with `bash scripts/vendor-update.sh` (the
         # vendor-currency job names the upstream release) and re-run.
         if: steps.vendor.outputs.present == 'true'
-        uses: google/osv-scanner-action/osv-scanner-action@a345acffa64b0eaede81a3d9aae6141214d9c8fc  # v2.6.0
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36  # v2.7.0
         with:
           scan-args: |-
             --sbom=sbom.vendored.cdx.json
@@ -651,7 +651,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node 24.22.1 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '24.22.1'
 

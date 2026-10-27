@@ -183,7 +183,7 @@ async function aForeignAccountIdIsRefusedLikeOneNobodyHolds(reader, bob, fixture
     var foreign = await jmap(reader, [[name, Object.assign({ accountId: bob.id }, argsFor[name]), "c0"]]);
     var nobody  = await jmap(reader, [[name, Object.assign({ accountId: NOBODY_ACCOUNT }, argsFor[name]), "c0"]]);
     count(name + " naming the other account's accountId is refused with accountNotFound",
-      foreign.first[0] === "error" && foreign.first[1].type === JMAP_ERROR + "accountNotFound",
+      foreign.first[0] === "error" && foreign.first[1].type === "accountNotFound",
       JSON.stringify(foreign.first));
     count(name + " answers the other account's accountId exactly as it answers one nobody holds",
       sameJson(foreign.first, nobody.first),
@@ -201,7 +201,7 @@ async function unservedMethodsAnswerTheSameForEitherAccount(reader, alice, bob, 
     var own = await jmap(reader, [[name, { accountId: alice.id, fromAccountId: bob.id }, "c0"]]);
     var other = await jmap(reader, [[name, { accountId: bob.id, fromAccountId: bob.id }, "c0"]]);
     count(name + " is answered unknownMethod",
-      own.first[0] === "error" && own.first[1].type === JMAP_ERROR + "unknownMethod",
+      own.first[0] === "error" && own.first[1].type === "unknownMethod",
       JSON.stringify(own.first));
     count(name + " answers the same whichever account it names",
       sameJson(own.first, other.first),
@@ -215,7 +215,7 @@ async function unservedMethodsAnswerTheSameForEitherAccount(reader, alice, bob, 
     accountId: alice.id, destroy: ["INBOX"], onDestroyRemoveEmails: true,
   }, "c0"]]);
   count("Mailbox/set with onDestroyRemoveEmails is answered unknownMethod",
-    destroy.first[0] === "error" && destroy.first[1].type === JMAP_ERROR + "unknownMethod",
+    destroy.first[0] === "error" && destroy.first[1].type === "unknownMethod",
     JSON.stringify(destroy.first));
   var after = await jmap(reader, [["Email/query", { accountId: alice.id, filter: { inMailbox: "INBOX" } }, "c0"]]);
   count("and the mailbox still holds every message it held",
@@ -228,7 +228,7 @@ async function unservedMethodsAnswerTheSameForEitherAccount(reader, alice, bob, 
     create: { p: { deviceClientId: "d1", url: "https://" + LOOPBACK + ":1/push", types: null } },
   }, "c0"]]);
   count("PushSubscription/set naming a callback url is answered unknownMethod",
-    push.first[0] === "error" && push.first[1].type === JMAP_ERROR + "unknownMethod",
+    push.first[0] === "error" && push.first[1].type === "unknownMethod",
     JSON.stringify(push.first));
 }
 
@@ -341,15 +341,17 @@ async function theSessionAdvertisesTheCoreLimits(reader) {
   count("the core capability advertises collationAlgorithms as a list",
     Array.isArray(core.collationAlgorithms), JSON.stringify(core));
   count("the advertised request size is the body parser's JSON limit",
-    core.maxSizeRequest === b.constants.BYTES.mib(1), String(core.maxSizeRequest));
+    core.maxSizeRequest === b.constants.BYTES.mib(10), String(core.maxSizeRequest));
   count("every limit a request is measured against is at least one",
     core.maxConcurrentRequests >= 1 && core.maxCallsInRequest >= 1 &&
     core.maxObjectsInGet >= 1 && core.maxObjectsInSet >= 1, JSON.stringify(core));
   return core;
 }
 
+// RFC 8620 section 3.6.2 writes a method-level error type bare, with no
+// URN prefix; the prefix belongs to the request-level problem types.
 function isMethodError(answer, type) {
-  return answer[0] === "error" && answer[1] && answer[1].type === JMAP_ERROR + type;
+  return answer[0] === "error" && answer[1] && answer[1].type === type;
 }
 
 async function theObjectLimitsAreEnforced(reader, alice, fixture, core, log) {
@@ -500,10 +502,21 @@ async function aBodyThatIsNotAJmapRequestIsRefused(reader, alice) {
     { label: "a body that stops parsing part way", body: "{\"using\":" },
     { label: "JSON nested two thousand levels", body: "{\"using\":" + deep + "}" },
     { label: "a body one byte over maxSizeRequest",
-      body: JSON.stringify({ using: [], pad: "x".repeat(b.constants.BYTES.mib(1)) }) },
+      body: JSON.stringify({ using: [], pad: "x".repeat(b.constants.BYTES.mib(10)) }),
+      // The parser refuses a body this size on its Content-Length and
+      // closes the connection, which a client still sending sees as a
+      // reset rather than as the 413 written before it.
+      resetIsARefusal: true },
   ];
   for (var p = 0; p < parserRefused.length; p += 1) {
-    var refused = await reader.post("/jmap/api", "application/json", parserRefused[p].body, accept);
+    var refused;
+    try {
+      refused = await reader.post("/jmap/api", "application/json", parserRefused[p].body, accept);
+    } catch (sendErr) {
+      if (!parserRefused[p].resetIsARefusal ||
+          !/ECONNRESET|EPIPE/.test(String(sendErr && sendErr.code || sendErr))) throw sendErr;
+      refused = { status: 413, body: "connection closed by the server while sending" };
+    }
     count(parserRefused[p].label + " is answered with a client error rather than a server error",
       refused.status >= 400 && refused.status < 500, refused.status + " " + String(refused.body).slice(0, 160));
   }

@@ -75,6 +75,9 @@ var ALICE_PASSWORD   = "quiet lantern bicycle 4291";
 
 var SHUTDOWN_TIMEOUT_MS = 5000;
 
+// How long the reply to a whole message is waited for.
+var MESSAGE_ANSWER_MS = 60000;
+
 var BYTES = b.constants.BYTES;
 
 // The number docs/operator-guide.md publishes under its ceilings table,
@@ -184,7 +187,10 @@ async function deliver(mxPort, caPem, to, text, label) {
   peer.send("DATA");
   await peer.read(/^354 /m, "DATA answered");
   peer.sendRaw(text + "\r\n.\r\n", "<" + text.length + " octets and the terminating dot>");
-  var reply = await peer.read(/^\d{3} /m, "message answered");
+  // A message near the ceiling is parsed, scanned and sealed before it is
+  // answered, which on a two-core runner takes longer than a command's
+  // ordinary reply.
+  var reply = await peer.read(/^\d{3} /m, "message answered", { timeoutMs: MESSAGE_ANSWER_MS });
   peer.send("QUIT");
   peer.close();
   return reply.trim();

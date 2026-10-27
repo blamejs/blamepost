@@ -329,8 +329,12 @@ async function testALiftedScopeRefuses(reg, pair) {
   var shown = await reg.show(victim.id);
   count("blamepost.store.credentials.show reports the broken binding rather than hiding it",
     shown !== null && shown.bindingHolds === false, JSON.stringify(shown));
-  count("and it shows which domain the damaged row now claims",
-    shown.storedDomain === ALPHA && shown.domain === null,
+  // The sealed scope is bound to the row it was written for, so the copy
+  // lifted from another row does not open under this one, and no domain
+  // is reported for it rather than the donor's.
+  count("and it reports no domain for the damaged row, because the lifted scope does not " +
+    "open under a row it was not sealed for",
+    shown.storedDomain === null && shown.domain === null,
     shown.storedDomain + "/" + shown.domain);
 
   var capture = helpers.auditCapture();
@@ -339,9 +343,12 @@ async function testALiftedScopeRefuses(reg, pair) {
       id: victim.id, destroy: true, reason: "the row was tampered with" });
   } finally { capture.release(); }
   var rows = capture.forAction("domain.sending_credential_removed");
-  count("removing a damaged credential files a row that names a domain",
-    rows.length === 1 && rows[0].resourceId === ALPHA,
-    rows.length === 1 ? String(rows[0].resourceId) : "no row");
+  // The row names the credential. It names no domain: the scope on the
+  // damaged row is the lifted copy, which does not open under it.
+  count("removing a damaged credential files a row that names the credential",
+    rows.length === 1 && helpers.metadataOf(rows[0]).credentialId === victim.id &&
+    helpers.metadataOf(rows[0]).domain === null,
+    rows.length === 1 ? JSON.stringify(helpers.metadataOf(rows[0])) : "no row");
   count("and the row says the binding did not hold",
     rows.length === 1 && helpers.metadataOf(rows[0]).bindingHolds === false,
     rows.length === 1 ? JSON.stringify(helpers.metadataOf(rows[0])) : "no row");
@@ -368,7 +375,7 @@ async function testAWidenedRefusalListRefuses(reg) {
 
   meta.refusedLocalParts = [];
   b.db.from("_blamejs_api_keys").where({ id: rowId })
-    .updateOne({ metadata: JSON.stringify(meta) });
+    .updateOne({ id: rowId, metadata: JSON.stringify(meta) });
 
   var after = await reg.verify(made.token);
   count("a credential whose refusal list was emptied on the volume is refused",
@@ -384,7 +391,7 @@ async function testAWidenedRefusalListRefuses(reg) {
     reason:        "checking that unreadable storage refuses rather than opening up",
   });
   b.db.from("_blamejs_api_keys").where({ id: "send:" + other.id })
-    .updateOne({ metadata: "{not json" });
+    .updateOne({ id: "send:" + other.id, metadata: "{not json" });
   var unreadable = await reg.verify(other.token);
   count("a credential whose stored record cannot be read is refused",
     unreadable.ok === false, JSON.stringify(unreadable));
@@ -415,7 +422,7 @@ async function testAWidenedRefusalListRefuses(reg) {
     b.db.from("_blamejs_api_keys").where({ id: redirectedRow }).first().metadata);
   redirectedMeta.bounceMailbox = "ops@" + ZULU;
   b.db.from("_blamejs_api_keys").where({ id: redirectedRow })
-    .updateOne({ metadata: JSON.stringify(redirectedMeta) });
+    .updateOne({ id: redirectedRow, metadata: JSON.stringify(redirectedMeta) });
 
   var moved = await reg.verify(redirected.token);
   count("a credential whose bounce mailbox was redirected on the volume is refused",
@@ -436,7 +443,7 @@ async function testAWidenedRefusalListRefuses(reg) {
     b.db.from("_blamejs_api_keys").where({ id: raisedRow }).first().metadata);
   raisedMeta.maxRecipients = 1000000;
   b.db.from("_blamejs_api_keys").where({ id: raisedRow })
-    .updateOne({ metadata: JSON.stringify(raisedMeta) });
+    .updateOne({ id: raisedRow, metadata: JSON.stringify(raisedMeta) });
 
   var widened = await reg.verify(raised.token);
   count("a credential whose recipient ceiling was raised on the volume is refused",
@@ -602,7 +609,7 @@ async function testExpiry(reg) {
   // The column is not sealed, so this is the same edit an operator's own
   // clock passing the moment would produce.
   b.db.from("_blamejs_api_keys").where({ id: "send:" + made.id })
-    .updateOne({ expiresAt: Date.now() - 1000 });
+    .updateOne({ id: "send:" + made.id, expiresAt: Date.now() - 1000 });
   count("a credential past its expiry is refused",
     (await reg.verify(made.token)).ok === false);
 
@@ -687,7 +694,7 @@ async function testStillSending(reg, handle) {
   // column is not sealed, so moving it is what an operator's own clock
   // reaching the moment would produce.
   b.db.from("_blamejs_api_keys").where({ id: "send:" + made.id })
-    .updateOne({ expiresAt: Date.now() - 1000 });
+    .updateOne({ id: "send:" + made.id, expiresAt: Date.now() - 1000 });
   var lapsed = await reg.stillSending(made.id);
   count("a credential past its expiry has stopped, with nothing having been written for " +
     "that to be true",

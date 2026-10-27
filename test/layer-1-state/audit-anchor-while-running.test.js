@@ -316,16 +316,19 @@ async function aKilledServerLeavesAnAnchoredTrail(root) {
 
     // The claim. Nothing is stopping this server and nothing is
     // signaling it, so an anchor that moves here moved because the
-    // server anchored its own trail while it ran.
+    // server anchored its own trail while it ran. The wait is for the
+    // anchor to reach the trail, which is what the second check below
+    // reads: an anchor can pass the boot counter on one tick and reach
+    // the trail on a later one, and a slow host shows the gap.
     var advanced = null;
     try {
       advanced = await helpers.waitUntil(function () {
         if (runner.exited()) throw new Error("the server exited before the anchor moved");
         var now = anchorCounter(dataDir);
-        return (now !== null && now > atBoot) ? now : false;
+        return (now !== null && now > atBoot && now >= trail) ? now : false;
       }, {
         timeoutMs: ANCHOR_WAIT_MS,
-        label:     "audit-anchor-while-running: the anchor advances past the counter the boot left",
+        label:     "audit-anchor-while-running: the anchor reaches the trail the server wrote",
       });
     } catch (_e) { advanced = null; }
 

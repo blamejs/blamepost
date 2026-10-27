@@ -60,13 +60,11 @@ var ALICE            = "alice@" + DOMAIN;
 
 // More than one page, so a request for the second page has somewhere to
 // go and a truthful total differs from the page it fits in.
-var INBOX_MESSAGES = 130;
+var INBOX_MESSAGES = 520;
 
 // The one message a keyword filter would single out. A filter this
 // server drops answers with all of them instead.
 var FLAGGED_SUBJECT = "the one message carrying a keyword";
-
-var JMAP_ERROR = "urn:ietf:params:jmap:error:";
 
 var SHUTDOWN_TIMEOUT_MS = 5000;
 var READER_TIMEOUT_MS   = 30000;
@@ -129,8 +127,10 @@ async function call(reader, methodCalls) {
   };
 }
 
+// RFC 8620 section 3.6.2 writes a method-level error type bare, with no
+// URN prefix; the prefix belongs to the request-level problem types.
 function isMethodError(answer, type) {
-  return answer[0] === "error" && answer[1] && answer[1].type === JMAP_ERROR + type;
+  return answer[0] === "error" && answer[1] && answer[1].type === type;
 }
 
 function queryArgs(alice, extra) {
@@ -403,24 +403,27 @@ async function aSubmissionThisServerWillNotDelayIsRefused(reader, alice, fixture
 
 // ---- the result reference the framework resolves ----------------------------
 
-// RFC 8620 section 3.7 has `*` map the rest of the path over an array.
-// The resolver that runs before any handler here returns the array and
-// drops the rest of the path, so what a handler is handed for
-// `/list/*/id` is a list of Mailbox objects rather than a list of ids.
+// RFC 8620 section 3.7 has `*` map the rest of the path over an array,
+// so `/list/*/id` over a Mailbox/get answer is the list of mailbox ids.
 // The invariant this server owns is what happens next: an argument that
 // arrived through a back-reference is read by the same validation as one
-// the client wrote out, so an unexpected shape is a refusal and not a
-// throw or an answer built from it.
+// the client wrote out. Mailbox ids name no message, so Email/get
+// reports each one not found and answers with no mail.
 async function aResolvedResultReferenceIsValidatedLikeAnyOtherArgument(reader, alice) {
   var wildcard = await call(reader, [
     ["Mailbox/get", { accountId: alice.id }, "c0"],
     ["Email/get", { accountId: alice.id,
       "#ids": { resultOf: "c0", name: "Mailbox/get", path: "/list/*/id" } }, "c1"],
   ]);
-  count("an id list that arrived through a result reference is validated like a written one",
-    isMethodError(wildcard.all[1], "invalidArguments"), JSON.stringify(wildcard.all[1]).slice(0, 200));
-  count("and the refusal carries no mail",
-    ((wildcard.all[1][1] || {}).list || []).length === 0, JSON.stringify(wildcard.all[1]).slice(0, 200));
+  var mailboxIds = ((wildcard.all[0] || [])[1] || {}).list || [];
+  var answered = (wildcard.all[1] || [])[1] || {};
+  count("an id list that arrived through a result reference is read like a written one: " +
+    "each mailbox id it carries is reported not found",
+    wildcard.all[1][0] === "Email/get" && mailboxIds.length > 0 &&
+    Array.isArray(answered.notFound) && answered.notFound.length === mailboxIds.length,
+    JSON.stringify(wildcard.all[1]).slice(0, 200));
+  count("and the answer carries no mail",
+    (answered.list || []).length === 0, JSON.stringify(wildcard.all[1]).slice(0, 200));
 
   var piped = await call(reader, [
     ["Email/query", { accountId: alice.id }, "c0"],

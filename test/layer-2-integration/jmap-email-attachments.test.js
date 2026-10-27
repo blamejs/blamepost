@@ -71,7 +71,6 @@ var OTHER  = "bob@" + DOMAIN;
 
 var SHUTDOWN_TIMEOUT_MS = 5000;
 
-var JMAP_ERROR  = "urn:ietf:params:jmap:error:";
 var JMAP_HEADERS = { Accept: "application/json" };
 
 // How many identifiers one call may name, which is what the session
@@ -590,7 +589,7 @@ async function aMalformedPropertiesArgumentIsRefused(reader, accountId, ids) {
     var first = answer.first || [];
     count("properties as " + vectors[i].label + " is refused at the point of parse",
       first[0] === "error" && first[1] &&
-      first[1].type === JMAP_ERROR + "invalidArguments", describe(answer));
+      first[1].type === "invalidArguments", describe(answer));
     count("and no message is answered for",
       String(answer.body).indexOf("gpj.exe") === -1, describe(answer));
   }

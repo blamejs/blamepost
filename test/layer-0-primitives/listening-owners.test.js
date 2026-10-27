@@ -41,6 +41,8 @@
  * Run standalone: node test/layer-0-primitives/listening-owners.test.js
  */
 
+var nodeNet = require("node:net");
+
 var helpers = require("../helpers");
 var owners  = require("../../scripts/listening-owners");
 
@@ -224,13 +226,32 @@ async function run() {
   // The parsers above prove the shapes; this proves one of them is
   // actually reached here, which is the difference between a checker
   // that fires and a checker that ran.
-  var live = await owners.owners();
+  //
+  // A listener of this run's own is held open while the table is read,
+  // so the table has a socket in it on a host where nothing else is
+  // listening, which a fresh CI runner can be, and the read is held to
+  // naming that port rather than to naming any port at all.
+  var held = nodeNet.createServer();
+  await new Promise(function (resolve, reject) {
+    held.once("error", reject);
+    held.listen(0, "127.0.0.1", resolve);
+  });
+  var heldPort = held.address().port;
+  var live;
+  try {
+    live = await owners.owners();
+  } finally {
+    await new Promise(function (resolve) { held.close(function () { resolve(); }); });
+  }
   count("live: this machine's socket table can be read",
     live.ok === true, live.ok ? live.source + ", " + Object.keys(live.byPort).length + " port(s)"
       : String(live.reason));
   count("live: and it names the tool it read",
     live.ok === true && typeof live.source === "string" && live.source.length > 0,
     String(live.source));
+  count("live: and it names the port this run is listening on",
+    live.ok === true && Object.prototype.hasOwnProperty.call(live.byPort, String(heldPort)),
+    "port " + heldPort + " in " + (live.ok ? Object.keys(live.byPort).slice(0, 20).join(",") : "-"));
 
   return helpers.getChecks();
 }

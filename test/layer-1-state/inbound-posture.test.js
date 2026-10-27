@@ -633,10 +633,6 @@ async function everyRedirectEndingIsNamedForWhatItIs() {
       domain: "macro.example.com",
       zone: { "macro.example.com": { mx: [HOSTNAME], txt: ["v=spf1 redirect=%{d}.example"] } },
       says: /expands per message/i },
-    { what: "a version tag a receiver's parser will not take",
-      domain: "caps.example.com",
-      zone: { "caps.example.com": { mx: [HOSTNAME], txt: ["V=spf1 mx -all"] } },
-      says: /could not be read/i },
   ];
 
   for (var i = 0; i < cases.length; i += 1) {
@@ -660,6 +656,16 @@ async function everyRedirectEndingIsNamedForWhatItIs() {
   count("a redirect that reaches a record ending in -all passes, and names the record it read",
     passing !== null && passing.ok === true && passing.name === "_spf.ok.example",
     JSON.stringify(passing));
+
+  // RFC 7208 §4.5 writes the version as an ABNF literal, which RFC 5234
+  // §2.3 makes case-insensitive, so a version tag in capitals is one a
+  // receiver reads.
+  var caps = baseZone("caps.example.com");
+  caps["caps.example.com"] = { mx: [HOSTNAME], txt: ["V=spf1 mx -all"] };
+  var capsFinding = findingFor((await checkZone(caps, "caps.example.com")).report,
+    "caps.example.com", "SPF");
+  count("a version tag written in capitals is read like any other",
+    capsFinding !== null && capsFinding.ok === true, JSON.stringify(capsFinding));
 }
 
 // RFC 7208 §3.4 caps a published record at 450 octets, and a receiver

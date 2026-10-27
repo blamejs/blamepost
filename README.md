@@ -276,8 +276,8 @@ served as `application/octet-stream` with `nosniff` whatever the sender declared
 and whatever `accept` asked for, disposed as an attachment under the name the
 message carries. Upload is not served: `uploadUrl` answers `503` with the type
 `urn:ietf:params:jmap:error:serverUnavailable`, the session document advertises
-`maxSizeUpload` as 0, and a client that uploads an attachment before sending
-fails at that step. IMAP `FETCH` returns the same bytes. ROADMAP.md tracks blob
+`maxSizeUpload` as 1 octet, the smallest value the framework accepts, and a client
+that uploads an attachment before sending fails at that step. IMAP `FETCH` returns the same bytes. ROADMAP.md tracks blob
 upload.
 
 **Whether a message carries files** is recorded on the message when it is filed,
@@ -297,7 +297,7 @@ part carries `partId`, `blobId`, `size`, `name`, `type`, `charset`, `disposition
 `cid`, `language` and `location`, so a client takes a blob id out of the answer
 rather than building one from the grammar above. A call that does not name the
 property carries no list: building one opens each message and walks its
-structure, and one call may name 50 identifiers against the 8 MiB read bound. A
+structure, and one call may name 500 identifiers against the 8 MiB read bound. A
 message with no file answers an empty list; a message above that bound carries no
 `attachments` property at all. `headers`, `subParts` and `bodyProperties` are not
 served, and ROADMAP.md tracks `bodyStructure`, `textBody`, `htmlBody` and
