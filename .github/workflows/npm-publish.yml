@@ -204,6 +204,11 @@ jobs:
           SMOKE_PARALLEL: "8"
           UV_THREADPOOL_SIZE: "16"
           SMOKE_FILE_TIMEOUT_MS: "900000"
+          # Each test opens its database with its working copy under the
+          # temporary directory, and the database refuses a working copy
+          # that is not on a tmpfs or ramfs mount. /tmp on the runner is
+          # on disk and /dev/shm is tmpfs.
+          TMPDIR: /dev/shm
         run: node test/smoke.js
 
       - name: Generate CycloneDX SBOMs (npm tree + vendored tree)

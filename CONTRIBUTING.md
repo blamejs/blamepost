@@ -30,7 +30,10 @@ cd blamepost
 bash scripts/vendor-update.sh blamejs latest
 
 # 3. Run the suite. This is the single entry point and walks every layer.
-node test/smoke.js
+#    On Linux each test's database working copy goes under the temporary
+#    directory and is refused unless that is a tmpfs or ramfs mount, so
+#    point TMPDIR at one when /tmp is on disk.
+TMPDIR=/dev/shm node test/smoke.js
 
 # 4. Boot a real server against a scratch data directory. Every command needs
 #    these two and refuses to run without them; `serve` also needs

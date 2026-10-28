@@ -531,6 +531,26 @@ async function run() {
     await aJmapSubmissionSendsTheSameReply(reader, alice.id, identityId,
       goodDraft.objectid, log);
 
+    // A recipient written with a plus tag is sent to as written. The
+    // untagged form is how this server matches an account of its own, and
+    // sending to it would reach a mailbox the sender did not name.
+    var tagged = "bob+lunch@" + PEER_DOMAIN;
+    var taggedDraft = identity.mailbox.appendMessage("Drafts", draftTo(tagged),
+      { actor: actor });
+    var beforeTagged = log.count();
+    var taggedAnswer = await reader.jmap([["EmailSubmission/set", {
+      accountId: alice.id,
+      create:    { s0: { identityId: identityId, emailId: taggedDraft.objectid } },
+    }, "e0"]]);
+    var taggedResult = browser.answer(taggedAnswer, 0)[1];
+    count("a JMAP submission to a plus-tagged recipient is sent",
+      Object.prototype.hasOwnProperty.call(taggedResult.created || {}, "s0") &&
+        log.count() === beforeTagged + 1,
+      JSON.stringify(taggedResult.notCreated));
+    count("and the envelope names the recipient with its tag",
+      log.last() !== null && log.last().to.length === 1 && log.last().to[0] === tagged,
+      JSON.stringify(log.last() && log.last().to));
+
     var badDraft = identity.mailbox.appendMessage("Drafts", draftTo(CONFUSABLE_RECIPIENT),
       { actor: actor });
     await aJmapSubmissionToAConfusableIsStillRefused(reader, alice.id, identityId,
