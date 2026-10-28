@@ -801,6 +801,17 @@ async function listReadsItsReferenceAndPattern(ctx) {
     listedNamed(exact.text, "Books/History") !== null &&
       listedNamed(exact.text, "Books/Fiction") === null, visible(exact.text));
 
+  // RFC 9051 section 5.1: INBOX matches in any case, and nothing else does.
+  var spellings = ["inbox", "Inbox", "iNbOx"];
+  for (var sp = 0; sp < spellings.length; sp += 1) {
+    var asked = await session.imapAsk("LIST \"\" \"" + spellings[sp] + "\"");
+    count("LIST of " + spellings[sp] + " answers with INBOX",
+      listedNamed(asked.text, "INBOX") !== null, visible(asked.text));
+  }
+  var wrongCase = await session.imapAsk("LIST \"\" \"books/history\"");
+  count("while another mailbox name still matches only in its own case",
+    listedNamed(wrongCase.text, "Books/History") === null, visible(wrongCase.text));
+
   var oneLevel = await session.imapAsk("LIST \"\" \"Books/%\"");
   count("the % wildcard stops at the hierarchy separator",
     listedNamed(oneLevel.text, "Books/Fiction") !== null &&

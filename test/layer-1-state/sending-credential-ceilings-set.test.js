@@ -271,6 +271,32 @@ async function testTheCredentialStillVerifies(reg) {
     JSON.stringify({ bounce: shown.bounceMailbox, refused: shown.refusedLocalParts }));
 }
 
+// Both verbs replace the whole policy row, so two of them sent together
+// for one credential each read it, and the later write would carry the
+// earlier read. They run one at a time per credential, so both changes
+// land whichever finishes first.
+async function testARefusalChangeAndACeilingChangeBothLand(reg) {
+  var made = await issue(reg, ZULU, {
+    maxMessages: 10, maxRecipients: 50, windowMs: HOUR_MS });
+  var before = await reg.show(made.id);
+  var wanted = before.refusedLocalParts.concat(["support-replies"]);
+
+  await Promise.all([
+    reg.setRefusedLocalParts({ id: made.id, localParts: wanted,
+      reason: "this mailbox answers on its own" }),
+    reg.setCeilings({ id: made.id, maxMessages: 4,
+      reason: "a lower ceiling while the list is changing" }),
+  ]);
+
+  var shown = await reg.show(made.id);
+  count("a refusal change and a ceiling change sent together for one credential both land",
+    shown.maxMessages === 4 && shown.refusedLocalParts.indexOf("support-replies") !== -1,
+    JSON.stringify({ m: shown.maxMessages, refused: shown.refusedLocalParts }));
+  var verdict = await reg.verify(made.token);
+  count("and the credential still verifies after both writes", verdict.ok === true,
+    JSON.stringify({ ok: verdict.ok, reason: verdict.reason }));
+}
+
 // ---- the window length, and the counts taken at the old one ---------------
 
 async function testTheWindowLengthWaitsForTheWindow(reg, clock) {
@@ -425,6 +451,7 @@ async function run() {
     await testRefusals(registry);
     await testARaiseReachesTheNextMessage(registry);
     await testTheCredentialStillVerifies(registry);
+    await testARefusalChangeAndACeilingChangeBothLand(registry);
     await testTheWindowLengthWaitsForTheWindow(registry, clock);
     await testTheTrail(registry);
   } finally {

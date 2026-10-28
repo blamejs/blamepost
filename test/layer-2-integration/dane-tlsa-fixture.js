@@ -231,8 +231,8 @@ function pinnedResolver(records, answerable) {
   var tlsaAsked = [];
   return {
     tlsaAsked: tlsaAsked,
-    resolveMx: function () { return Promise.resolve([{ exchange: LOOPBACK, priority: 10 }]); },
-    queryMx:   function () { return Promise.resolve([{ exchange: LOOPBACK, priority: 10 }]); },
+    resolveMx: function () { return Promise.resolve([{ exchange: PEER_NAME, priority: 10 }]); },
+    queryMx:   function () { return Promise.resolve([{ exchange: PEER_NAME, priority: 10 }]); },
     queryTxt:  function () { return Promise.resolve({ rrs: [] }); },
     queryTlsa: function (name) {
       tlsaAsked.push(String(name));

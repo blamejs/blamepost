@@ -64,6 +64,27 @@ function fail(code, message) {
     result: null };
 }
 
+// The provider writes a TLSA record from its four fields in `data`, and
+// answers with them there and in a formatted `content`. Returns the
+// fields, null for a record of another type, and false for a TLSA write
+// that does not carry them.
+function tlsaFields(body) {
+  if (!body || body.type !== "TLSA") return null;
+  var d = body.data;
+  if (!d || typeof d !== "object" || typeof d.usage !== "number" ||
+      typeof d.selector !== "number" || typeof d.matching_type !== "number" ||
+      typeof d.certificate !== "string" || d.certificate.length === 0) {
+    return false;
+  }
+  return { usage: d.usage, selector: d.selector, matching_type: d.matching_type,
+    certificate: d.certificate };
+}
+
+function tlsaContent(fields) {
+  return fields.usage + "\t" + fields.selector + "\t" + fields.matching_type + "\t" +
+    fields.certificate;
+}
+
 /**
  * Start one stand-in on an ephemeral loopback port.
  *
@@ -216,11 +237,20 @@ async function start(opts) {
         }
         if (req.method === "POST") {
           var wanted2 = JSON.parse(raw);
+          var tlsaCreated = tlsaFields(wanted2);
+          if (tlsaCreated === false) {
+            send(400, fail(1004, "DNS Validation Error: a TLSA record takes its value in data"));
+            return;
+          }
           var created = {
             id: newId(), type: wanted2.type, name: wanted2.name,
             content: wanted2.content,
             ttl: typeof wanted2.ttl === "number" ? wanted2.ttl : 300,
           };
+          if (tlsaCreated) {
+            created.data = tlsaCreated;
+            created.content = tlsaContent(tlsaCreated);
+          }
           if (typeof wanted2.priority === "number") created.priority = wanted2.priority;
           state.records.push(created);
           send(200, ok(created));
@@ -235,10 +265,19 @@ async function start(opts) {
         if (idx === -1) { send(404, fail(81044, "Record does not exist")); return; }
         if (req.method === "PUT") {
           var body2 = JSON.parse(raw);
+          var tlsaUpdated = tlsaFields(body2);
+          if (tlsaUpdated === false) {
+            send(400, fail(1004, "DNS Validation Error: a TLSA record takes its value in data"));
+            return;
+          }
           var updated = {
             id: id, type: body2.type, name: body2.name, content: body2.content,
             ttl: typeof body2.ttl === "number" ? body2.ttl : 300,
           };
+          if (tlsaUpdated) {
+            updated.data = tlsaUpdated;
+            updated.content = tlsaContent(tlsaUpdated);
+          }
           if (typeof body2.priority === "number") updated.priority = body2.priority;
           state.records[idx] = updated;
           send(200, ok(updated));

@@ -323,7 +323,12 @@ function browserAt(origin, opts) {
     return out;
   }
 
-  function _sendH1(method, path, headers, payload, keepCookies) {
+  // A GET or HEAD sent on a pooled connection the server closed while it
+  // sat idle is reset before any response. A case that blocks this
+  // process past the server's keep-alive window leaves a connection in
+  // that state, so such a request is sent once more, on a new connection,
+  // as a browser does. Node reports the reuse on `req.reusedSocket`.
+  function _sendH1(method, path, headers, payload, keepCookies, retried) {
     return new Promise(function (resolve, reject) {
       var transport = secure ? nodeHttps : nodeHttp;
       var requestOpts = {
@@ -370,7 +375,14 @@ function browserAt(origin, opts) {
         req.destroy(new Error(method + " " + path + " on " + origin + " never answered " +
           "within " + timeoutMs + "ms"));
       });
-      req.once("error", reject);
+      req.once("error", function (e) {
+        if (retried !== true && req.reusedSocket === true && e && e.code === "ECONNRESET" &&
+            (method === "GET" || method === "HEAD")) {
+          resolve(_sendH1(method, path, headers, payload, keepCookies, true));
+          return;
+        }
+        reject(e);
+      });
       if (payload !== undefined && payload !== null) req.write(payload);
       req.end();
     });

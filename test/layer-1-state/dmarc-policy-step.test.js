@@ -42,6 +42,7 @@ var nodeFs   = require("node:fs");
 var nodePath = require("node:path");
 
 var helpers    = require("../helpers");
+var b          = require("../../lib/vendor/blamejs");
 var dnsZone    = require("../helpers/dns-zone");
 var config     = require("../../lib/config");
 var store      = require("../../lib/store");
@@ -241,6 +242,23 @@ function fullMonth() {
   var days = [-40];
   for (var i = -15; i <= 15; i += 1) days.push(i);
   return days;
+}
+
+// The policy states this server has recorded for one domain, oldest
+// first, as `level@percent`. The trail stamps each row with its own
+// monotonic clock, so a case cannot place two observations days apart;
+// it reads the states instead, because the hold is measured from the
+// newest run of one state.
+async function observedStates(domain) {
+  var rows = await b.audit.query({
+    action: "blamepost.mail.dmarc_policy.policy_observed", resourceId: domain,
+    order: "desc", limit: 1000,
+  });
+  return rows.filter(function (row) { return row.resourceId === domain; }).reverse()
+    .map(function (row) {
+    var detail = JSON.parse(row.metadata || "{}");
+    return detail.level + "@" + (typeof detail.percent === "number" ? detail.percent : 100);
+  });
 }
 
 async function verdictFor(domain, at) {
@@ -513,6 +531,57 @@ async function aFixClaimTheReportersContradictBlocksTheStep(handle) {
 
 // ---- the step to reject ----------------------------------------------------
 
+// The hold the step to reject asks for is time at full quarantine. Days
+// spent at a sampled quarantine do not count toward it, so the run starts
+// when the record stops carrying a percentage below 100.
+async function aSampledQuarantineDoesNotCountTowardTheHold(handle) {
+  var domain = "raised.example";
+  seed(handle, { domain: domain, dayOffsets: fullMonth(), orgs: 3, aligned: 40,
+    record: "v=DMARC1; p=quarantine; pct=10; rua=mailto:" + RUA });
+  // A resolver reads the zone when it is built, so each change to the
+  // zone is read through a stepper built after it.
+  await policyOver().evaluate({ domain: domain, now: NOW });
+
+  zone["_dmarc." + domain] = { txt: ["v=DMARC1; p=quarantine; rua=mailto:" + RUA] };
+  await policyOver().evaluate({ domain: domain, now: NOW });
+  await policyOver().evaluate({ domain: domain, now: NOW });
+  var states = await observedStates(domain);
+  count("raising pct to 100 is recorded as a new state, so the hold starts there, and a " +
+    "reading that finds nothing changed records nothing",
+    states.join(",") === "quarantine@10,quarantine@100", states.join(","));
+}
+
+// A record that goes away, or stops being readable, ends the run at
+// quarantine. Publishing it again starts a new one.
+async function aGapInThePolicyRestartsTheHold(handle) {
+  var domain = "gap.example";
+  var quarantine = "v=DMARC1; p=quarantine; rua=mailto:" + RUA;
+  seed(handle, { domain: domain, dayOffsets: fullMonth(), orgs: 3, aligned: 40,
+    record: quarantine });
+  await policyOver().evaluate({ domain: domain, now: NOW });
+
+  zone["_dmarc." + domain] = { txt: [] };
+  await policyOver().evaluate({ domain: domain, now: NOW });
+  zone["_dmarc." + domain] = { txt: ["v=DMARC1; p=discard"] };
+  await policyOver().evaluate({ domain: domain, now: NOW });
+  zone["_dmarc." + domain] = { txt: [quarantine] };
+  var returned = await policyOver().evaluate({ domain: domain, now: NOW });
+  var returnedHeld = returned.checks.filter(function (one) { return one.name === "held"; })[0];
+  count("the reading that finds quarantine published again has no run of it to measure yet",
+    returnedHeld !== undefined &&
+      returnedHeld.reason === policyMod.CODES.quarantineAgeUnobserved,
+    JSON.stringify(returnedHeld));
+  var restored = await policyOver().evaluate({ domain: domain, now: Date.now() });
+  var states = await observedStates(domain);
+  count("a record that goes away and one no receiver reads are each recorded, so the run " +
+    "at quarantine ends at the first and starts again when it is published",
+    states.join(",") === "quarantine@100,absent@100,unusable@100,quarantine@100",
+    states.join(","));
+  var held = restored.checks.filter(function (one) { return one.name === "held"; })[0];
+  count("and the reading after the return is held from that return",
+    held !== undefined && held.ok === false && held.found === 0, JSON.stringify(held));
+}
+
 async function theRejectStepReadsTimeAlreadyServedAtQuarantine(handle) {
   seed(handle, { domain: "held.example", dayOffsets: fullMonth(), orgs: 3, aligned: 40,
     record: "v=DMARC1; p=quarantine; rua=mailto:" + RUA });
@@ -690,6 +759,8 @@ async function run() {
     await aReadingThatCouldNotBeCompletedRefuses(handle);
     await aRecordNoReceiverReadsAPolicyFromRefusesTheStep(handle);
     await steppingDownIsOfferedOnEveryReading(handle);
+    await aSampledQuarantineDoesNotCountTowardTheHold(handle);
+    await aGapInThePolicyRestartsTheHold(handle);
 
     return helpers.getChecks();
   } finally {

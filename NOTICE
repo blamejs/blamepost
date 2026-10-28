@@ -20,7 +20,7 @@ scripts/vendor-update.sh.
 
 --------------------------------------------------------------------------------
 Component:   blamejs
-Version:     0.21.5
+Version:     0.21.6
 Package:     @blamejs/core (npm), vendored from the published registry tarball
 Source:      https://github.com/blamejs/blamejs
 License:     Apache-2.0

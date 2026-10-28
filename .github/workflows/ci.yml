@@ -105,6 +105,11 @@ jobs:
           # threadpool (default 4) at once under parallel smoke; a
           # larger pool removes the contention and idle threads are free.
           UV_THREADPOOL_SIZE: "16"
+          # c8 merges one coverage report per process the run started,
+          # and at the default 4 GB heap the merge ran out of memory.
+          # The runner has 16 GB. The setting is a ceiling, so the test
+          # processes that inherit it use no more than they did.
+          NODE_OPTIONS: "--max-old-space-size=8192"
           # Per-file watchdog budget, generous over the heaviest file
           # while still failing a genuinely stuck one well inside the
           # job ceiling. c8 makes each file run 3 to 5 times as long as

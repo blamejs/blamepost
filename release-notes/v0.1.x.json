@@ -69,8 +69,8 @@
               "body": "`engines.node` is `>=24.22.1`. `.nvmrc`, every workflow Node pin, the README requirements and the CONTRIBUTING requirements state the same version. Upgrade Node before running `npm install` or before starting `bin/blamepost.js` on a host. 24.22.1 is the current release of the Node 24 line, which receives security patches until April 2028."
             },
             {
-              "title": "The vendored framework is blamejs 0.21.5",
-              "body": "`lib/vendor/blamejs/` moves from 0.18.61 to 0.21.5. The releases in between carry the upstream fixes to DKIM signing over repeated headers, DANE trust-anchor validation, X.509 path-length and name constraints, OCSP response binding, SMTP end-of-data smuggling detection, IMAP quoted mailbox names and POP3 dot-stuffing, among others; the blamejs changelog lists each. The JMAP listener now requires the limits a session document advertises to be the ones it enforces, which moves the advertised JMAP limits to the framework's strict profile, described under the JMAP entry below. There is nothing to configure."
+              "title": "The vendored framework is blamejs 0.21.6",
+              "body": "`lib/vendor/blamejs/` moves from 0.18.61 to 0.21.6. The releases in between carry the upstream fixes to DKIM signing over repeated headers, DANE trust-anchor validation, X.509 path-length and name constraints, OCSP response binding, SMTP end-of-data smuggling detection, IMAP quoted mailbox names and POP3 dot-stuffing, among others; the blamejs changelog lists each. 0.21.6 refuses on any Node release the inputs that reach the October 2026 Node.js flaws: a TLS dial to an IPv4 address in a non-canonical spelling such as `127.1`, a pooled HTTPS connection read for a response the server wrote unprompted (CVE-2026-105481), and a recipient domain that is not a DNS name, which a NUL byte could truncate (CVE-2026-105482). It also refuses at boot a runtime without the Brotli fix or with an OpenSSL older than 3.4.8, 3.5.9, 3.6.5 or 4.0.3 on its release line (CVE-2026-35189). The published image runs Node 26.12.1 with OpenSSL 4.0.3, and Node 24.22.1 bundles OpenSSL 3.5.9, so both pass. A host install whose Node uses an older system OpenSSL does not start until that library is upgraded. The JMAP listener now requires the limits a session document advertises to be the ones it enforces, which moves the advertised JMAP limits to the framework's strict profile, described under the JMAP entry below. There is nothing to configure."
             },
             {
               "title": "IMAP no longer advertises QRESYNC, NOTIFY or CATENATE",
@@ -122,8 +122,8 @@
               "body": "When a client disconnected during `IDLE`, the 29-minute limit on the `IDLE` stayed scheduled and kept the session's socket and state in memory until it fired. The limit is now canceled when the connection closes."
             },
             {
-              "title": "One IMAP STORE command takes one mod-sequence",
-              "body": "`STORE` gave every message it changed a mod-sequence of its own, so `STORE 1:500 +FLAGS (\\Seen)` advanced the mailbox's mod-sequence by 500. The message store sets that counter from the clock when it expunges a message, so a counter that had advanced faster than the clock was set back, and the next `STORE` could be given a mod-sequence lower than one already reported, which RFC 7162 section 3.1 forbids. A CONDSTORE client asking for changes since the higher value then missed that change. `STORE` now takes one mod-sequence for `+FLAGS` and `-FLAGS`, and one per distinct set of flags removed for `FLAGS`, which RFC 7162 permits. The counter can still be set back by a clock stepped backwards on the host."
+              "title": "An IMAP STORE command takes one mod-sequence per 500 messages",
+              "body": "`STORE` gave every message it changed a mod-sequence of its own, so `STORE 1:500 +FLAGS (\\Seen)` advanced the mailbox's mod-sequence by 500. The message store sets that counter from the clock when it expunges a message, so a counter that had advanced faster than the clock was set back, and the next `STORE` could be given a mod-sequence lower than one already reported, which RFC 7162 section 3.1 forbids. A CONDSTORE client asking for changes since the higher value then missed that change. `STORE` now takes one mod-sequence for `+FLAGS` and `-FLAGS`, and one per distinct set of flags removed for `FLAGS`, for each 500 messages it changes, which RFC 7162 permits. The browser and JMAP read a mailbox in pages ordered by mod-sequence, and the 500 bound keeps every message sharing one inside a single read, so a `STORE` over a large mailbox leaves every message reachable. The counter can still be set back by a clock stepped backwards on the host."
             },
             {
               "title": "A reply written in the browser threads and titles itself correctly",
@@ -292,6 +292,14 @@
             {
               "title": "POP3 sends a message with CRLF line endings and counts it that way",
               "body": "RFC 1939 section 3 sends every line of a message ending in CRLF. A message stored with a bare line feed, or with no line ending after its last line, now reaches a POP3 client with CRLF in each place, and the sizes `STAT` and `LIST` report count those octets, so a client that reads exactly the advertised count receives the whole message."
+            },
+            {
+              "title": "Publishing a TLSA record through the DNS writer was refused by the provider",
+              "body": "The DNS writer sent a TLSA record with its value in `content`, and the provider takes a TLSA record's usage, selector, matching type and association data as separate fields, so a preview listed the record and the write was refused. The writer now sends the four fields, and reads them back to compare against what was written."
+            },
+            {
+              "title": "The DMARC policy step counted sampled or interrupted quarantine toward the hold before reject",
+              "body": "The step to `p=reject` asks for 14 days at `p=quarantine`, measured from the policy observations this server records. A change from `pct=10` to full enforcement was not recorded as a change, so the days at 10 percent counted. A record that disappeared, or stopped being readable, was not recorded at all, so publishing quarantine again reused the date it was first seen. Both are now recorded, and the hold is measured from the start of the current run of full quarantine. A domain whose last recorded state was sampled or interrupted starts its hold again at the next reading."
             },
             {
               "title": "A DMARC percentage outside 0 to 100 was read as published",

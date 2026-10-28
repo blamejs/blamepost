@@ -41,6 +41,8 @@ var store     = require("../../lib/store");
 var blamepost = require("../../lib");
 var web       = require("../../lib/web");
 
+var mailboxModule = require("../../lib/mail/mailbox");
+
 var VAULT_PASSPHRASE = "a long enough vault passphrase for one test run";
 
 var LOOPBACK = "127.0.0.1";
@@ -160,12 +162,27 @@ function readerAt(origin) {
     };
   }
 
-  async function get(path) {
-    return _finish(await fetch(origin + path, {
+  function _fetchPage(path) {
+    return fetch(origin + path, {
       redirect: "manual",
       headers:  _headers({ "Accept": "text/html" }),
       signal:   AbortSignal.timeout(HTTP_TIMEOUT_MS),
-    }));
+    });
+  }
+
+  // A GET sent on a pooled connection the server closed while it sat
+  // idle is reset before any response. A case that blocks this process,
+  // as a large synchronous STORE does, leaves the connection idle past
+  // the server's keep-alive window, so a GET reset that way is sent once
+  // more on a new connection, as a browser does.
+  async function get(path) {
+    var res;
+    try { res = await _fetchPage(path); }
+    catch (e) {
+      if (!e || !e.cause || e.cause.code !== "ECONNRESET") throw e;
+      res = await _fetchPage(path);
+    }
+    return _finish(res);
   }
 
   return {
@@ -327,6 +344,40 @@ async function testEveryMessageIsReachedAfterABulkStore(reader, identity, reader
   count("and shows none of them twice", duplicates === 0, duplicates + " repeated");
 }
 
+// A STORE over more messages than one store read holds. Every message it
+// changes shares a mod-sequence with at most a bounded number of others,
+// and walking the folder still reaches every message exactly once.
+async function testEveryMessageIsReachedAfterAStoreOverTheWholeFolder(reader, identity,
+  readerId, expected) {
+  var flagged = identity.mailbox.storeFlags({ id: readerId }, "INBOX",
+    "1:*", "add", ["\\Seen"], {});
+  var sizes = Object.create(null);
+  flagged.rows.forEach(function (r) { sizes[r.modseq] = (sizes[r.modseq] || 0) + 1; });
+  var largest = Math.max.apply(null, Object.keys(sizes).map(function (k) { return sizes[k]; }));
+  count("a STORE over the whole folder changed every message",
+    flagged.rows.length === expected, flagged.rows.length + " of " + expected);
+  count("and no more than " + mailboxModule.MAX_STORE_GROUP + " of them share a mod-sequence",
+    largest <= mailboxModule.MAX_STORE_GROUP, String(largest));
+
+  var seen = Object.create(null);
+  var duplicates = 0;
+  var path = "/mail?folder=INBOX";
+  for (var page = 0; page < 60 && path; page += 1) {
+    var got = await reader.get(path);
+    var subjects = (got.body.match(/Paging note [0-9]+ of/g) || [])
+      .filter(function (v, i, all) { return all.indexOf(v) === i; });
+    for (var s = 0; s < subjects.length; s += 1) {
+      if (seen[subjects[s]]) duplicates += 1;
+      seen[subjects[s]] = true;
+    }
+    var older = /href="(\/mail\?folder=INBOX&amp;before=[^"]+)"/.exec(got.body);
+    path = older ? older[1].replace(/&amp;/g, "&") : null;
+  }
+  count("walking every page after it reaches every message in the folder",
+    Object.keys(seen).length === expected, Object.keys(seen).length + " of " + expected);
+  count("and shows none of them twice", duplicates === 0, duplicates + " repeated");
+}
+
 // ---- the drive ----
 
 async function driveTheSurface(identity, wiring) {
@@ -381,6 +432,8 @@ async function driveTheSurface(identity, wiring) {
     await testThePageBeforeItStillReads(client);
     await testACursorPastTheFolderReadsAsTheNewestPage(client, tally);
     await testEveryMessageIsReachedAfterABulkStore(client, identity, reader.id,
+      TOTAL_NOTES - 1);
+    await testEveryMessageIsReachedAfterAStoreOverTheWholeFolder(client, identity, reader.id,
       TOTAL_NOTES - 1);
   } finally {
     await listener.stop({ timeoutMs: HTTP_TIMEOUT_MS });

@@ -459,7 +459,11 @@ found by your monitoring rather than by the person whose message never arrived.
 ## Requirements
 
 - **Node.js 24.22.1 or newer**, or Docker. Nothing is transpiled; the source in
-  the repository is the code the runtime executes.
+  the repository is the code the runtime executes. The server does not start
+  on an OpenSSL older than 3.4.8, 3.5.9, 3.6.5 or 4.0.3 on its release line.
+  The Node.js release binaries bundle a newer one; a Node built against a
+  distribution's OpenSSL uses that library, and `node -p
+  process.versions.openssl` prints which one it loads.
 - **A domain you control, with DNS access.** MX, SPF, DMARC, DKIM, MTA-STS and
   TLS-RPT records are operator-side prerequisites, not something the server can
   publish for you. The full recipe is in

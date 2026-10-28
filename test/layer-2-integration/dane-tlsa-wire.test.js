@@ -151,7 +151,7 @@ function aMatchingRecordAuthenticatesThePeer(run) {
     answered(run), detail(run));
   if (!answered(run)) return;
   count("the records are looked up for the mail exchanger the message is going to",
-    v.tlsaAsked.length === 1 && /^_\d+\._tcp\.127\.0\.0\.1$/.test(v.tlsaAsked[0]),
+    v.tlsaAsked.length === 1 && /^_\d+\._tcp\.localhost$/.test(v.tlsaAsked[0]),
     JSON.stringify(v.tlsaAsked));
   count("and the peer is delivered to, so a record that matches its key authenticates it",
     v.delivered === 1,

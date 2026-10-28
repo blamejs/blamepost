@@ -92,7 +92,22 @@ function withoutBootLines(text) {
  * that can be wrong about a run that is already testing a failure. Both
  * default to nothing, so an ordinary caller is unaffected and a broken
  * run is visibly a second runner beside the working one.
+ *
+ * `coverage: false` starts each child without `NODE_V8_COVERAGE`, so a
+ * coverage run collects nothing from it. Every process that collects
+ * writes a report of every script it loaded when it exits, and a runner
+ * that starts hundreds of them, as the sweep of the documented command
+ * surface does, multiplies the run's time and the report's size. It
+ * defaults to on.
  */
+// The environment a child starts with: this process's, the runner's own
+// bindings over it, and no coverage directory when the runner asked for
+// none.
+function _childEnv(env, opts) {
+  var out = Object.assign({}, process.env, env);
+  if (opts.coverage === false) delete out.NODE_V8_COVERAGE;
+  return out;
+}
 // The environment one runner binds, settled in one place because two
 // runners bind it. A second copy would let the blocking runner and the
 // non-blocking one disagree about which volume a run reads, which is the
@@ -116,7 +131,7 @@ function create(opts) {
   return function run(args) {
     var result = nodeProc.spawnSync(process.execPath, execArgv.concat([BIN]).concat(args), {
       encoding: "utf8",
-      env:      Object.assign({}, process.env, env),
+      env:      _childEnv(env, opts),
     });
     var stdout = withoutBootLines(result.stdout);
     var stderr = withoutBootLines(result.stderr);
@@ -165,7 +180,7 @@ function createAsync(opts) {
   var ceilingMs = opts.ceilingMs;
   return async function run(args) {
     var result = await spawnHelper.runNodeScript(execArgv.concat([BIN]).concat(args), {
-      env:       Object.assign({}, process.env, env),
+      env:       _childEnv(env, opts),
       ceilingMs: ceilingMs,
     });
     return {

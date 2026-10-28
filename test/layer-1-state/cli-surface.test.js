@@ -970,11 +970,14 @@ async function run() {
     identity.close();
     identity = null;
 
+    // The sweep starts a process for every documented invocation, so its
+    // children collect no coverage; the verbs' own files cover what runs.
     var cli = cliHelper.create({
       dataDir:         dataDir,
       workDir:         workDir,
       hostname:        HOSTNAME,
       vaultPassphrase: VAULT_PASSPHRASE,
+      coverage:        false,
     });
 
     var documented = documentedInvocations();
