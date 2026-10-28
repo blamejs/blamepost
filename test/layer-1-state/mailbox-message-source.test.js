@@ -189,6 +189,60 @@ async function testTheDerivationsThatWereWrong(handle, alice, filed) {
     fromRowAlone.to.join(", ").indexOf(AUTHOR) !== -1,
     fromRowAlone.to.join(", "));
 
+  // A row for an html-only message carries the markup in both body
+  // fields, because the store fills the text body with whatever part it
+  // found. The quote is taken from the html, rendered, rather than from
+  // the copy of it in the text field.
+  var markup = "<p>Quarterly <b>numbers</b> &amp; notes</p>";
+  var htmlOnly = await composer.reply({
+    message: { subject: "html only", from: listed.message.from, to: listed.message.to,
+      messageId: "<html-only@example.net>", internalDate: listed.message.internalDate,
+      bodyText: markup, bodyHtml: markup },
+    from:  "alice@example.com",
+    draft: true,
+  });
+  var quotedText = String(htmlOnly.text || "");
+  count("a reply to an html-only message quotes readable text rather than its markup",
+    quotedText.indexOf("<p>") === -1 && quotedText.indexOf("&amp;") === -1 &&
+      quotedText.indexOf("Quarterly") !== -1,
+    quotedText.slice(0, 200));
+
+  // Paragraphs stay apart in the quote.
+  var blocks = "<p>First paragraph</p><p>Second paragraph</p><div>Third<br>Fourth</div>";
+  var blocked = await composer.reply({
+    message: { subject: "blocks", from: listed.message.from, to: listed.message.to,
+      messageId: "<blocks@example.net>", internalDate: listed.message.internalDate,
+      bodyText: blocks, bodyHtml: blocks },
+    from:  "alice@example.com",
+    draft: true,
+  });
+  var blockText = String(blocked.text || "");
+  count("each html paragraph and line break starts a quoted line of its own",
+    /^> First paragraph$/m.test(blockText) && /^> Second paragraph$/m.test(blockText) &&
+      /^> Third$/m.test(blockText) && /^> Fourth$/m.test(blockText),
+    blockText.slice(0, 300));
+
+  // An html-only body larger than the html sanitizer reads at once still
+  // gives a quote, cut to the quote's own limit.
+  var big = "<p>" + new Array(3 * 1024 * 1024 / 16).join("lots of words here ") + "</p>";
+  var bigError = null;
+  var bigReply = null;
+  try {
+    bigReply = await composer.reply({
+      message: { subject: "big", from: listed.message.from, to: listed.message.to,
+        messageId: "<big@example.net>", internalDate: listed.message.internalDate,
+        bodyText: big, bodyHtml: big },
+      from:  "alice@example.com",
+      draft: true,
+    });
+  } catch (e) { bigError = e; }
+  count("a reply to an html-only message over 2 MiB is drafted with a bounded quote",
+    bigError === null && bigReply !== null &&
+      Buffer.byteLength(String(bigReply.text || ""), "utf8") <= 70 * 1024 &&
+      String(bigReply.text || "").indexOf("lots of words here") !== -1,
+    bigError === null ? String(Buffer.byteLength(String(bigReply.text || ""), "utf8"))
+      : String(bigError.code) + " " + bigError.message);
+
   // A message carrying no Reply-To still addresses its author.
   var plainReply = await composer.reply({
     original: plain.bytes,

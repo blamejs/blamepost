@@ -866,6 +866,15 @@ async function listReadsItsReferenceAndPattern(ctx) {
     /^\* STATUS "Books\/History" \(MESSAGES 1 UNSEEN 1\)\r?$/m.test(counted.text),
     visible(counted.text));
 
+  var bogus = await session.imapAsk(
+    "LIST \"\" \"Books/History\" RETURN (STATUS (MESSAGES BOGUS))");
+  count("a STATUS item this server does not serve is refused by name before any listing",
+    bogus.verdict === "BAD" && /BOGUS/.test(bogus.text) && !/^\* LIST/m.test(bogus.text),
+    visible(bogus.text));
+  var none = await session.imapAsk("LIST \"\" \"Books/History\" RETURN (STATUS ())");
+  count("and so is a STATUS return option that names no items",
+    none.verdict === "BAD" && !/^\* LIST/m.test(none.text), visible(none.text));
+
   var recursive = await session.imapAsk("LIST (SUBSCRIBED RECURSIVEMATCH) \"\" *");
   count("an option this server does not serve is refused by name rather than ignored",
     recursive.verdict === "BAD" && /RECURSIVEMATCH/.test(recursive.text),

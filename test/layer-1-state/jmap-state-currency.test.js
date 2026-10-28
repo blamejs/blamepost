@@ -325,6 +325,21 @@ async function theNamespaceVerbsMoveTheState(reader, identity, accountId, before
     "queryState", queriedAfter !== queriedBefore,
     JSON.stringify(queriedBefore) + " then " + JSON.stringify(queriedAfter));
 
+  // Two renames that put an emptier mailbox under the queried name raise
+  // the namespace revision by as much as the counters differ. The state
+  // still moves, because the two numbers are not added together.
+  identity.mailbox.createFolder(actor, "SwapA");
+  identity.mailbox.appendMessage("SwapA", message("swap-one"), { actor: actor });
+  identity.mailbox.appendMessage("SwapA", message("swap-two"), { actor: actor });
+  identity.mailbox.createFolder(actor, "SwapB");
+  var swapBefore = await queryStateOf("SwapA");
+  await identity.mailbox.renameFolder(actor, "SwapA", "SwapC");
+  await identity.mailbox.renameFolder(actor, "SwapB", "SwapA");
+  var swapAfter = await queryStateOf("SwapA");
+  count("a query over a name that now holds a different mailbox answers a new queryState, " +
+    "whatever the two counters add up to",
+    swapAfter !== swapBefore, JSON.stringify(swapBefore) + " then " + JSON.stringify(swapAfter));
+
   identity.mailbox.createFolder(actor, "Filled");
   identity.mailbox.appendMessage("Filled", message("namespace-filled"), { actor: actor });
   identity.mailbox.appendMessage("Filled", message("namespace-filled-2"), { actor: actor });

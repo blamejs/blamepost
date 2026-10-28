@@ -629,6 +629,32 @@ async function theListedSizeIsTakenWhenTheBodyIsFiled(fixture) {
     b.db.from(mailboxModule.WIRE_SIZES).all().length === rowsBefore - 1,
     rowsBefore + " row(s) before, " + b.db.from(mailboxModule.WIRE_SIZES).all().length +
       " after");
+
+  // A body filed with no size row whose file is gone. Login cannot read
+  // the body to count it, so it lists the stored size and opens the
+  // maildrop rather than refusing it over one lost message.
+  var lost = Buffer.from("From: sender@example.net\r\nTo: mallory@example.com\r\n" +
+    "Subject: a body that went missing\r\n\r\ngone\r\n", "utf8");
+  handle.mailbox.appendMessage("INBOX", lost, { actor: mallory });
+  b.db.from(mailboxModule.WIRE_SIZES).all().forEach(function (row) {
+    b.db.from(mailboxModule.WIRE_SIZES).where({ _id: row._id }).deleteOne();
+  });
+  _filesUnder(nodePath.join(fixture.dataDir, "blobs")).forEach(function (file) {
+    nodeFs.rmSync(file, { force: true });
+  });
+  var opened = null;
+  var refused = null;
+  try { opened = handle.mailbox.openPop3Drop(mallory, {}); }
+  catch (e) { refused = e; }
+  count("a maildrop holding a body that cannot be read still opens at login",
+    refused === null && opened !== null,
+    refused === null ? "" : String(refused.code) + " " + refused.message);
+  if (opened === null) return;
+  var listedLost = handle.mailbox.listMessages(mallory, opened.dropId);
+  count("and lists that message at the size it was stored with",
+    listedLost.length === 1 && listedLost[0].size === lost.length,
+    JSON.stringify(listedLost));
+  await handle.mailbox.commitPop3Drop(mallory, opened.dropId);
 }
 
 // RFC 1939 section 5 unmarks every message RSET finds marked, and

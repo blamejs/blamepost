@@ -1196,6 +1196,66 @@ async function anErasureRequestFromAStrangerIsActedOn(handle) {
   }
 }
 
+// An aggregate report names a contact address, and an erasure request
+// for that address takes the address out of the report. The report and
+// its records stay, so a resend of the same report is still read as one
+// and its records are not counted twice.
+async function aForgottenContactStillDeduplicatesItsReport(handle) {
+  var xml = aggregateXml({ org: "contact.example", reportId: "erase-0001" });
+  var contact = "dmarc-noreply@contact.example";
+  var first = handle.ingestAggregate(xml, AUTHENTICATED);
+  count("the report naming the contact is stored", first.ok === true && first.duplicate === false,
+    JSON.stringify(first));
+  var before = JSON.stringify(handle.rollup({ domain: DOMAIN }));
+
+  var verdict = await handle.forgetAddress(contact, "erasure request for a report contact");
+  count("the erasure acts on the report row naming the contact",
+    verdict.destroyed >= 1 && verdict.failed.length === 0, JSON.stringify(verdict));
+  count("and no report row names the contact afterwards",
+    b.db.from(tables.DMARC_REPORTS).where({ reportEmail: contact }).count() === 0,
+    String(b.db.from(tables.DMARC_REPORTS).where({ reportEmail: contact }).count()));
+
+  var again = handle.ingestAggregate(xml, AUTHENTICATED);
+  count("a resend of the same report is still read as a resend",
+    again.ok === true && again.duplicate === true, JSON.stringify(again));
+  count("so the counts the policy step reads are what they were before the erasure",
+    JSON.stringify(handle.rollup({ domain: DOMAIN })) === before,
+    JSON.stringify(handle.rollup({ domain: DOMAIN })) + " against " + before);
+  count("and the resend does not store the contact address again",
+    b.db.from(tables.DMARC_REPORTS).where({ reportEmail: contact }).count() === 0,
+    String(b.db.from(tables.DMARC_REPORTS).where({ reportEmail: contact }).count()));
+
+  // The state a process leaves when it stops between erasing the report
+  // row and settling its copy: the copy under its pending key, the old
+  // row gone, the records still pointing at it. The next report read
+  // settles the copy first, so a resend is still a resend.
+  var crashXml = aggregateXml({ org: "stopped.example", reportId: "erase-0002" });
+  handle.ingestAggregate(crashXml, AUTHENTICATED);
+  var crashBefore = JSON.stringify(handle.rollup({ domain: DOMAIN }));
+  var original = b.db.from(tables.DMARC_REPORTS).where({ reportId: "erase-0002" }).first();
+  var copy = {};
+  ["orgName", "reportId", "policyDomain", "windowBegin", "windowEnd", "storedCount",
+    "refusedCount", "evidence", "verifiedOrgDomain", "receivedAt"].forEach(function (name) {
+    if (original[name] !== undefined) copy[name] = original[name];
+  });
+  copy.orgKey = original.orgKey + "\u001fpending\u001f" + original._id;
+  copy.storedCount = -(original.storedCount + 1);
+  tables.insertRow(tables.DMARC_REPORTS, copy);
+  b.db.eraseHard(tables.DMARC_REPORTS, original._id, { reason: "a stopped erasure" });
+
+  var afterCrash = handle.ingestAggregate(crashXml, AUTHENTICATED);
+  count("a resend after an erasure that stopped partway is still read as a resend",
+    afterCrash.ok === true && afterCrash.duplicate === true, JSON.stringify(afterCrash));
+  count("and the counts are what they were before the erasure began",
+    JSON.stringify(handle.rollup({ domain: DOMAIN })) === crashBefore,
+    JSON.stringify(handle.rollup({ domain: DOMAIN })) + " against " + crashBefore);
+  var settled = b.db.from(tables.DMARC_REPORTS).where({ reportId: "erase-0002" }).all();
+  count("and the copy is settled under the report's own key with its count restored",
+    settled.length === 1 && settled[0].orgKey === original.orgKey &&
+      settled[0].storedCount === original.storedCount,
+    JSON.stringify(settled.map(function (r) { return [r.orgKey, r.storedCount]; })));
+}
+
 // ---- the window is a window ------------------------------------------------
 
 async function rowsGoWhenTheirWindowPassesAndNotBefore(handle) {
@@ -1351,6 +1411,7 @@ async function run() {
     theReportedMessageNeverReachesTheVolume(handle);
     forensicRowsAreNotKeptWhenTheyAreTurnedOff();
     await anErasureRequestFromAStrangerIsActedOn(handle);
+    await aForgottenContactStillDeduplicatesItsReport(handle);
     await rowsGoWhenTheirWindowPassesAndNotBefore(handle);
     theSweepTimerCanBeDisarmed(handle);
 

@@ -302,6 +302,10 @@
               "body": "The step to `p=reject` asks for 14 days at `p=quarantine`, measured from the policy observations this server records. A change from `pct=10` to full enforcement was not recorded as a change, so the days at 10 percent counted. A record that disappeared, or stopped being readable, was not recorded at all, so publishing quarantine again reused the date it was first seen. Both are now recorded, and the hold is measured from the start of the current run of full quarantine. A domain whose last recorded state was sampled or interrupted starts its hold again at the next reading."
             },
             {
+              "title": "Erasing a DMARC report contact no longer lets a resent report count twice",
+              "body": "An erasure request for an address that an aggregate report names as its contact destroyed the report row and left its records, which still count toward the policy evidence. A resend of the same report was then stored as new, and its records counted a second time. The report row is now erased and written again without the contact address, with its records moved onto it, so a resend is still recognized as one and the address it carries is not stored again."
+            },
+            {
               "title": "A DMARC percentage outside 0 to 100 was read as published",
               "body": "RFC 7489 section 6.3 makes `pct` a whole number from 0 to 100. A record carrying `pct=250`, `pct=1.5` or any other value outside that was reported as a published policy with that percentage. `blamepost.mail.posture.dmarcRecord` now reads such a record as unusable and names the value, as it does for a record that will not parse, so `blamepost dmarc preview` and the DMARC policy step in the admin console report it that way."
             }
