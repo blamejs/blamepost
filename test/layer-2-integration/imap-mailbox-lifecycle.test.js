@@ -76,7 +76,13 @@ function storeFolderOf(identity, accountId, wireName) {
   return found.length > 0 ? found[0].storeName : "";
 }
 
+// DELETE removes the store folder with the mailbox, so a folder that is
+// gone holds no messages.
 function objectIdsIn(identity, storeFolder) {
+  var present = identity.messageStore.listFolders().some(function (f) {
+    return f.name === storeFolder;
+  });
+  if (!present) return [];
   return identity.messageStore.queryByModseq(storeFolder, { sinceModseq: 0 })
     .map(function (r) { return r.objectid; });
 }
@@ -410,6 +416,8 @@ async function aSelectionDoesNotOutliveTheMailboxItHeld(ctx) {
   var removed = await session.imapAsk("DELETE Doomed");
   count("the delete of a mailbox this session holds open completes",
     removed.verdict === "OK", visible(removed.text));
+  count("and the session is told its selection closed, ahead of the tagged answer",
+    /^\* OK \[CLOSED\]/m.test(removed.text), visible(removed.text));
 
   // Whatever the session does next, it must not be answered from a
   // mailbox that no longer exists.
@@ -431,7 +439,9 @@ async function aSelectionDoesNotOutliveTheMailboxItHeld(ctx) {
 // mailbox open in one session is renamed or deleted by another, and the
 // session holding it must follow the rename and leave a deleted mailbox,
 // rather than go on resolving the old name, which anything may create
-// again.
+// again. RFC 9051 has no response that closes another session's
+// selection, so the holding session is sent an untagged BYE and
+// disconnected, and its client reconnects.
 async function anotherSessionsSelectionFollowsTooRename(ctx) {
   var holder = await ctx.session("rename-held-elsewhere");
   var actor  = await ctx.session("rename-sent-elsewhere");
@@ -457,10 +467,12 @@ async function anotherSessionsSelectionFollowsTooRename(ctx) {
 
   var removed = await actor.imapAsk("DELETE Shared2");
   count("the other session's delete completes", removed.verdict === "OK", visible(removed.text));
-  await actor.imapAsk("CREATE Shared2");
-  var after = await holder.imapAsk("FETCH 1 (UID)");
-  count("and once it is deleted the holding session is no longer answered from that name",
-    after.verdict !== "OK", visible(after.text));
+  count("and the session that sent it, holding no selection, is told nothing about one",
+    !/^\* OK \[CLOSED\]/m.test(removed.text), visible(removed.text));
+  var told = await holder.read(/^\* BYE [^\r\n]*\r\n/m, "BYE to the holding session");
+  count("once it is deleted the holding session is told so with BYE, rather than left " +
+    "believing it still has the mailbox open",
+    /deleted/.test(String(told)), visible(String(told)));
 
   holder.close();
   actor.close();
@@ -531,6 +543,8 @@ async function renamingInboxMovesTheMailAndLeavesInboxWhereItWas(ctx) {
 
   var renamed = await session.imapAsk("RENAME INBOX Archived2026");
   count("RENAME INBOX completes", renamed.verdict === "OK", visible(renamed.text));
+  count("and the session holding INBOX is told its selection closed",
+    /^\* OK \[CLOSED\]/m.test(renamed.text), visible(renamed.text));
 
   // The session had INBOX selected and its messages left. The sequence
   // numbers it holds name nothing now, so the session is out of the

@@ -468,37 +468,19 @@ async function theScriptStoredIsTheScriptServed(port, caPem, address) {
     // PUTSCRIPT literal is followed by a CRLF the listener consumes
     // unconditionally, which is why `roundTripOneScript` sends one.
     //
-    // The writer does not answer it the same way. `_handleGetScript` in
-    // the vendored ManageSieve listener announces the count and then
-    // decides whether to write the terminator by looking at the
-    // script's last two octets, so the framing of a response depends on
-    // the content of the script inside it. A script ending with CRLF
-    // gets no terminator, and a client that reads the announced count
-    // and then expects the end of the line reads the next reply instead.
-    //
-    // The two checks below hold that partition to its exact shape. It
-    // cannot be closed here: the writer is in the vendored tree, which
-    // is read-only, and the only lever this repository has is the script
-    // body the store hands back, so trading the framing defect for a
-    // content one by stripping the script's own last line is not a fix.
-    // When the writer terminates the line whatever the script ends with,
-    // the second check becomes the first and the two collapse into one.
-    var terminated   = ["tail-lf", "tail-none"];
-    var unterminated = ["tail-crlf", "tail-blank"];
-    count("a script whose last line ends in something other than CRLF is followed by the " +
-      "terminator that ends the response line carrying it",
-      terminated.every(function (n) {
+    // The writer answers it the same way: `_handleGetScript` writes the
+    // terminator after the announced count whatever the script's last
+    // octets are. A writer that looked at the script's last two octets
+    // instead would leave a script ending with CRLF unterminated, and a
+    // client reading the announced count and then the end of the line
+    // would read the next reply instead. Every tail shape is checked,
+    // the ones ending with CRLF included.
+    count("every script is followed by the terminator that ends the response line carrying " +
+      "it, whatever its own last line ends in",
+      names.every(function (n) {
         return results[n].framed === true && results[n].crlfFollows === true;
       }),
-      terminated.map(function (n) { return n + " " + results[n].after; }).join(", "));
-
-    count("and a script that ends with CRLF is not, because the writer reads the script's " +
-      "last two octets rather than the count it announced, so the next reply begins where " +
-      "the end of the line should be",
-      unterminated.every(function (n) {
-        return results[n].framed === true && results[n].crlfFollows === false;
-      }),
-      unterminated.map(function (n) { return n + " " + results[n].after; }).join(", "));
+      names.map(function (n) { return n + " " + results[n].after; }).join(", "));
 
     // A literal carrying an octet that cannot begin a UTF-8 sequence.
     // RFC 5804 section 1.6 makes a script a UTF-8 string, so this is

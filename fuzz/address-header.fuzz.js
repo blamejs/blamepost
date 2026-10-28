@@ -237,8 +237,17 @@ function _addressOfEntry(entry) {
   // last `>` in the text, because those two are not a pair either, and a
   // quoted display name is allowed to hold brackets of its own inside an
   // address that really was cut at one.
+  //
+  // The pairs the address is cut from are the ones outside every comment.
+  // A pair inside a comment, `a@example.com (see <x>)`, is counted by the
+  // ambiguity count and is not one the cut reads, and a comment that never
+  // closes holds every pair after its opening.
   var pairs = _angleCount(entry);
-  if (pairs === 0) {
+  var cutFrom = compose.angleAddressCount(entry, { inComments: false });
+  holds("angleAddressCount: the pairs outside comments are a part of all the pairs",
+    Number.isInteger(cutFrom) && cutFrom >= 0 && cutFrom <= pairs,
+    { cutFrom: cutFrom, pairs: pairs });
+  if (cutFrom === 0) {
     // RFC 5322 §3.2.2 comments around a bare addr-spec are not part of
     // it, so they are the one thing taken out: an entry with no `(` is
     // the address whole, and any other entry gives an address made of
@@ -256,7 +265,7 @@ function _addressOfEntry(entry) {
     // name holding `bob` would be measured at the wrong `b`.
     holds("normalizeAddress: an address cut from a pair sits inside that pair",
       new RegExp("<\\s*" + _escapeForRegExp(cut.address) + "\\s*>").test(entry),
-      { entry: entry, address: cut.address, pairs: pairs });
+      { entry: entry, address: cut.address, pairs: pairs, cutFrom: cutFrom });
   }
   return cut.address;
 }

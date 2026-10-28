@@ -6,39 +6,26 @@
  * the receiver is told about it.
  *
  * `test/layer-1-state/outbound-policy.test.js` covers the record question
- * this server asks over the resolver the operator pinned. What it does not
- * cover is the verdict at the other end of that question: the enhanced
- * status a refused message carries, and the result type the receiver's
- * TLS report is keyed on. `5.7.10` appeared in no test in the tree, and
- * `lib/mail/delivery.js` reads that exact status to decide which MTA-STS
- * result type a receiver is sent, so a change to it would have moved a
- * report silently.
+ * this server asks over the resolver the operator pinned. This file
+ * covers the verdict at the other end of that question: the enhanced
+ * status a held or refused message carries, and the result type the
+ * receiver's TLS report is keyed on. The classification of the composer's
+ * own `5.7.10` refusal is held in
+ * `test/layer-1-state/tlsrpt-refusal-cause.test.js`.
  *
- * That status covers two conditions rather than one. The composer writes
- * it for a policy it could not fetch and for a policy whose mail
- * exchanger list covers none of the domain's own, and RFC 8460 section
- * 4.3 registers a separate result type for each. What this file drives is
- * the first of them: the record lookup below never completes, so no
- * policy document is ever read and nothing about one is known to be
- * wrong. `test/layer-1-state/tlsrpt-refusal-cause.test.js` holds the
- * second, which nothing in the tree can drive.
+ * The MTA-STS question is asked twice on every enforcing delivery, once
+ * by this server and once by the framework's delivery composer, and both
+ * askings go to the pinned resolver. The first case below has the pinned
+ * resolver answer that the domain publishes no record, and shows that
+ * nothing is refused over MTA-STS. The second has it unable to answer,
+ * and shows this server holding the message back.
  *
- * The MTA-STS question is asked twice on every enforcing delivery, and
- * the two askings do not go to the same place. This server asks first,
- * over the pinned resolver, and holds the message back when that answer
- * is missing. The framework's delivery composer then asks again for
- * itself, and nothing on its option surface reaches that lookup, so it
- * goes to the resolver the framework shares. Both cases below are one
- * record question about one domain; they differ only in which of the two
- * resolvers could not answer it, and they produce different enhanced
- * statuses and different result types.
- *
- * The shared resolver is pointed at a port nothing listens on, through
- * the framework's own DNS-over-HTTPS setting and the endpoint
- * `test/helpers/dns-quiet.js` already owns. That is the whole fault:
- * every lookup that goes there fails to complete, through the shipped
- * transport, with nothing replaced and nothing patched. It is set for
- * this file only, which runs in a process of its own.
+ * The framework's shared resolver is pointed at a port nothing listens
+ * on, through its own DNS-over-HTTPS setting and the endpoint
+ * `test/helpers/dns-quiet.js` already owns, so a lookup that reached it
+ * would fail to complete. The first case passing is the evidence that the
+ * composer did not consult it. The setting is for this file only, which
+ * runs in a process of its own.
  *
  * Two branches of the composer's enforcement are NOT reachable from here
  * and are not claimed. A published policy whose mail exchanger list does
@@ -128,63 +115,41 @@ function failureTypes(rows) {
 // The enforcing verdict, and the status a report is keyed on
 // ---------------------------------------------------------------------------
 
-async function aPolicyQuestionTheComposerCannotSettleRefusesTheMessage(dataDir) {
+// The composer asks the MTA-STS record question over the resolver it is
+// handed, which is the one this server pinned. That resolver answers that
+// the domain publishes no record, so the shared resolver being unable to
+// answer refuses nothing over MTA-STS: the message goes on to the mail
+// exchanger, which does not resolve here, and is deferred for that.
+async function aPolicyQuestionThePinnedResolverSettledRefusesNothing(dataDir) {
   var resolver = zone.resolverOver(NO_RECORD_ZONE);
   var delivery = handleOn(dataDir, resolver, "enforce");
 
   var outcome = await sendOne(delivery);
   var verdict = verdictFor(outcome);
 
-  count("nothing is delivered under an enforcing posture while the policy question " +
-    "is unsettled", outcome.delivered.length === 0, JSON.stringify(outcome.delivered));
+  count("the pinned resolver was the one asked the record question",
+    resolver.calls.indexOf("TXT _mta-sts.example.net") !== -1, JSON.stringify(resolver.calls));
+  count("nothing is delivered, because the mail exchanger does not resolve here",
+    outcome.delivered.length === 0, JSON.stringify(outcome.delivered));
   count("the recipient comes back with one verdict", verdict !== null,
     JSON.stringify({ deferred: outcome.deferred, failed: outcome.failed }));
   if (verdict === null) return;
-  count("carrying the enhanced status RFC 8461 gives a refusal over a policy",
-    verdict.reasonCode === POLICY_REFUSAL_STATUS, String(verdict.reasonCode));
-  count("and a reason naming MTA-STS, so an operator reading the queue knows what " +
-    "refused it", /MTA-STS/i.test(String(verdict.reason)), String(verdict.reason));
+  count("and it is not a refusal over a policy, because the pinned resolver said the " +
+    "domain publishes none", verdict.reasonCode !== POLICY_REFUSAL_STATUS &&
+    !/MTA-STS/i.test(String(verdict.reason)),
+    String(verdict.reasonCode) + " " + String(verdict.reason));
 
-  // The classification the status feeds. It is a frozen contract rather
-  // than a phrase, and this is the case that holds the two ends of it
-  // together: a change to the status at either end moves the result type
-  // the receiver is sent.
   var observed = await delivery.tlsRpt.observed();
   var forDomain = observed.filter(function (r) { return r.domain === "example.net"; });
-  count("the receiver's report carries one row for the domain the message was for",
-    forDomain.length === 1, JSON.stringify(observed.map(function (r) { return r.domain; })));
-  if (forDomain.length !== 1) return;
-  // The lookup never completed, so the receiver's policy document was
-  // never read and nothing in it was found wanting. RFC 8460 section 4.3
-  // separates a policy that could not be retrieved from one that did not
-  // validate, and the second of those, sent here, would tell a domain
-  // whose policy is correct to go and change it.
-  count("classified as an MTA-STS policy this server could not retrieve",
-    failureTypes(forDomain).length === 1 &&
-    failureTypes(forDomain)[0] === "sts-policy-fetch-error",
-    JSON.stringify(forDomain[0].failures));
-  count("and reported as an MTA-STS policy result rather than as a delivery this " +
-    "server made no policy claim about",
-    forDomain[0].policyType === "sts", String(forDomain[0].policyType));
-  count("with the failure filed under that policy as well, so the report entry the " +
-    "receiver reads is about the document they publish",
-    forDomain[0].failures.length === 1 && forDomain[0].failures[0].policyType === "sts",
-    JSON.stringify(forDomain[0].failures));
-  count("with nothing counted as a success",
-    forDomain[0].successful === 0, String(forDomain[0].successful));
+  count("and the receiver's report names no MTA-STS failure for the domain",
+    failureTypes(forDomain).every(function (type) { return type.indexOf("sts-") !== 0; }),
+    JSON.stringify(forDomain.map(function (r) { return r.failures; })));
 }
 
-// The same record question, unanswerable on the other resolver.
-//
-// This server asks first and has its own verdict, which is temporary and
-// carries a status of its own. The composer asks again and its verdict is
-// permanent. One domain, one record, and which of the two an operator
-// gets depends on which resolver could not answer.
-//
-// The receiver is told the same thing either way, and that is the right
-// answer rather than a gap: which of this sender's two resolvers went
-// quiet is this sender's business, and what the receiver can act on is
-// that their policy was not retrieved.
+// The same record question, unanswerable on the pinned resolver. This
+// server asks first and holds the message back under a temporary status
+// of its own, and the receiver is told their policy could not be
+// retrieved.
 async function theSameQuestionOnTheOtherResolverEndsDifferently(dataDir) {
   var resolver = zone.resolverOver(UNANSWERABLE_RECORD_ZONE);
   var delivery = handleOn(dataDir, resolver, "enforce");
@@ -290,9 +255,9 @@ async function run() {
     return d;
   }
   try {
-    await helpers.withTestTimeout("outbound sts verdict: a policy question the composer cannot settle",
+    await helpers.withTestTimeout("outbound sts verdict: a question the pinned resolver settled",
       function () {
-        return aPolicyQuestionTheComposerCannotSettleRefusesTheMessage(freshDir("sts-verdict-enforce"));
+        return aPolicyQuestionThePinnedResolverSettledRefusesNothing(freshDir("sts-verdict-enforce"));
       });
     await helpers.withTestTimeout("outbound sts verdict: the same question on the other resolver",
       function () {

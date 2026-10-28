@@ -117,13 +117,21 @@ async function seedAccount(handle, address) {
 // Whether the message store still answers for a message, and whether what
 // it answers with is readable. A row that comes back with the subject and
 // the body in the clear is mail, whatever table it is in.
+// A folder the erasure removed holds nothing, so its absence reads as no
+// row rather than as a failure.
+function _storeFolderExists(handle, folder) {
+  return handle.messageStore.listFolders().some(function (f) { return f.name === folder; });
+}
+
 function readableInStore(handle, folder, objectid) {
+  if (!_storeFolderExists(handle, folder)) return null;
   var row = handle.messageStore.fetchByObjectId(folder, objectid);
   if (row === null || row === undefined) return null;
   return JSON.stringify(row);
 }
 
 function storeRowCount(handle, folder) {
+  if (!_storeFolderExists(handle, folder)) return 0;
   return handle.messageStore.queryByModseq(folder, { sinceModseq: 0, limit: 10000 }).length;
 }
 
@@ -185,6 +193,8 @@ async function anErasureDestroysTheUnfiledMessageToo(handle, seeded) {
       rows: b.db.from(FOLDERS).where({ account: seeded.row.id }).count(),
       kept: swept.mailboxesKept,
     }));
+  count("and the message store's folder behind it goes with it",
+    !_storeFolderExists(handle, seeded.folder), seeded.folder);
 
   var rows = b.db.from("audit_log").all().filter(function (r) {
     return r.action === "blamepost.mail.mailbox.account_mail_erased";

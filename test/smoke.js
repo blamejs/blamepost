@@ -60,7 +60,7 @@
  *
  * Environment:
  *   SMOKE_PARALLEL           files to run at once. Default 1 (serial).
- *   SMOKE_FILE_TIMEOUT_MS    per-file watchdog budget. Default 300000.
+ *   SMOKE_FILE_TIMEOUT_MS    per-file watchdog budget. Default 600000.
  *                            A file that drives the container image gets
  *                            that budget plus the harness's own image
  *                            build and health-wait ceilings, because a
@@ -255,7 +255,7 @@ var PARALLEL;
 var FILE_TIMEOUT_MS;
 try {
   PARALLEL        = _envInt("SMOKE_PARALLEL", 1, 1);
-  FILE_TIMEOUT_MS = _envInt("SMOKE_FILE_TIMEOUT_MS", 300000, 1000);
+  FILE_TIMEOUT_MS = _envInt("SMOKE_FILE_TIMEOUT_MS", 600000, 1000);
 } catch (e) {
   console.error("smoke: " + ((e && e.message) || e));
   console.error("smoke: refusing to run on a value nobody chose.");

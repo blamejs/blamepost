@@ -111,9 +111,19 @@ function delivered(extra, opts) {
   ]);
 }
 
-// What the reader this server runs makes of a message.
+// The fewest spellings the reader has to take for a run to count.
+var READER_SPELLINGS_FLOOR = 30;
+
+// What the reader this server runs makes of a message. A message the
+// reader refuses to parse, such as one whose header name carries a space
+// before its colon, is one in which it reads no verdict at all.
 function readAs(bytes) {
-  var parsed = b.safeMime.parse(bytes, PARSE_CAPS);
+  var parsed;
+  try { parsed = b.safeMime.parse(bytes, PARSE_CAPS); }
+  catch (e) {
+    if (e && e.name === "SafeMimeError") return [];
+    throw e;
+  }
   var raw = (parsed && parsed.headers && parsed.headers.raw) || {};
   return raw["authentication-results"] || [];
 }
@@ -157,11 +167,13 @@ function theScreenIsNeverNarrowerThanTheReader() {
       "wrote: " + JSON.stringify(after), /dmarc=fail/.test(after[0]));
   }
   // A property proved over nothing is a property nobody checked. The
-  // grammar above is 108 spellings and the reader takes most of them, so
-  // a number far below that says the reader moved and this file went
-  // quiet rather than red.
+  // grammar above is 108 spellings. The reader refuses a message whose
+  // header name carries whitespace before its colon, which removes most
+  // of them, and takes 36; a number far below that says the reader moved
+  // again and this file went quiet rather than red.
   count("the reader took enough of the grammar for the property to mean something",
-    exercised >= 60, exercised + " of " + spellings.length + " spellings exercised");
+    exercised >= READER_SPELLINGS_FLOOR, exercised + " of " + spellings.length +
+      " spellings exercised");
 }
 
 // A verdict this server did not write is not made trustworthy by being
@@ -180,7 +192,8 @@ function nothingUnderThisNameSurvivesAMessageThisServerDidNotAuthenticate() {
       "authenticated nothing about: " + JSON.stringify(after), after.length === 0);
   }
   count("the grammar reached the unauthenticated case too",
-    exercised >= 60, exercised + " of " + spellings.length + " spellings exercised");
+    exercised >= READER_SPELLINGS_FLOOR, exercised + " of " + spellings.length +
+      " spellings exercised");
 }
 
 // The control. RFC 8601 section 5 removes the receiver's own record and

@@ -201,6 +201,30 @@ async function aRecordNoReceiverReadsAPolicyFromIsUnusable() {
   });
   count("a record whose policy tag no receiver accepts reads as unusable",
     broken.state === "unusable", broken.state);
+
+  // RFC 7489 section 6.3 makes `pct` an integer from 0 to 100. A record
+  // whose `pct` is outside that, or is not a whole number, states no
+  // percentage a receiver can apply.
+  var badPercents = ["250", "101", "1.5", "-1", "50x"];
+  for (var i = 0; i < badPercents.length; i += 1) {
+    var off = await postureMod.dmarcRecord(DOMAIN, {
+      dnsLookup: _lookupOver({
+        "_dmarc.example.com": { txt: ["v=DMARC1; p=reject; pct=" + badPercents[i]] },
+      }),
+    });
+    count("a record whose pct is " + badPercents[i] + " reads as unusable",
+      off.state === "unusable" && off.percent === null, JSON.stringify(off));
+  }
+  var edges = [["0", 0], ["100", 100]];
+  for (var e = 0; e < edges.length; e += 1) {
+    var edge = await postureMod.dmarcRecord(DOMAIN, {
+      dnsLookup: _lookupOver({
+        "_dmarc.example.com": { txt: ["v=DMARC1; p=reject; pct=" + edges[e][0]] },
+      }),
+    });
+    count("a record whose pct is " + edges[e][0] + " is published with that percentage",
+      edge.state === "published" && edge.percent === edges[e][1], JSON.stringify(edge));
+  }
 }
 
 // What the reader hands back is printed to an operator, in the doctor

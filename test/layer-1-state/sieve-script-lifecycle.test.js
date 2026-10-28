@@ -374,6 +374,7 @@ function filesHolding(paths, needle) {
 function aDeletedScriptLeavesNothingOfItselfBehind(handle, actor, dirs) {
   var NAME = "residue-check";
   var BODY = "# a filter naming somebody\n" +
+    "require [\"fileinto\"];\n" +
     "if header :contains \"From\" \"oncology@clinic.example\" { fileinto \"Private\"; }\n";
 
   var before = {};

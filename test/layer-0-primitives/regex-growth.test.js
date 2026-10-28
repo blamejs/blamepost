@@ -328,12 +328,16 @@ async function run() {
 
   // ---- The judge, called directly ----
 
+  // On a slow runner, coverage instrumentation included, the largest
+  // sizes pass the time budget before a slope is fitted. The gate refuses
+  // that verdict as it refuses a superlinear one, so either is the answer.
   var quadratic = gate.measurePattern({ source: "<[^>]*>", flags: "g" });
-  count("an unanchored negated-class matcher measures superlinear",
-    quadratic.verdict === "superlinear",
+  count("an unanchored negated-class matcher measures superlinear, or over the time budget",
+    quadratic.verdict === "superlinear" || quadratic.verdict === "over-budget",
     quadratic.verdict + " slope=" + quadratic.slope + " top=" + quadratic.topMs);
-  check("its measured growth exponent is at or above the floor",
-    typeof quadratic.slope === "number" && quadratic.slope >= gate.SLOPE_FLOOR);
+  check("and when a slope was fitted, its growth exponent is at or above the floor",
+    quadratic.verdict === "over-budget" ||
+      (typeof quadratic.slope === "number" && quadratic.slope >= gate.SLOPE_FLOOR));
 
   var linear = gate.measurePattern({ source: "^[a-z]+$", flags: "" });
   count("an anchored class matcher is left alone",

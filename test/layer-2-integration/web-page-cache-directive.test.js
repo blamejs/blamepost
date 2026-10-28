@@ -130,11 +130,11 @@ var ROUTES = {
     asks: [{ reader: "account", status: 200, type: "application/json", cacheControl: NO_STORE,
       accept: "application/json" }],
   },
-  // The framework's event stream handler writes `no-cache` over the request
-  // chain's directive.
+  // The framework's event stream handler keeps the request chain's
+  // `no-store` rather than writing its own `no-cache` over it.
   "/jmap/eventsource": {
     paths: function () { return ["/jmap/eventsource?types=*&closeafter=no&ping=0"]; },
-    asks: [{ reader: "account", status: 200, type: "text/event-stream", cacheControl: "no-cache",
+    asks: [{ reader: "account", status: 200, type: "text/event-stream", cacheControl: NO_STORE,
       stream: true }],
   },
   // A GET without the WebSocket upgrade, answered with 426 and a line of

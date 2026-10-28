@@ -325,13 +325,8 @@ async function malformedCommandsRefuseLoudAndKeepTheSession(ctx) {
 // is in: it may not authenticate it, and it may not reach a verb that
 // needs an account.
 //
-// What the listener does with those octets is recorded rather than
-// asserted either way. The composed reader refuses the announcement and
-// resumes parsing at the next line, so the payload is read as commands
-// rather than drained, and the pre-auth state table is what stops them
-// mattering. That is the vendored listener's behavior rather than this
-// server's composition, and the assertions below are the ones that stay
-// true whichever way it is settled.
+// The listener answers the refusal with an untagged BYE and closes the
+// connection, so no line of the payload is parsed as a command.
 async function aRefusedNonSynchronizingLiteralCannotCarryASessionForward(ctx) {
   var session = await ctx.unauthenticated("literal-plus");
   var smuggled = "s9 NOOP\r\ns8 SELECT INBOX\r\ns7 FETCH 1 BODY[]\r\n";
@@ -352,12 +347,8 @@ async function aRefusedNonSynchronizingLiteralCannotCarryASessionForward(ctx) {
     answered.indexOf("s8 OK") === -1 && answered.indexOf("s7 OK") === -1 &&
     answered.indexOf("* 1 EXISTS") === -1 && answered.indexOf(ALICE_MARKER) === -1,
     visible(answered));
-
-  // Read back from the session itself rather than from the transcript,
-  // because a session can be advanced without saying so.
-  var selected = await ask(session, "SELECT INBOX", "SELECT after the refused announcement");
-  count("and the session is still unauthenticated afterwards",
-    selected.verdict !== "OK", visible(selected.text));
+  count("and the listener closes the connection rather than reading the payload as commands",
+    /\* BYE /.test(answered) && answered.indexOf("s9 ") === -1, visible(answered));
   session.close();
 }
 

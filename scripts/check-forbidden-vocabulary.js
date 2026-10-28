@@ -123,6 +123,13 @@ var EXEMPTIONS = [
     ],
   },
   {
+    id:     "imap-subscribed-mailboxes",
+    reason: "the framework mail-store adapter verb of that name reads the mailboxes an IMAP client has subscribed to under RFC 9051 section 6.3.7",
+    forms:  [
+      "list{Sub|scriptions}",
+    ],
+  },
+  {
     id:     "rlo-filename-example",
     reason: "a filename disguised with a right-to-left override is the example the header screening documents and tests",
     forms:  [

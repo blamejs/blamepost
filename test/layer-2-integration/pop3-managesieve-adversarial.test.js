@@ -302,14 +302,18 @@ async function theCountsArePromisesAboutTheOctetsRetrReturns(port, caPem, addres
   var session = await Wire.pop3(port, {
     caPem:  caPem, servername: HOSTNAME, address: address, password: PASSWORD,
     label:  "pop3-octets", binary: true });
+  // RFC 1939 section 3 sends a message with CRLF line endings, so the
+  // octets a client recovers are the stored message with its bare line
+  // feed written as CRLF.
+  var onWire = b.safeSmtp.canonicalizeEol(stored);
   try {
     session.send("STAT");
     var statLine = await session.read(/^\+OK \d+ \d+/m, "STAT answered");
     var stat = pop3Stat(statLine);
     count("STAT counts the one message this maildrop holds", stat.messages === 1,
       JSON.stringify(stat));
-    count("and its total is the octets the message was stored as",
-      stat.bytes === stored.length, "advertised " + stat.bytes + ", stored " + stored.length);
+    count("and its total is the octets the message takes on the wire",
+      stat.bytes === onWire.length, "advertised " + stat.bytes + ", on the wire " + onWire.length);
 
     session.send("LIST 1");
     var listLine = await session.read(/^(\+OK|-ERR)/m, "LIST answered");
@@ -326,12 +330,12 @@ async function theCountsArePromisesAboutTheOctetsRetrReturns(port, caPem, addres
       "the dot-stuffing RFC 1939 section 3 defines",
       recovered.length === stat.bytes,
       "recovered " + recovered.length + ", advertised " + stat.bytes);
-    count("and they are the octets the message was stored as, byte for byte, so a bare line " +
-      "feed reaches the client as a bare line feed rather than as a rewritten pair",
-      recovered.equals(stored),
+    count("and they are the stored octets with each line ending written as CRLF, byte for " +
+      "byte, so the dot after the bare line feed is stuffed and unstuffed exactly once",
+      recovered.equals(onWire),
       "recovered " + recovered.length + " ending " +
-        recovered.subarray(-12).toString("hex") + ", stored " + stored.length +
-        " ending " + stored.subarray(-12).toString("hex"));
+        recovered.subarray(-12).toString("hex") + ", on the wire " + onWire.length +
+        " ending " + onWire.subarray(-12).toString("hex"));
   } finally {
     session.send("QUIT");
     try { await session.read(/^(\+OK|-ERR)/m, "QUIT answered"); }
@@ -378,11 +382,15 @@ async function haveSpaceAnswersWhatTheUploadWillDo(session) {
 
   // The upload of that size is refused at the wire guard, before any of
   // the payload is read, which is the whole point of announcing a count.
-  session.send('PUTSCRIPT "over-cap" {' + (SIEVE_SCRIPT_CAP + 1) + "+}");
+  // The literal is a synchronizing one, so the client waits for the answer
+  // and sends nothing after a refusal. A non-synchronizing literal refused
+  // here also closes the connection, since its payload is already on the
+  // way; that case is the one aRefusedLiteralIsNotReadAsCommands covers.
+  session.send('PUTSCRIPT "over-cap" {' + (SIEVE_SCRIPT_CAP + 1) + "}");
   var storedOverCap = await replyTo(session, "PUTSCRIPT past the ceiling answered");
   count("and the upload announcing that size is refused on the announcement rather than " +
     "after the transfer, so the two answers agree",
-    /^NO/.test(storedOverCap), visible(storedOverCap));
+    /^NO/.test(storedOverCap) && /exceeds cap/.test(storedOverCap), visible(storedOverCap));
 
   session.send('DELETESCRIPT "at-cap"');
   await session.read(ONE_REPLY, "DELETESCRIPT answered");
@@ -485,26 +493,16 @@ async function theNamingVerbsRefuseRatherThanOverwrite(session) {
 // on the wire together, and a listener that refuses the announcement has
 // N octets in its buffer that nobody has claimed.
 //
-// Draining them is the only answer that keeps the session in step.
 // Reading them as commands means the next thing the listener parses is a
 // line out of a Sieve script rather than a line the client wrote as a
-// command.
+// command. The refusal happens in two places, and the listener answers
+// each differently:
 //
-// This listener does not drain them, and the two cases below hold that
-// to its exact shape. The refusal happens in two different places and
-// neither registers the transfer: `_handlePutScript` in the vendored
-// ManageSieve listener returns on an unauthenticated session before it
-// sets `state.pendingLiteral`, and `guardManageSieveCommand.validate`
-// throws on an announced count past the script ceiling before that
-// handler runs at all. In both the reader then takes the payload line by
-// line.
-//
-// It cannot be closed here. The literal state machine is in the vendored
-// tree, which is read-only, and the only lever this repository has is a
-// command override, which would mean reaching into the listener's own
-// per-connection state to register a transfer it declined. When upstream
-// consumes the announced octets before answering, these cases become one
-// refusal each and the follow-up verb below survives.
+// - `_handlePutScript` refuses on an unauthenticated session. The listener
+//   then discards the announced octets, so the upload draws one refusal.
+// - `guardManageSieveCommand.validate` refuses an announced count past the
+//   script ceiling before any handler runs. The listener answers NO, then
+//   BYE, and closes the connection, so no line of the payload is parsed.
 //
 // The observation is made over a window rather than by waiting for a
 // reply, because the claim is about how many replies arrive: a read that
@@ -522,7 +520,7 @@ function refusalsIn(text) {
   });
 }
 
-async function aRefusedLiteralIsReadAsCommands(port, caPem, address) {
+async function aRefusedLiteralIsNotReadAsCommands(port, caPem, address) {
   // Before authentication, where the handler refuses.
   var unauthenticated = await Wire.connect(port, "managesieve-refused-literal");
   try {
@@ -531,20 +529,16 @@ async function aRefusedLiteralIsReadAsCommands(port, caPem, address) {
       payloadCarryingACommand(SMUGGLED_VERB),
       "<a script carrying a line that reads as a command>");
     var beforeAuth = await unauthenticated.readQuietly("everything said to the refused upload");
-    count("a PUTSCRIPT before authentication is refused",
-      refusalsIn(beforeAuth).length >= 1, visible(beforeAuth));
-    count("and the payload behind it is read line by line as commands rather than consumed " +
-      "as the payload it was announced to be, so one upload draws a refusal per line",
-      refusalsIn(beforeAuth).length > 1,
+    count("a PUTSCRIPT before authentication is refused once",
+      refusalsIn(beforeAuth).length === 1,
       refusalsIn(beforeAuth).length + " refusal(s): " + visible(beforeAuth));
-    count("naming the script's own words as verbs the protocol does not define",
-      beforeAuth.indexOf(SMUGGLED_VERB) !== -1, visible(beforeAuth));
+    count("and the payload behind it is discarded rather than read line by line as commands",
+      beforeAuth.indexOf(SMUGGLED_VERB) === -1, visible(beforeAuth));
   } finally { unauthenticated.close(); }
 
   // After authentication, where the wire guard refuses on the announced
-  // count. This is the one with a consequence: a line of the script that
-  // IS a ManageSieve verb runs with the authority of the session that
-  // was uploading the script.
+  // count. A line of the script that is a ManageSieve verb would run with
+  // the authority of the session that was uploading the script.
   var session = await Wire.managesieve(port, {
     caPem: caPem, servername: HOSTNAME, address: address, password: PASSWORD,
     label: "managesieve-over-cap-literal" });
@@ -560,18 +554,26 @@ async function aRefusedLiteralIsReadAsCommands(port, caPem, address) {
       "<the payload behind an announcement past the ceiling>");
     var overCap = await session.readQuietly("everything said to the oversized upload");
     count("a PUTSCRIPT announcing more octets than the ceiling admits is refused",
-      refusalsIn(overCap).length >= 1, visible(overCap));
+      refusalsIn(overCap).length === 1, visible(overCap));
+    count("and the listener closes the connection rather than parsing the payload",
+      /(^|\r\n)BYE/.test(overCap), visible(overCap));
+  } finally { session.close(); }
 
-    session.send("LISTSCRIPTS");
-    var listing = await session.read(ONE_REPLY, "LISTSCRIPTS answered");
-    count("and a line of the refused payload that reads as a ManageSieve verb is carried out " +
-      "with the session's own authority, so the script the payload named is gone",
-      listing.indexOf('"' + VICTIM_SCRIPT + '"') === -1, visible(listing));
+  var check = await Wire.managesieve(port, {
+    caPem: caPem, servername: HOSTNAME, address: address, password: PASSWORD,
+    label: "managesieve-over-cap-aftermath" });
+  try {
+    check.send("LISTSCRIPTS");
+    var listing = await check.read(ONE_REPLY, "LISTSCRIPTS answered");
+    count("so the script the payload named is still there",
+      listing.indexOf('"' + VICTIM_SCRIPT + '"') !== -1, visible(listing));
+    check.send('DELETESCRIPT "' + VICTIM_SCRIPT + '"');
+    await check.read(ONE_REPLY, "DELETESCRIPT answered");
   } finally {
-    session.send("LOGOUT");
-    try { await session.read(ONE_REPLY, "LOGOUT answered"); }
+    check.send("LOGOUT");
+    try { await check.read(ONE_REPLY, "LOGOUT answered"); }
     catch (_e) { /* drop-silent by design: the verdict is already read */ }
-    session.close();
+    check.close();
   }
 }
 
@@ -585,10 +587,11 @@ async function aRefusedLiteralIsReadAsCommands(port, caPem, address) {
 // mechanism the listener does not advertise is one of them, reachable
 // over TLS by a client that offered the wrong one.
 //
-// The initial response then goes the way of any other unclaimed payload:
-// it is read as a command line, and the refusal quotes it back. That
-// refusal is written to the socket and recorded, so the value a client
-// sent as its credential is the value an operator reads afterwards.
+// The listener discards the announced octets after that refusal, as it
+// does for any other refused literal. A listener that read them as a
+// command line would quote the initial response back in a refusal that
+// is written to the socket and recorded, so the value a client sent as
+// its credential would be the value an operator reads afterwards.
 //
 // The token below stands in for the credential. It is not one, so the
 // case can assert on where it ends up without putting a credential
@@ -605,7 +608,7 @@ function mechanismNotAdvertised(banner) {
   return { mech: null, line: line };
 }
 
-async function aRefusedCredentialLiteralIsQuotedBack(port, caPem) {
+async function aRefusedCredentialLiteralIsNotQuotedBack(port, caPem) {
   var session = await Wire.connect(port, "managesieve-refused-credential");
   try {
     await session.read(/^OK[^\r\n]*\r\n/m, "capability banner");
@@ -625,17 +628,12 @@ async function aRefusedCredentialLiteralIsQuotedBack(port, caPem) {
 
     count("an AUTHENTICATE naming a mechanism the listener does not advertise is refused",
       /Mechanism/.test(said), visible(said));
-    count("and the initial response behind it is read as a command line rather than consumed " +
-      "as the payload it was announced to be, so the value a client sent as its credential " +
-      "is quoted back in a refusal written to the socket and recorded beside it",
-      said.toUpperCase().indexOf(INITIAL_RESPONSE_MARKER.toUpperCase()) !== -1, visible(said));
-    // The verb is upper-cased before it is quoted, and base64 is case
-    // sensitive, so what comes back is a case-folded copy rather than
-    // the octets the client sent. It is the same length and the same
-    // alphabet, and it is the client's own secret material either way.
-    count("as a case-folded copy rather than verbatim, because the reader upper-cases what " +
-      "it read as a verb before it quotes it",
-      said.indexOf(INITIAL_RESPONSE_MARKER) === -1, visible(said));
+    count("once, because the initial response behind it is discarded rather than read as a " +
+      "command line", refusalsIn(said).length === 1, visible(said));
+    // The comparison is case-folded because a reader that took the value
+    // as a verb would upper-case it before quoting it.
+    count("so the value a client sent as its credential is not quoted back in any refusal",
+      said.toUpperCase().indexOf(INITIAL_RESPONSE_MARKER.toUpperCase()) === -1, visible(said));
   } finally { session.close(); }
 }
 
@@ -796,13 +794,13 @@ async function run() {
     session.close();
     session = null;
 
-    await helpers.withTestTimeout("adversarial: a refused literal is read as commands",
+    await helpers.withTestTimeout("adversarial: a refused literal is not read as commands",
       function () {
-        return aRefusedLiteralIsReadAsCommands(ports.managesieve, leaf.ca, carol.address);
+        return aRefusedLiteralIsNotReadAsCommands(ports.managesieve, leaf.ca, carol.address);
       });
 
-    await helpers.withTestTimeout("adversarial: a refused credential literal is quoted back",
-      function () { return aRefusedCredentialLiteralIsQuotedBack(ports.managesieve, leaf.ca); });
+    await helpers.withTestTimeout("adversarial: a refused credential literal is not quoted back",
+      function () { return aRefusedCredentialLiteralIsNotQuotedBack(ports.managesieve, leaf.ca); });
 
     await server.stop({ timeoutMs: SHUTDOWN_TIMEOUT_MS });
     running = false;

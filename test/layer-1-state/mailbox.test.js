@@ -122,7 +122,7 @@ function testTables() {
   // and not which one, and it reads as a pass for a table swapped for
   // another.
   var wanted = [mailbox.FOLDERS, mailbox.MESSAGES, mailbox.SCRIPTS, mailbox.METADATA,
-    mailbox.SUBSCRIBED, mailbox.COUNTERS];
+    mailbox.SUBSCRIBED, mailbox.COUNTERS, mailbox.WIRE_SIZES];
   var absent = wanted.filter(function (name) { return names.indexOf(name) === -1; });
   count("blamepost.mail.mailbox.TABLES declares every mailbox table",
     absent.length === 0 && names.length === wanted.length, names.join(","));

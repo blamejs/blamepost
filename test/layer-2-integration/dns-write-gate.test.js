@@ -646,6 +646,32 @@ async function verifyReadsMxAndTlsaAnswersByTheirFields() {
         return { verdict: c.verdict, provider: c.providerValues };
       })));
     dupVerifier.close();
+
+    // A written MX record the provider holds at another priority is not
+    // the record written, even while a resolver cache still answers the
+    // priority that was asked for.
+    var newPreview = await gate.preview({
+      desired: [
+        { type: "MX", name: DOMAIN, content: "mx.example.com", priority: 10 },
+        { type: "MX", name: DOMAIN, content: "mx-new.example.com", priority: 15 },
+      ],
+      reason:  "add a second exchanger",
+    });
+    var newApplied = await gate.apply(newPreview, { reason: "add a second exchanger" });
+    fake.state.records.forEach(function (r) {
+      if (r.type === "MX" && r.content === "mx-new.example.com") r.priority = 25;
+    });
+    var movedVerifier = gateOver(fake, { resolver: dnsZone.pinnedResolverOver(
+      mxZone([[10, "mx.example.com"], [15, "mx-new.example.com"]])) });
+    var movedReport = await movedVerifier.verify(newApplied, { reason: "check propagation" });
+    count("a written MX record the provider holds at another priority is not agreement",
+      newApplied.written.length === 1 && movedReport.ok === false &&
+        movedReport.checks[0].verdict === "provider-missing",
+      JSON.stringify({ written: newApplied.written.length,
+        checks: movedReport.checks.map(function (c) {
+          return { verdict: c.verdict, provider: c.providerValues };
+        }) }));
+    movedVerifier.close();
   } finally {
     gate.close();
     fake.close();

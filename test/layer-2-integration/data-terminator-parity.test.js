@@ -407,44 +407,17 @@ async function run() {
         "stored " + byBdat.length + " octets, sent " + SUBMITTED.length +
           "; stored tail " + byBdat.subarray(-12).toString("hex"));
 
-      // The same octets sent inside DATA are stored one CRLF shorter,
-      // and this measures that difference rather than asserting it away.
-      //
-      // The inbound listener's copy of this is reconciled in
-      // `lib/mail/listeners.js`: it offers no CHUNKING, so every body it
-      // hands over came through DATA and is short by exactly this much.
-      // The submission listener offers both, and the object
-      // `b.mail.server.submission` hands its agent carries `mailFrom`,
-      // `rcpts`, `body`, `actor`, `remote`, `tls`, `helo`, `connectionId`
-      // and `direction`. Which verb produced the body is not among them,
-      // although the listener knows: `_finalizeAcceptedBody` takes it as
-      // `source` and spends it on an audit event. So this server cannot
-      // tell the two apart at the one point it holds the message, and
-      // adding a CRLF on the guess would lengthen every chunked
-      // submission by one.
-      //
-      // When that argument reaches the handoff, the two paths reconcile
-      // the same way the inbound one does and this check becomes
-      // `byData.equals(byBdat)`. Until then it holds the gap to exactly
-      // the terminator's CRLF, so a change in either direction is read
-      // here rather than in a mailbox.
-      count("a submission sent inside DATA is stored without the CRLF that ended its last " +
-        "line, which is the one octet pair the chunked path keeps and this one does not",
-        byBdat.equals(Buffer.concat([byData, CRLF])),
+      // The same octets sent inside DATA are stored the same: the DATA
+      // reader ends the body after the CRLF that ends its last line,
+      // which RFC 5321 §4.1.1.4 makes part of the mail data, and a BDAT
+      // chunk carries its own count.
+      count("a submission sent inside DATA is stored as the same octets as one sent in a " +
+        "BDAT chunk", byData.equals(byBdat),
         "DATA stored " + byData.length + " octets ending " +
           byData.subarray(-12).toString("hex") + ", BDAT stored " + byBdat.length +
           " octets ending " + byBdat.subarray(-12).toString("hex"));
-
-      // Each door's length against the fixture, so the gap above is
-      // pinned to two numbers rather than to the distance between them.
-      // The relation alone holds while both doors move together, and it
-      // stops holding anything at all if the chunked case is ever
-      // dropped from this file; these two say which door produces which
-      // length whatever else is here.
-      count("and the two lengths are the fixture's and the fixture's less that CRLF, so " +
-        "which door produces which is stated rather than left to the distance between them",
-        byBdat.length === SUBMITTED.length &&
-          byData.length === SUBMITTED.length - CRLF.length,
+      count("and both are the fixture's length",
+        byBdat.length === SUBMITTED.length && byData.length === SUBMITTED.length,
         "the fixture is " + SUBMITTED.length + " octets, BDAT stored " + byBdat.length +
           ", DATA stored " + byData.length);
 

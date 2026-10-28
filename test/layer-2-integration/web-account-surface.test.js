@@ -233,7 +233,8 @@ async function testAFailureBeforeAnyRouteTellsAStrangerNothing(label, reader) {
   count(label + ": a request target past the bound is refused", answer.status >= 400,
     describe(answer));
   count(label + ": the refusal names the rule it broke rather than nothing",
-    body.indexOf("safe-url/too-long") !== -1 || answer.status === 414 || answer.status === 431,
+    body.indexOf("safe-url/too-long") !== -1 || body.indexOf("malformed request target") !== -1 ||
+      answer.status === 414 || answer.status === 431,
     describe(answer));
   count(label + ": the refusal carries no stack",
     body.indexOf(" at ") === -1 && body.toLowerCase().indexOf("\"stack\"") === -1,
@@ -657,9 +658,13 @@ async function run() {
     // nothing could not carry one of these characters into a preview at
     // all and the differential at the end of the screening section would
     // pass for the wrong reason.
+    // The message store refuses a raw C1 octet in a header, so the C1
+    // control reaches the display the one way a header can still carry
+    // it: inside an RFC 2047 encoded word, decoded when the page renders.
     identity.mailbox.appendMessage("INBOX", plainMessage("hostile",
       "\"Sender\" <se" + RLO + "nder@example.net>",
-      "\"quarterly " + RLO + "gpj.exe\" <" + READER + ">, team" + CSI + "@example.net",
+      "\"quarterly " + RLO + "gpj.exe\" <" + READER + ">, =?utf-8?B?" +
+        Buffer.from("team" + CSI, "utf8").toString("base64") + "?= <team@example.net>",
       "a recipient list worth reading twice",
       "the body says " + RLO + "kcab and " + JOINED + " stays joined",
       "MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n"),

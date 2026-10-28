@@ -6544,6 +6544,32 @@ function _plaintextBytes(manifest, keep) {
 
 // Whether an audit signing key is one this volume holds or held before a
 // rotation. Asked with the store open, when `b.auditSign` is the volume's.
+// A manifest's signature, checked against the key a caller pinned or,
+// with no pin, against the key the manifest carries. The framework trusts
+// a key only when one is named or the audit signer holds it, and these
+// verbs run without opening the volume, so the unpinned check names the
+// manifest's own key: it says the manifest is unmodified, and the caller
+// decides separately whether that key is one it trusts.
+function _manifestSignature(manifest, pinnedFingerprint) {
+  var expected = _fingerprintToCheck(manifest, pinnedFingerprint);
+  return b.backup.verifyManifestSignature(manifest,
+    expected === null ? {} : { expectedFingerprint: expected });
+}
+
+// The fingerprint a manifest's signature is checked against: the pinned
+// one when a caller gave one, the fingerprint of the key the manifest
+// carries otherwise, and null when it carries no readable key.
+function _fingerprintToCheck(manifest, pinnedFingerprint) {
+  if (typeof pinnedFingerprint === "string" && pinnedFingerprint.length > 0) {
+    return pinnedFingerprint;
+  }
+  var sig = manifest && manifest.signature;
+  try {
+    return sig && typeof sig.publicKey === "string"
+      ? b.auditSign.fingerprintOf(sig.publicKey) : null;
+  } catch (_e) { return null; }
+}
+
 function _isVolumeSigningKey(fingerprint) {
   if (fingerprint === b.auditSign.getPublicKeyFingerprint()) return true;
   return b.auditSign.getPublicKeyByFingerprint(fingerprint) !== null;
@@ -6653,7 +6679,7 @@ async function _bundleStands(bundleDir, passphrase, bundleId, config) {
       reason: "its manifest cannot be read: " + ((err && err.message) || String(err)) };
   }
   var manifest = read.manifest;
-  var signature = b.backup.verifyManifestSignature(manifest);
+  var signature = _manifestSignature(manifest, null);
   if (!signature.ok) {
     return { ok: false, signature: signature,
       reason: "its signature does not verify: " + signature.reason };
@@ -6688,15 +6714,45 @@ async function _bundleStands(bundleDir, passphrase, bundleId, config) {
             "lists " + entry.encryptedSize };
     }
   }
+  // The vault key opens the way a restore opens it. A bundle written
+  // under the per-bundle key scheme seals it under a subkey of a key
+  // derived from the passphrase and the bundle's own salt; an older
+  // bundle seals it under the passphrase directly.
+  var bundleKey = null;
   try {
-    var vaultKey = await b.backupCrypto.decryptWithPassphrase(
-      Buffer.from(manifest.vaultKeyEnc, "base64"), passphrase, manifest.vaultKeySalt);
+    var sealed = Buffer.from(manifest.vaultKeyEnc, "base64");
+    var vaultKey;
+    if (manifest.keyScheme === b.backupManifest.KEY_SCHEME_BUNDLE) {
+      bundleKey = await b.backupCrypto.deriveKey(passphrase, manifest.bundleSalt);
+      vaultKey = b.backupCrypto.decryptUnderSubkey(sealed, bundleKey, manifest.vaultKeySalt,
+        b.backupCrypto.VAULT_KEY_LABEL, b.backupCrypto.VAULT_KEY_LABEL);
+    } else {
+      vaultKey = await b.backupCrypto.decryptWithPassphrase(sealed, passphrase,
+        manifest.vaultKeySalt);
+    }
     vaultKey.fill(0);
   } catch (_err) {
     return { ok: false, signature: signature,
       reason: "it does not open with this passphrase" };
+  } finally {
+    if (bundleKey) bundleKey.fill(0);
   }
   return { ok: true, signature: signature, reason: null };
+}
+
+// Directories under the storage root named like a bundle that the
+// storage's listing left out, newest first. Empty for storage that is
+// not a local directory.
+function _unlistedBundleDirs(chosen, listed) {
+  var seen = Object.create(null);
+  listed.forEach(function (entry) { seen[entry.bundleId] = true; });
+  var names;
+  try { names = nodeFs.readdirSync(chosen.root, { withFileTypes: true }); }
+  catch (_e) { return []; }
+  return names.filter(function (entry) {
+    return entry.isDirectory() && b.backup.BUNDLE_ID_RE.test(entry.name) &&
+      seen[entry.name] !== true;
+  }).map(function (entry) { return entry.name; }).sort().reverse();
 }
 
 // Keep the newest `keep` bundles that stand and delete the older ones
@@ -6713,6 +6769,14 @@ async function _sweepBundles(chosen, keep, passphrase, config) {
     if (verdict.ok) standing.push(id);
     else notCounted.push({ bundleId: id, reason: verdict.reason });
   }
+  // The storage lists only bundles that hold what a restore needs, so a
+  // directory named like a bundle that is missing its manifest or a file
+  // it declares is not listed at all. It is reported here as not counted
+  // and left in place, as a listed bundle that does not stand is.
+  _unlistedBundleDirs(chosen, listed).forEach(function (name) {
+    notCounted.push({ bundleId: name, reason: "it is not a complete bundle: its manifest is " +
+      "missing or unreadable, or a file the manifest declares is missing or the wrong size" });
+  });
   var deleted = [];
   var notDeleted = [];
   var older = standing.slice(keep);
@@ -6822,9 +6886,7 @@ async function cmdBackup(flags, positionals) {
     try {
       inspected = _readBundle(inspectedDir, wanted.path, config);
       manifest = inspected.manifest;
-      signature = b.backup.verifyManifestSignature(manifest, {
-        expectedFingerprint: flags.fingerprint || undefined,
-      });
+      signature = _manifestSignature(manifest, flags.fingerprint);
     } catch (err) {
       return report.error(wanted.path + " cannot be read: " + ((err && err.message) || String(err)));
     }
@@ -6912,15 +6974,13 @@ async function cmdBackup(flags, positionals) {
         stagingDir:          _under(scratch, "staging"),
         passphrase:          passphrase,
         requireSignature:    true,
-        expectedFingerprint: flags.fingerprint || undefined,
+        expectedFingerprint: _fingerprintToCheck(checkedManifest, flags.fingerprint) || undefined,
       });
       outcome = {
         bundleId:   target.path,
         fileCount:  extracted.fileCount,
         totalBytes: extracted.totalBytes,
-        signature:  b.backup.verifyManifestSignature(extracted.manifest, {
-          expectedFingerprint: flags.fingerprint || undefined,
-        }),
+        signature:  _manifestSignature(extracted.manifest, flags.fingerprint),
       };
     } catch (err) {
       return report.error(target.path + " does not open: " +
@@ -7516,12 +7576,19 @@ async function _applyHeld(report, flags, config, chosen, bundleId, bundleDir, pa
 
   var extracted;
   try {
+    // With no pin, the signature is checked against the key the manifest
+    // carries, and that key is held against the volume's own signing key
+    // once the restored volume opens. The origin the manifest records is
+    // held against this server after extraction, on the reading the files
+    // came from.
+    var expectedFingerprint = _fingerprintToCheck(
+      _readBundle(bundleDir, bundleId, config).manifest, flags.fingerprint);
     extracted = await b.restoreBundle.extract({
       bundleDir:           bundleDir,
       stagingDir:          incomingDir,
       passphrase:          passphrase,
       requireSignature:    true,
-      expectedFingerprint: flags.fingerprint || undefined,
+      expectedFingerprint: expectedFingerprint || undefined,
       filter:              _restorableEntry,
     });
   } catch (err) {
@@ -7541,7 +7608,7 @@ async function _applyHeld(report, flags, config, chosen, bundleId, bundleDir, pa
   // which is the key to every sealed column on the volume, so only the
   // fields named here are read from it and nothing built from the whole
   // object is printed.
-  var signedBy = b.backup.verifyManifestSignature(extracted.manifest).fingerprint;
+  var signedBy = _manifestSignature(extracted.manifest, null).fingerprint;
   var bundleCreatedAt = extracted.manifest.createdAt;
   var fileCount = extracted.fileCount;
   var totalBytes = extracted.totalBytes;

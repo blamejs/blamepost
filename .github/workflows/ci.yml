@@ -107,11 +107,12 @@ jobs:
           UV_THREADPOOL_SIZE: "16"
           # Per-file watchdog budget, generous over the heaviest file
           # while still failing a genuinely stuck one well inside the
-          # job ceiling. A file that drives the shipped image gets this
-          # budget plus the harness's image-build and health-wait
-          # ceilings, because a cold build runs for minutes before the
-          # test body starts.
-          SMOKE_FILE_TIMEOUT_MS: "300000"
+          # job ceiling. The heaviest, cli-surface.test.js, runs for
+          # about 300 seconds uninstrumented and longer under c8. A file
+          # that drives the shipped image gets this budget plus the
+          # harness's image-build and health-wait ceilings, because a
+          # cold build runs for minutes before the test body starts.
+          SMOKE_FILE_TIMEOUT_MS: "600000"
           # The runner holds only the files that drive the shipped image
           # behind a container engine, and this makes an absent engine
           # refuse the run rather than report those files as skipped.

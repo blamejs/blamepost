@@ -419,6 +419,15 @@ async function run() {
   check("and this server reads the mailbox outside the comment",
     normalizeAddress("Alice <alice@example.net> (see <x>)", "test").address ===
       "alice@example.net");
+  // `inComments: false` counts only the pairs the address is cut from.
+  check("with inComments off, the pair inside the comment is not counted",
+    angleAddressCount("Alice <alice@example.net> (see <x>)", { inComments: false }) === 1 &&
+    angleAddressCount("alice@example.net (see <x>)", { inComments: false }) === 0 &&
+    angleAddressCount("alice@example.net (see <x>)") === 1);
+  // A comment that never closes holds the rest of the entry, so a pair
+  // after its opening is inside it.
+  check("and a pair after a comment that never closes is inside that comment",
+    angleAddressCount("sop<(@ex>sop<(@ex>m", { inComments: false }) === 0);
 
   // A comment with no brackets in it is the documented shape and stays
   // one mailbox.

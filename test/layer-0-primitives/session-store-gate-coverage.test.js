@@ -75,6 +75,9 @@ var UNGATED_BY_DESIGN = Object.freeze({
     "fallback answers and no command reaches a mailbox through it.",
   subscribeNotify: "is absent for the reason appendCatenate is: RFC 5465 NOTIFY needs a " +
     "push channel from the store to a live connection, which this adapter does not offer.",
+  listSubscriptions: "is absent from this repository's adapter, and the only caller is the " +
+    "framework's LIST handler, which this repository replaces with an override of its own " +
+    "that reads the subscribed set through a gated verb.",
 });
 
 // The one gated verb `lib/mail/listeners.js` may still reach through the

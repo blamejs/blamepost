@@ -150,6 +150,20 @@ async function testRemovingAMailbox(handle, actor) {
     before.uidvalidity + " then " + after.uidvalidity);
 }
 
+// Each mailbox is backed by a folder in the message store. Removing the
+// mailbox removes that folder too, so a client that creates and deletes
+// a mailbox in a loop leaves the store's folder list the size it was.
+async function testRemovingAMailboxRemovesItsStoreFolder(handle, actor) {
+  var before = handle.messageStore.listFolders().length;
+  for (var i = 0; i < 5; i += 1) {
+    handle.mailbox.createFolder(actor, "Churn");
+    await handle.mailbox.deleteFolder(actor, "Churn");
+  }
+  var after = handle.messageStore.listFolders().length;
+  count("five create and delete cycles leave the message store holding the folders it held",
+    after === before, before + " folder(s) before, " + after + " after");
+}
+
 // RFC 9051 section 6.3.5 removes the mailbox permanently, so DELETE
 // destroys the mail rather than moving it, and it is one of the paths a
 // preservation order decides. A mailbox holding a message the order keeps
@@ -287,6 +301,23 @@ async function testRenamingAMailbox(handle, actor) {
   count("and the store folder underneath it, which is why the identifiers still mean what " +
     "they meant", after.storeName === before.storeName,
     before.storeName + " then " + after.storeName);
+}
+
+// INBOX matches without regard to case (RFC 9051 section 5.1), so a
+// rename under `inbox/` lands beneath the INBOX that is already there
+// rather than creating a second one.
+async function testRenamingUnderInboxSpelledInLowerCase(handle, actor) {
+  handle.mailbox.createFolder(actor, "Projects");
+  var refusal = await refusalOf(function () {
+    return handle.mailbox.renameFolder(actor, "Projects", "inbox/Projects");
+  });
+  count("a rename under inbox/ in lower case completes",
+    refusal === null, refusal === null ? "" : String(refusal.code) + " " + refusal.message);
+  var names = namesOf(handle, actor);
+  count("and the mailbox sits under the one INBOX the account holds",
+    names.filter(function (n) { return n.toUpperCase() === "INBOX"; }).length === 1 &&
+      names.some(function (n) { return n.toUpperCase() === "INBOX/PROJECTS"; }),
+    names.join(","));
 }
 
 // The renames that are refused, each because the result would be a
@@ -500,10 +531,12 @@ async function run() {
 
     testTheHierarchyDelimiterIsOneValue(handle, alice);
     await testRemovingAMailbox(handle, alice);
+    await testRemovingAMailboxRemovesItsStoreFolder(handle, alice);
     await testRemovingAMailboxAPreservationOrderKeeps(handle, alice);
     await testTheMailboxesThatStay(handle, alice);
     await testRemovingALevelFromTheMiddle(handle, alice);
     await testRenamingAMailbox(handle, alice);
+    await testRenamingUnderInboxSpelledInLowerCase(handle, alice);
     await testTheRenamesThatAreRefused(handle, alice);
     await testRenamingInbox(handle, carol);
     await testTheSubscribedSet(handle, alice);

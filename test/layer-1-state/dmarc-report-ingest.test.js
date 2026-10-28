@@ -199,7 +199,7 @@ function authenticationResults(opts) {
   var id     = opts.authservId || AUTHSERV_ID;
   var result = opts.dmarc || "pass";
   var from   = opts.from || REPORTER;
-  var author = opts.headerFrom === undefined ? "dmarc-noreply@" + from : opts.headerFrom;
+  var author = opts.headerFrom === undefined ? from : opts.headerFrom;
   return "Authentication-Results: " + id +
     "; spf=" + (opts.spf || result) + " smtp.mailfrom=dmarc-noreply@" + from +
     "; dkim=" + (opts.dkim || result) + " header.d=" + from +
@@ -499,10 +499,11 @@ async function theExpansionBoundIsThisReadersOwn(reader) {
     padded.length < reader.describe().maxReportBytes,
     padded.length + " of " + reader.describe().maxReportBytes);
 
-  // Measured against the parser underneath in the same run. A cap this
-  // reader adds is only worth having if the layer below does not have
-  // one, and asserting that from a document rather than from the code is
-  // how the assertion outlives the fact.
+  // Measured against the parser underneath in the same run, so the
+  // assertion tracks the code rather than a document. The framework's
+  // parser carries an expansion bound of its own, and this reader's bound
+  // sits in front of it so the refusal is this reader's, named under its
+  // own reason, whichever layer would have caught the bytes.
   var underneathTookIt;
   try {
     var shaped = b.mail.dmarc.parseAggregateReport(bomb);
@@ -510,8 +511,8 @@ async function theExpansionBoundIsThisReadersOwn(reader) {
   } catch (_e) {
     underneathTookIt = false;
   }
-  count("the parser underneath accepts the same bytes, which is what this bound is for",
-    underneathTookIt === true, String(underneathTookIt));
+  count("the parser underneath refuses the same bytes as well",
+    underneathTookIt === false, String(underneathTookIt));
 
   var refused = await reader.receive(
     carrier({ contentType: "application/gzip", filename: reportFilename("xml.gz"),
@@ -728,11 +729,13 @@ async function theShippedVerdictWritesTheAddressForm() {
     },
   });
   var written = String(verdict.authResults || "").replace(/\r\n[ \t]+/g, " ");
-  count("the shipped inbound path writes header.from as the whole author address",
-    written.indexOf("header.from=dmarc-noreply@" + REPORTER) !== -1, written);
+  count("the shipped inbound path writes header.from as the author domain",
+    written.indexOf("header.from=" + REPORTER + ";") !== -1 ||
+    new RegExp("header\\.from=" + REPORTER.replace(/\./g, "\\.") + "(\\s|$)").test(written),
+    written);
   count("and the cases below are written in that shape",
     authenticationResults({ dmarc: "pass", from: REPORTER })
-      .indexOf("header.from=dmarc-noreply@" + REPORTER) !== -1,
+      .indexOf("header.from=" + REPORTER + "\r\n") !== -1,
     authenticationResults({ dmarc: "pass", from: REPORTER }));
 }
 

@@ -431,10 +431,12 @@ async function testAMethodOverrideIsNotRead(operator, posts) {
   count("and the front page was not published", !(await site.landed()), describe(overridden));
 }
 
-// HTTP/2 carries `:method` as written, and the CSRF gate, the fetch
-// metadata gate and the body reader all compare the method against upper
-// case lists. A route matched in any other case would run with all three
-// skipped, so the answer has to be that no route matches.
+// HTTP/2 carries `:method` as written. A route matched in a case the
+// gates did not read as POST would run with the CSRF gate, the fetch
+// metadata gate and the body reader skipped. The CSRF gate upper-cases
+// the method before it compares, so a forged request in any spelling is
+// refused there with 403; a spelling that no gate reads finds no route
+// and gets 404. Either answer is a refusal that reaches no console page.
 async function testALowerCaseMethodOverHttp2FindsNoRoute(label, reader, posts) {
   var spellings = ["post", "Post", "pOST"];
   var probes = ["/admin/site", "/admin/accounts"];
@@ -444,8 +446,10 @@ async function testALowerCaseMethodOverHttp2FindsNoRoute(label, reader, posts) {
         "Content-Type": "application/x-www-form-urlencoded",
         "Origin":       FOREIGN_ORIGIN,
       }, urlencoded(posts[probes[i]].fields));
-      count(label + ": " + spellings[s] + " " + probes[i] + " over HTTP/2 finds no console route",
-        answer.status === 404 && !carriesConsole(answer), describe(answer));
+      count(label + ": " + spellings[s] + " " + probes[i] + " over HTTP/2 is refused before any " +
+        "console route runs",
+        (answer.status === 403 || answer.status === 404) && !carriesConsole(answer),
+        describe(answer));
       count(label + ": " + spellings[s] + " " + probes[i] + " changed nothing",
         !(await posts[probes[i]].landed()), describe(answer));
     }

@@ -607,6 +607,11 @@ var CSI_BYTE = String.fromCharCode(0x9b);
 // so the operator matching a record to a court order reads the wrong
 // column. Written from its code point for the same reason CSI_BYTE is.
 var TAB_BYTE = String.fromCharCode(0x09);
+
+// One RFC 2047 encoded word carrying `text` as UTF-8.
+function encodedWord(text) {
+  return "=?UTF-8?B?" + Buffer.from(text, "utf8").toString("base64") + "?=";
+}
 var C1_RANGE = /[-]/;
 var ESCAPING_SUBJECT_MARKER = "escaping-subject";
 
@@ -785,9 +790,14 @@ async function run() {
     // real rather than the screen being asserted on its own.
     var escaped = await identity.accounts.create({
       address: ESCAPE_ADDRESS, password: ALICE_PASSWORD });
+    //
+    // The subject travels as an RFC 2047 encoded word. The store refuses
+    // a raw C1 octet in a header at append, and an encoded word is how
+    // one arrives from a stranger: it is decoded after that check, so the
+    // control reaches the listing.
     identity.mailbox.appendMessage("INBOX",
-      mailFrom(ESCAPING_SUBJECT_MARKER + CSI_BYTE + "2K" + CSI_BYTE + "1;31m" +
-        TAB_BYTE + "held"),
+      mailFrom(encodedWord(ESCAPING_SUBJECT_MARKER + CSI_BYTE + "2K" + CSI_BYTE + "1;31m" +
+        TAB_BYTE + "held")),
       { actor: { id: escaped.id, address: escaped.address, domain: escaped.domain,
         roles: ["account"] } });
     var arrivalDays = [isoDay(seedFrom), isoDay(Date.now())].filter(

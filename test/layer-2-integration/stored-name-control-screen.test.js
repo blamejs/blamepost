@@ -98,14 +98,30 @@ function sendLiteral(session, command, payload, note) {
 // account, echoed by LISTSCRIPTS to every client the account holder
 // signs in with, and written into the operator's log on every message
 // the script files.
-async function aScriptNameCarryingAC1ControlIsRefused(session) {
+//
+// The wire guard refuses the name before the payload is read. The
+// payload of a non-synchronizing literal is already on the way, so the
+// listener follows the NO with BYE and closes the connection. Each
+// refused upload therefore runs on a connection of its own.
+async function refusedUpload(connect, name, note) {
+  var upload = await connect();
+  try {
+    sendLiteral(upload, 'PUTSCRIPT "' + name + '"', 'require ["fileinto"];\nkeep;\n', note);
+    return await upload.read(ONE_REPLY, "PUTSCRIPT answered");
+  } finally { upload.close(); }
+}
+
+function refusedWithNo(said) {
+  return /(^|\r\n)NO/.test(String(said));
+}
+
+async function aScriptNameCarryingAC1ControlIsRefused(session, connect) {
   var hostile = "cs" + CSI + "i";
-  sendLiteral(session, 'PUTSCRIPT "' + hostile + '"',
-    'require ["fileinto"];\nkeep;\n', "<a script under a name carrying the C1 CSI>");
-  var stored = await replyTo(session, "PUTSCRIPT answered");
+  var stored = await refusedUpload(connect, hostile,
+    "<a script under a name carrying the C1 CSI>");
   count("a PUTSCRIPT whose name carries a C1 control is refused, because the name is stored " +
     "and then printed into a listing, a log line and an audit row",
-    /^NO/.test(stored), visible(stored));
+    refusedWithNo(stored), visible(stored));
 
   session.send("LISTSCRIPTS");
   var listing = await session.read(ONE_REPLY, "LISTSCRIPTS answered");
@@ -117,16 +133,14 @@ async function aScriptNameCarryingAC1ControlIsRefused(session) {
 // sequence. A gate written around U+009B alone passes the other
 // thirty-one, and the range is what the display screen this server
 // already ships removes.
-async function everyCodePointInTheC1RangeIsRefused(session) {
+async function everyCodePointInTheC1RangeIsRefused(connect) {
   var edges = [["the first C1 code point", PAD], ["the last C1 code point", APC]];
   for (var i = 0; i < edges.length; i += 1) {
-    var name = "edge" + i + edges[i][1];
-    sendLiteral(session, 'PUTSCRIPT "' + name + '"',
-      'require ["fileinto"];\nkeep;\n', "<a script named with " + edges[i][0] + ">");
-    var reply = await replyTo(session, "PUTSCRIPT answered");
+    var reply = await refusedUpload(connect, "edge" + i + edges[i][1],
+      "<a script named with " + edges[i][0] + ">");
     count("a script name carrying " + edges[i][0] + " is refused, so the gate covers the " +
       "range rather than the one code point that opens an escape sequence",
-      /^NO/.test(reply), visible(reply));
+      refusedWithNo(reply), visible(reply));
   }
 }
 
@@ -433,16 +447,19 @@ async function run() {
 
     audit = auditCapture();
 
-    session = await Wire.managesieve(ports.managesieve, {
-      caPem:      leaf.ca,
-      servername: HOSTNAME,
-      address:    alice.address,
-      password:   ALICE_PASSWORD,
-      label:      "managesieve-names",
-    });
+    var connectAlice = function (label) {
+      return Wire.managesieve(ports.managesieve, {
+        caPem:      leaf.ca,
+        servername: HOSTNAME,
+        address:    alice.address,
+        password:   ALICE_PASSWORD,
+        label:      label || "managesieve-refused-upload",
+      });
+    };
+    session = await connectAlice("managesieve-names");
 
-    await aScriptNameCarryingAC1ControlIsRefused(session);
-    await everyCodePointInTheC1RangeIsRefused(session);
+    await aScriptNameCarryingAC1ControlIsRefused(session, connectAlice);
+    await everyCodePointInTheC1RangeIsRefused(connectAlice);
     await aRenameOntoAControlNameIsRefused(session);
     await everyScriptVerbAsksTheSameGate(session);
     await aMailboxNameCarryingAC1ControlIsRefused(ports.imap, leaf.ca, alice.address);

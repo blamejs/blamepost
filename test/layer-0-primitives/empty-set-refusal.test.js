@@ -765,6 +765,9 @@ async function aRequiredListenerThatIsDownKeepsItsOwnVerdict() {
     BLAMEPOST_SERVICE_HOST:  "127.0.0.1",
     BLAMEPOST_SERVICE_PORTS: "mx=" + CLOSED_PORT,
     BLAMEPOST_SERVICE_PROBE_TIMEOUT_MS: "1500",
+    // A runner with no listening-socket tool would refuse the run before
+    // the probe, which is the other case's verdict rather than this one.
+    BLAMEPOST_SERVICE_PROCESS_CHECK:    "off",
   });
   count("services: canary, a required listener that is down still exits 1, not 2",
     rv.code === 1, tail(rv.out, 4));

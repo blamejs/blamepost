@@ -55,9 +55,11 @@ var nodeFs   = require("node:fs");
 var nodeOs   = require("node:os");
 var nodePath = require("node:path");
 
-var helpers = require("../helpers");
-var config  = require("../../lib/config");
-var store   = require("../../lib/store");
+var helpers       = require("../helpers");
+var b             = require("../../lib/vendor/blamejs");
+var config        = require("../../lib/config");
+var store         = require("../../lib/store");
+var mailboxModule = require("../../lib/mail/mailbox");
 
 var count = helpers.count;
 
@@ -191,8 +193,9 @@ async function openStore(prefix) {
   await handle.domains.add({ domain: "example.com" });
 
   return {
-    handle: handle,
-    close:  function () {
+    handle:  handle,
+    dataDir: cfg.paths.dataDir,
+    close:   function () {
       if (store.isOpen()) store.close();
       if (hadTmp) process.env.BLAMEJS_TMPDIR = priorTmp;
       else delete process.env.BLAMEJS_TMPDIR;
@@ -581,6 +584,53 @@ async function listedSizesAreTheOctetsRetrReturns(fixture) {
   await handle.mailbox.commitPop3Drop(dave, drop.dropId);
 }
 
+function _filesUnder(dir) {
+  var out = [];
+  if (!nodeFs.existsSync(dir)) return out;
+  nodeFs.readdirSync(dir, { withFileTypes: true }).forEach(function (entry) {
+    var full = nodePath.join(dir, entry.name);
+    if (entry.isDirectory()) out = out.concat(_filesUnder(full));
+    else out.push(full);
+  });
+  return out;
+}
+
+// RFC 1939 section 3 sends a message with CRLF line endings, so the size
+// LIST reports for a body stored with bare line feeds and no final line
+// ending is the count after those are written as CRLF. Login answers it
+// from the row written when the body was filed, without reading any
+// body: every body file is removed before the drop is opened, and a
+// login that read them would fall back to the stored size.
+async function theListedSizeIsTakenWhenTheBodyIsFiled(fixture) {
+  var handle = fixture.handle;
+  var mallory = actorFor(await handle.accounts.create({
+    address: "mallory@example.com", password: ACCOUNT_PASSWORD }));
+  var bare = Buffer.from("From: sender@example.net\nTo: mallory@example.com\n" +
+    "Subject: bare line feeds\n\nfirst line\nlast line with no ending", "utf8");
+  var onWire = b.safeSmtp.canonicalizeEol(bare).length + 2;
+  handle.mailbox.appendMessage("INBOX", bare, { actor: mallory });
+
+  var bodies = _filesUnder(nodePath.join(fixture.dataDir, "blobs"));
+  count("the filed body is on the volume", bodies.length >= 1, String(bodies.length));
+  bodies.forEach(function (file) { nodeFs.rmSync(file, { force: true }); });
+
+  var drop = handle.mailbox.openPop3Drop(mallory, {});
+  var listed = handle.mailbox.listMessages(mallory, drop.dropId);
+  count("LIST reports the octets the message takes with CRLF line endings, read from the row " +
+    "written when the body was filed rather than from the body",
+    listed.length === 1 && listed[0].size === onWire && drop.totalBytes === onWire,
+    JSON.stringify({ listed: listed, totalBytes: drop.totalBytes, onWire: onWire,
+      stored: bare.length }));
+
+  var rowsBefore = b.db.from(mailboxModule.WIRE_SIZES).all().length;
+  handle.mailbox.markDelete(mallory, drop.dropId, 1);
+  await handle.mailbox.commitPop3Drop(mallory, drop.dropId);
+  count("and the size row goes when the message is deleted at QUIT",
+    b.db.from(mailboxModule.WIRE_SIZES).all().length === rowsBefore - 1,
+    rowsBefore + " row(s) before, " + b.db.from(mailboxModule.WIRE_SIZES).all().length +
+      " after");
+}
+
 // RFC 1939 section 5 unmarks every message RSET finds marked, and
 // section 6 is the only place a mark becomes a deletion. So a session
 // that marks, resets and quits has to leave the mailbox exactly as it
@@ -758,6 +808,9 @@ async function run() {
       function () { return aMaildropIdentifierNobodyHandedOutReachesNothing(fixture); });
     await helpers.withTestTimeout("pop3 lease: a maildrop is not asked for on other terms",
       function () { return aMaildropCannotBeAskedForOnAnyOtherTerms(fixture); });
+    // Last, because it removes every body file on the volume.
+    await helpers.withTestTimeout("pop3 lease: the listed size is taken when the body is filed",
+      function () { return theListedSizeIsTakenWhenTheBodyIsFiled(fixture); });
   } finally {
     fixture.close();
   }

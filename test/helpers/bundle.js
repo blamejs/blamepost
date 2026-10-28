@@ -190,13 +190,16 @@ function resign(dir, edit) {
   var manifest = readManifest(dir);
   delete manifest.signature;
   edit(manifest);
-  var pair = nodeCrypto.generateKeyPairSync("ed25519", {
+  // An algorithm the framework accepts for an audit signature, so the
+  // re-signed manifest is refused for whose key it is rather than for the
+  // kind of key it is.
+  var pair = nodeCrypto.generateKeyPairSync("ml-dsa-65", {
     publicKeyEncoding:  { type: "spki", format: "pem" },
     privateKeyEncoding: { type: "pkcs8", format: "pem" },
   });
   var payload = Buffer.from(b.backupManifest.signingPayload(manifest), "utf8");
   manifest.signature = {
-    algorithm:   "ed25519",
+    algorithm:   "ml-dsa-65",
     publicKey:   pair.publicKey,
     fingerprint: b.auditSign.fingerprintOf(pair.publicKey),
     value:       nodeCrypto.sign(null, payload, pair.privateKey).toString("base64"),

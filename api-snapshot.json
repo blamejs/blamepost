@@ -170,7 +170,7 @@
           "members": {
             "angleAddressCount": {
               "kind": "function",
-              "arity": 1
+              "arity": 2
             },
             "create": {
               "kind": "function",
