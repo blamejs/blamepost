@@ -184,9 +184,22 @@ async function deleteIsRefusedForAMailboxHoldingPreservedMail(ctx) {
     placedBy:  "operator",
   });
 
+  // The session holds the mailbox open, so the ordinary message the
+  // DELETE destroys before it reaches the preserved one renumbers what
+  // the session is holding.
+  var selected = await session.imapAsk("SELECT Discovery");
+  count("the session opens the mailbox before deleting it",
+    selected.verdict === "OK" && existsIn(selected.text) === 2, visible(selected.text));
+
   var removed = await session.imapAsk("DELETE Discovery");
   count("DELETE is refused for a mailbox holding a message under a preservation order",
     removed.verdict === "NO", visible(removed.text));
+  count("and the session holding it is told its selection closed, because a message left it",
+    /^\* OK \[CLOSED\]/m.test(removed.text), visible(removed.text));
+  var stale = await session.imapAsk("STORE 1 +FLAGS (\\Flagged)");
+  count("so a STORE by the old sequence number is refused rather than landing on the " +
+    "message that moved into its place",
+    stale.verdict !== "OK", visible(stale.text));
   count("and the refusal says how many messages were kept",
     /\b1\b/.test(removed.text), visible(removed.text));
   count("and carries a response code the client can act on",

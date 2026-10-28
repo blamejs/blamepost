@@ -374,12 +374,23 @@ async function theErasureSeparatesWhatWentFromWhatStayed(identity, account, plan
   count("and the body itself is still on the volume, which is what the report says",
     stillOnVolume(stuck), stuck.path);
 
-  var rows = b.db.from("audit_log").all().filter(function (r) {
-    return r.action === "blamepost.mail.mailbox.destruction_incomplete";
-  });
+  // The row is written through the trail's emit path, which can land
+  // after the erasure has answered, so the trail is polled for it.
+  function incompleteRows() {
+    return b.db.from("audit_log").all().filter(function (r) {
+      return r.action === "blamepost.mail.mailbox.destruction_incomplete";
+    });
+  }
+  var landed = true;
+  try {
+    await helpers.waitUntil(function () { return incompleteRows().length >= 1; }, {
+      timeoutMs: 5000,
+      label:     "expunge-body-refusal: the destruction_incomplete row reaches the trail",
+    });
+  } catch (_timedOut) { landed = false; }
   count("the volume's refusal is on the audit trail with the digest it refused, because " +
     "IMAP has no word for it and the operator has to hear it somewhere",
-    rows.length >= 1, JSON.stringify(rows.map(function (r) { return r.action; })));
+    landed, JSON.stringify(incompleteRows().map(function (r) { return r.action; })));
 }
 
 // ---- the row, which is the other half of the same act -----------------------

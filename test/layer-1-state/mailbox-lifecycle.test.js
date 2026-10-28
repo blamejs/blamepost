@@ -320,6 +320,26 @@ async function testRenamingUnderInboxSpelledInLowerCase(handle, actor) {
     names.join(","));
 }
 
+// The mail agent moves at most 1000 messages in one call, and renaming
+// INBOX moves all of them, so an INBOX holding more is moved in batches.
+async function testRenamingAnInboxLargerThanOneMove(handle, actor) {
+  var total = 1005;
+  for (var i = 0; i < total; i += 1) {
+    handle.mailbox.appendMessage("INBOX", message("bulk-" + i, "one of many"), { actor: actor });
+  }
+  var refusal = null;
+  var moved = null;
+  try { moved = await handle.mailbox.renameFolder(actor, "INBOX", "Everything2026"); }
+  catch (e) { refusal = e; }
+  count("renaming an INBOX holding more messages than one move completes",
+    refusal === null && moved !== null && moved.moved === total,
+    refusal === null ? JSON.stringify(moved) : String(refusal.code) + " " + refusal.message);
+  var inNew = handle.mailbox.statusFolder(actor, "Everything2026", ["MESSAGES"]).MESSAGES;
+  var inInbox = handle.mailbox.statusFolder(actor, "INBOX", ["MESSAGES"]).MESSAGES;
+  count("and the new mailbox holds every message INBOX held, with INBOX left empty",
+    inNew === total && inInbox === 0, inNew + " moved, " + inInbox + " left");
+}
+
 // The renames that are refused, each because the result would be a
 // hierarchy a client could not follow.
 async function testTheRenamesThatAreRefused(handle, actor) {
@@ -528,6 +548,8 @@ async function run() {
     // reading afterwards.
     var carol = await handle.accounts.create({
       address: "carol@example.com", password: BOB_PASSWORD });
+    var dave = actorFor(await handle.accounts.create({
+      address: "dave@example.com", password: BOB_PASSWORD }));
 
     testTheHierarchyDelimiterIsOneValue(handle, alice);
     await testRemovingAMailbox(handle, alice);
@@ -539,6 +561,7 @@ async function run() {
     await testRenamingUnderInboxSpelledInLowerCase(handle, alice);
     await testTheRenamesThatAreRefused(handle, alice);
     await testRenamingInbox(handle, carol);
+    await testRenamingAnInboxLargerThanOneMove(handle, dave);
     await testTheSubscribedSet(handle, alice);
     await testTheAccountBoundary(handle, alice, bob);
     await testTheUidvalidityFloorOutlivesARestart(handle, alice, cfg);
