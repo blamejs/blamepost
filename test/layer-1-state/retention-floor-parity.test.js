@@ -89,7 +89,13 @@ function storeFolderOf(identity, accountId, wireName) {
   return found ? found.storeName : "";
 }
 
+// DELETE removes the store folder with the mailbox, so a folder that is
+// gone holds no rows.
 function rowsIn(identity, storeFolder) {
+  var present = identity.messageStore.listFolders().some(function (f) {
+    return f.name === storeFolder;
+  });
+  if (!present) return [];
   return identity.messageStore.queryByModseq(storeFolder, { sinceModseq: 0 });
 }
 

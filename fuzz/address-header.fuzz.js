@@ -223,8 +223,14 @@ function _addressOfEntry(entry) {
   });
   holds("normalizeAddress returns a name and an address as text",
     cut && typeof cut.name === "string" && typeof cut.address === "string", cut);
+  // A comment around a bare address is taken out of it, so an entry
+  // carrying `(` gives an address made of its own characters in their own
+  // order rather than one piece of it.
   holds("normalizeAddress takes the address out of the entry rather than inventing one",
-    entry.indexOf(cut.address) !== -1, { entry: entry, address: cut.address });
+    entry.indexOf("(") === -1
+      ? entry.indexOf(cut.address) !== -1
+      : _isSubsequence(cut.address, entry),
+    { entry: entry, address: cut.address });
   // The two readers of one entry, held against each other. A `<` inside
   // a quoted display name and a `>` that closes nothing are not a pair,
   // and the counter already reads the entry that way, so an entry it

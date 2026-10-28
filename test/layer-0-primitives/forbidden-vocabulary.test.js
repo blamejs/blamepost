@@ -291,6 +291,15 @@ var EXEMPTION_CASES = {
     occurrences: 3,
     red: "a push " + S + " is free, and a monthly " + S + " is not\n",
   },
+  "imap-subscribed-mailboxes": {
+    exempt: [
+      "  list" + w("Sub|scriptions") + ": \"is absent from this repository's adapter\",",
+      "    return store.list" + w("Sub|scriptions") + "();",
+    ].join("\n") + "\n",
+    occurrences: 2,
+    red: "    return store.list" + w("Sub|scriptions") + "(); // and the monthly " +
+      w("sub|scriptions") + "\n",
+  },
   "rlo-filename-example": {
     exempt: [
       "// decoding to `" + I + " <RLO>gpj.exe` is shown as `" + I + " exe.jpg`",

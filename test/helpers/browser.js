@@ -52,7 +52,11 @@ var nodeHttp  = require("node:http");
 var nodeHttps = require("node:https");
 var nodeHttp2 = require("node:http2");
 
-var DEFAULT_TIMEOUT_MS = 5000;
+// How long one request may go unanswered before it is reported as a hang.
+// A deadline rather than a wait: a request that answers returns at once.
+// It is sized for the coverage run, where every request takes 3 to 5
+// times as long as it does uninstrumented.
+var DEFAULT_TIMEOUT_MS = 20000;
 
 // A user agent string, because the bot guard in the request lifecycle
 // reads one and a request carrying none is refused for a reason that
@@ -145,7 +149,7 @@ function _jar() {
  *
  * opts.ca            PEM of the authority that signed the server certificate
  * opts.servername    SNI name, when the origin is an address rather than a name
- * opts.timeoutMs     per request budget, default 5000
+ * opts.timeoutMs     per request budget, default 20000
  * opts.userAgent     overrides the default browser agent string
  * opts.localAddress  the source address to dial out from, default the host's own
  * opts.http2         speak HTTP/2 rather than HTTP/1.1, default false
