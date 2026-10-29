@@ -232,10 +232,35 @@ function writeFixtures(root, names) {
 // Running the orchestrator
 // ---------------------------------------------------------------------------
 
+// Every variable the orchestrator reads, blanked before each spawn so a
+// case measures the setting it names and not the one the run that started
+// it was given. The child takes `process.env` as its base, which is the
+// route an outer value travels: continuous integration sets
+// SMOKE_REQUIRE_CONTAINER=1, and inherited, it turned the case asserting
+// that an absent engine is REPORTED as a skip into a second copy of the
+// case asserting the refusal, so on a runner one of the two behaviors
+// went unasserted and on a workstation neither did. Blanking is done here
+// rather than in `fixtureEnv` because the listing case builds its
+// environment directly, to run against the real tree instead of a
+// fixture root, and would otherwise be the one call site left inheriting.
+// `_envInt` reads the empty string as its default and `_envFlag` compares
+// against "1", so a blank yields the documented default and not a parse
+// error.
+var ORCHESTRATOR_VARS = [
+  "SMOKE_FILE_TIMEOUT_MS",
+  "SMOKE_LIST",
+  "SMOKE_OUTPUT_DIR",
+  "SMOKE_PARALLEL",
+  "SMOKE_REQUIRE_CONTAINER",
+  "SMOKE_ROOT",
+];
+
 function runSmoke(env) {
+  var neutral = {};
+  for (var i = 0; i < ORCHESTRATOR_VARS.length; i++) neutral[ORCHESTRATOR_VARS[i]] = "";
   return spawnRun.runNodeScript([SMOKE_JS], {
     cwd:       helpers.REPO_ROOT,
-    env:       Object.assign({}, process.env, env),
+    env:       Object.assign({}, process.env, neutral, env),
     ceilingMs: RUN_CEILING_MS,
   });
 }
@@ -520,7 +545,7 @@ async function theShippedIntegrationLayerIsClassifiedCorrectly(root) {
   });
 
   // And the counterpart: an integration file that builds the server in
-  // process is planned to RUN with no engine anywhere, which is the
+  // process is listed to RUN with no engine anywhere, which is the
   // coverage this gating exists to unlock.
   var inProcess = nodeFs.readdirSync(LAYER_2_DIR)
     .filter(function (f) { return f.endsWith(".test.js"); })

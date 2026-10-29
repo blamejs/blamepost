@@ -33,6 +33,7 @@ var nodePath = require("node:path");
 
 var helpers    = require("../helpers");
 var zone       = require("../helpers/dns-zone");
+var b          = require("../../lib/vendor/blamejs");
 var config     = require("../../lib/config");
 var store      = require("../../lib/store");
 var postureMod = require("../../lib/mail/posture");
@@ -430,6 +431,45 @@ async function theBudgetRejectsAStalledQuestionAsAFailure() {
     passed === "answered", String(passed));
 }
 
+// A handle the report cannot ask, refused where the budget is refused.
+//
+// The three readers were treated differently: a handle with no
+// `queryTxt` was refused at construction and one with no `queryMx` or
+// `queryTlsa` was not, so the report said those records could not be
+// looked up. That sentence sends the operator to their resolver, and the
+// resolver answered nothing because nothing asked it.
+//
+// The DKIM handle is the costlier one. It is optional, and its absence
+// leaves the selector rows out of the report by design, so a handle that
+// was given and cannot answer which selectors to expect took the same
+// path: the rows disappeared and the run closed by saying everything
+// this server expects is in place.
+function aHandleTheReportCannotAskIsRefusedAtConstruction() {
+  var whole = zone.resolverOver(baseZone("example.com"));
+  ["queryTxt", "queryMx", "queryTlsa"].forEach(function (reader) {
+    var short = {};
+    Object.keys(whole).forEach(function (k) { if (k !== reader) short[k] = whole[k]; });
+    var threw = false;
+    try { postureMod.create({ hostname: HOSTNAME, resolver: short }); }
+    catch (_e) { threw = true; }
+    count("a resolver with no " + reader + " is refused where the checker is built",
+      threw, reader);
+  });
+
+  var dkimThrew = false;
+  try {
+    postureMod.create({ hostname: HOSTNAME, resolver: whole, dkim: { list: function () {} } });
+  } catch (_e) { dkimThrew = true; }
+  count("a DKIM handle that cannot say which selectors to expect is refused rather than " +
+    "read as no handle at all", dkimThrew, "dkim without dnsRecords");
+
+  var noneThrew = false;
+  try { postureMod.create({ hostname: HOSTNAME, resolver: whole }); }
+  catch (_e) { noneThrew = true; }
+  count("and passing no DKIM handle is still the documented way to narrow the report",
+    !noneThrew, "no dkim handle");
+}
+
 // A budget is not a setting with an off position. The value that would
 // turn it off is the behavior it exists to end, so it is refused where
 // every other bad opt is refused: at construction, where the operator
@@ -556,6 +596,200 @@ async function anSpfRecordThatRedirectsIsDescribedAsRedirecting() {
     spf !== null && /_spf\.provider\.example/.test(spf.detail || ""), spf && spf.detail);
 }
 
+// The rest of the redirect family, each of which is a permanent error at
+// the receiver and a different sentence here. They were reachable and
+// unmeasured, which is the shape where a report keeps producing an
+// answer after the answer stopped being the right one: a redirect that
+// reaches a policy and one that loops both leave the domain with no
+// usable SPF, and only one of them is fixed where the record is.
+async function everyRedirectEndingIsNamedForWhatItIs() {
+  var cases = [
+    { what: "a redirect to a name that publishes no SPF record",
+      domain: "gone.example.com",
+      zone: {
+        "gone.example.com":   { mx: [HOSTNAME], txt: ["v=spf1 redirect=_spf.gone.example"] },
+        "_spf.gone.example":  { txt: [] },
+      },
+      says: /_spf\.gone\.example publishes no SPF record/i },
+    { what: "a redirect chain that comes back to where it started",
+      domain: "loop.example.com",
+      zone: {
+        "loop.example.com": { mx: [HOSTNAME], txt: ["v=spf1 redirect=_spf.a.example"] },
+        "_spf.a.example":   { txt: ["v=spf1 redirect=_spf.b.example"] },
+        "_spf.b.example":   { txt: ["v=spf1 redirect=_spf.a.example"] },
+      },
+      says: /does not reach a record with an all mechanism/i },
+    { what: "a redirect chain longer than this check follows",
+      domain: "deep.example.com",
+      zone: {
+        "deep.example.com": { mx: [HOSTNAME], txt: ["v=spf1 redirect=h1.example"] },
+        "h1.example": { txt: ["v=spf1 redirect=h2.example"] },
+        "h2.example": { txt: ["v=spf1 redirect=h3.example"] },
+        "h3.example": { txt: ["v=spf1 redirect=h4.example"] },
+        "h4.example": { txt: ["v=spf1 -all"] },
+      },
+      says: /does not reach a record with an all mechanism/i },
+    { what: "a redirect whose target expands per message",
+      domain: "macro.example.com",
+      zone: { "macro.example.com": { mx: [HOSTNAME], txt: ["v=spf1 redirect=%{d}.example"] } },
+      says: /expands per message/i },
+  ];
+
+  for (var i = 0; i < cases.length; i += 1) {
+    var one = cases[i];
+    var z = baseZone(one.domain);
+    Object.keys(one.zone).forEach(function (name) { z[name] = one.zone[name]; });
+    var spf = findingFor((await checkZone(z, one.domain)).report, one.domain, "SPF");
+    count(one.what + " is refused", spf !== null && spf.ok === false, JSON.stringify(spf));
+    count("and the sentence names that ending rather than any other",
+      spf !== null && one.says.test(spf.detail || ""), spf && spf.detail);
+  }
+
+  // The control the five above are only meaningful against: a redirect
+  // that reaches a policy is a correct zone, and refusing it would tell
+  // an operator to delete a delegation that works.
+  var good = baseZone("delegated.example.com");
+  good["delegated.example.com"] = { mx: [HOSTNAME], txt: ["v=spf1 redirect=_spf.ok.example"] };
+  good["_spf.ok.example"] = { txt: ["v=spf1 mx -all"] };
+  var passing = findingFor((await checkZone(good, "delegated.example.com")).report,
+    "delegated.example.com", "SPF");
+  count("a redirect that reaches a record ending in -all passes, and names the record it read",
+    passing !== null && passing.ok === true && passing.name === "_spf.ok.example",
+    JSON.stringify(passing));
+
+  // RFC 7208 §4.5 writes the version as an ABNF literal, which RFC 5234
+  // §2.3 makes case-insensitive, so a version tag in capitals is one a
+  // receiver reads.
+  var caps = baseZone("caps.example.com");
+  caps["caps.example.com"] = { mx: [HOSTNAME], txt: ["V=spf1 mx -all"] };
+  var capsFinding = findingFor((await checkZone(caps, "caps.example.com")).report,
+    "caps.example.com", "SPF");
+  count("a version tag written in capitals is read like any other",
+    capsFinding !== null && capsFinding.ok === true, JSON.stringify(capsFinding));
+}
+
+// RFC 7208 §3.4 caps a published record at 450 octets, and a receiver
+// reaches that verdict from the length before it reads the policy. So a
+// record over it authorizes nobody however it ends, and a report that
+// read the policy and stopped there would call one of those correct
+// while every receiver treated the domain as having no SPF at all. A
+// domain arrives at that length by adding one sending provider at a
+// time, each addition obviously right.
+//
+// The two verdicts are settled against each other rather than each
+// against a number written here twice. The record is padded with
+// whitespace so its length is the only thing that varies between the two
+// runs: the terms, the ending and the hosts are identical on either side
+// of the cap, which is what makes the difference in verdict attributable
+// to the length.
+function spfOfLength(octets) {
+  var record = "v=spf1 mx -all";
+  return record + " ".repeat(octets - record.length);
+}
+
+async function aRecordTooLongForAReceiverIsNotAPass() {
+  var cap = postureMod.MAX_SPF_RECORD_OCTETS;
+  var domain = "verbose.example.com";
+
+  async function bothVerdictsFor(record) {
+    var z = baseZone(domain);
+    z[domain] = { mx: [HOSTNAME], txt: [record] };
+    var reported = findingFor((await checkZone(z, domain)).report, domain, "SPF");
+    var received = await b.mail.spf.verify({
+      ip: "203.0.113.9", helo: "sender.example", mailFrom: "alice@" + domain,
+      dnsLookup: zone.lookupOver(z),
+    });
+    return { reported: reported, received: received };
+  }
+
+  var over = await bothVerdictsFor(spfOfLength(cap + 1));
+  count("a receiver answers a record one octet over the cap with a permanent error, so the " +
+    "domain has no usable SPF at all",
+    over.received.result === "permerror", over.received.result + " " +
+    JSON.stringify(over.received.reason || over.received.explanation || ""));
+  count("and the report refuses the same record rather than reading the policy in it",
+    over.reported !== null && over.reported.ok === false,
+    over.reported && JSON.stringify({ ok: over.reported.ok, detail: over.reported.detail }));
+  count("and it names the length and the cap, which is what the operator has to change",
+    over.reported !== null && /\b\d{3,}\b/.test(over.reported.detail || "") &&
+    over.reported.detail.indexOf(String(cap)) !== -1, over.reported && over.reported.detail);
+
+  var at = await bothVerdictsFor(spfOfLength(cap));
+  count("a record of exactly the cap is one a receiver reads the policy of",
+    at.received.result !== "permerror", at.received.result);
+  count("and the report reaches a verdict on the policy rather than on the length",
+    at.reported !== null && !/octets/.test(at.reported.detail || ""),
+    at.reported && JSON.stringify({ ok: at.reported.ok, detail: at.reported.detail }));
+}
+
+// The same question about the record beside it, settled between the two
+// readers this server runs rather than against a number written here.
+//
+// `blamepost.mail.posture.dmarcRecord` caps a published record at the
+// length it will take apart and answers `unusable` above it. The report
+// reads the same name, and had no such cap: it handed the record
+// straight to the parser and printed whatever came back. So one server
+// held two opposite readings of one zone, and the one an operator runs
+// `blamepost doctor` for was the lenient one. A domain publishing a
+// record that long reads as correct in the report and as unreadable
+// everywhere the policy is actually used.
+//
+// The pair is asserted in both directions. The record one character over
+// the cap has to fail on both readers, and the record exactly at it has
+// to pass on both, or the check has moved the disagreement rather than
+// closed it.
+//
+// Padding is trailing whitespace so the length is the only thing that
+// varies: the version tag, the policy and the reporting address are
+// identical on either side of the cap.
+function dmarcOfLength(domain, chars) {
+  var record = "v=DMARC1; p=reject; rua=mailto:dmarc@" + domain;
+  return record + " ".repeat(Math.max(0, chars - record.length));
+}
+
+async function aDmarcRecordTooLongToReadIsNotAPass() {
+  var cap = postureMod.MAX_DMARC_RECORD_CHARS;
+  var domain = "wordy.example.com";
+
+  async function bothReadingsOf(record) {
+    var z = baseZone(domain);
+    z["_dmarc." + domain] = { txt: [record] };
+    var reported = findingFor((await checkZone(z, domain)).report, domain, "DMARC");
+    var read = await postureMod.dmarcRecord(domain, {
+      dnsLookup: postureMod.txtLookup(zone.resolverOver(z)),
+    });
+    return { reported: reported, read: read };
+  }
+
+  var over = await bothReadingsOf(dmarcOfLength(domain, cap + 1));
+  count("the record reader refuses a record one character over the cap",
+    over.read.state === "unusable", over.read.state + " " + String(over.read.why));
+  count("and the report refuses the same record rather than reading the policy in it",
+    over.reported !== null && over.reported.ok === false,
+    over.reported && JSON.stringify({ ok: over.reported.ok, detail: over.reported.detail }));
+  count("and it names the length and the cap, which is what the operator has to change",
+    over.reported !== null &&
+    (over.reported.detail || "").indexOf(String(cap + 1)) !== -1 &&
+    (over.reported.detail || "").indexOf(String(cap)) !== -1,
+    over.reported && over.reported.detail);
+  // The record came out of somebody else's zone and the finding is
+  // printed at a terminal and rendered on a page. A refusal that quoted
+  // the whole of what it refused would put the document back in front of
+  // the reader it was kept away from.
+  count("and it does not print the whole of a record it would not read",
+    over.reported !== null &&
+    String(over.reported.found === null ? "" : over.reported.found).length <= cap,
+    over.reported && String(over.reported.found === null ? 0 : over.reported.found.length));
+
+  var at = await bothReadingsOf(dmarcOfLength(domain, cap));
+  count("a record of exactly the cap is one the record reader takes apart",
+    at.read.state === "published" && at.read.policy === "reject",
+    at.read.state + " " + String(at.read.policy));
+  count("and the report reaches a verdict on the policy rather than on the length",
+    at.reported !== null && at.reported.ok === true,
+    at.reported && JSON.stringify({ ok: at.reported.ok, detail: at.reported.detail }));
+}
+
 // The posture this project ships refuses a soft ending, and that has to
 // keep holding whichever way the record is written.
 async function aSoftFailEndingStillFails() {
@@ -646,6 +880,60 @@ async function aDriftedSelectorRecordIsCaughtAndProvenByASignature(dkim, identit
     revokedFinding && revokedFinding.detail);
 }
 
+// ---- a TLSA record nobody said anything about -------------------------------
+
+// RFC 7672 §1.3 lets a sender use a TLSA record only when the answer
+// carrying it was DNSSEC-authenticated, and the framework's DANE reader
+// refuses an unauthenticated one rather than using it. RFC 4035 §3.2.3
+// makes that a fact about the RESPONSE, which the shipped resolver
+// reports as `validated`.
+//
+// A resolver handle that does not report it is the third answer, and it
+// is the one only this layer can ask: `blamepost doctor` builds the
+// shipped resolver, which always reports, while `posture.create` takes
+// any handle with the readers it calls, and one an operator wrapped
+// around an internal service reports nothing. Reading that silence as
+// authenticated claims a guarantee nobody gave, and reading it as
+// unauthenticated sends an operator to sign a zone that may already be
+// signed, so it is neither.
+async function aResolverThatSaysNothingAboutDnssecIsNotReadAsEither() {
+  var tlsaName = "_25._tcp." + HOSTNAME;
+  var domain = "dane.example.com";
+
+  var z = baseZone(domain);
+  z[tlsaName] = { tlsa: 2 };
+  var spoken = postureMod.create({ hostname: HOSTNAME, resolver: zone.resolverOver(z) });
+  var speaks = findingFor(await spoken.check({ domains: [domain], dane: true }),
+    HOSTNAME, "TLSA");
+  count("a handle reporting an authenticated answer passes the records it carried",
+    speaks !== null && speaks.ok === true, JSON.stringify(speaks));
+
+  var unsignedZone = baseZone(domain);
+  unsignedZone[tlsaName] = { tlsa: 2, authenticated: false };
+  var unsigned = postureMod.create({
+    hostname: HOSTNAME, resolver: zone.resolverOver(unsignedZone),
+  });
+  var bare = findingFor(await unsigned.check({ domains: [domain], dane: true }),
+    HOSTNAME, "TLSA");
+  count("the same records under a handle reporting no authentication are refused",
+    bare !== null && bare.ok === false && bare.unresolved !== true, JSON.stringify(bare));
+  count("and the refusal names what has to be signed rather than the records",
+    bare !== null && /dnssec/i.test(bare.detail || ""), bare && bare.detail);
+
+  var silentChecker = postureMod.create({
+    hostname: HOSTNAME, resolver: zone.resolverOver(z, { reportsDnssec: false }),
+  });
+  var silent = findingFor(await silentChecker.check({ domains: [domain], dane: true }),
+    HOSTNAME, "TLSA");
+  count("a handle that says nothing about it reads as a thing this server did not find out",
+    silent !== null && silent.unresolved === true, JSON.stringify(silent));
+  count("and names no found or expected value, because neither was established",
+    silent !== null && silent.found === null && silent.expected === null,
+    JSON.stringify(silent));
+  count("and sends the operator to the resolver rather than to the zone",
+    silent !== null && /resolver/i.test(silent.detail || ""), silent && silent.detail);
+}
+
 // ---- the operator's resolver is the one that answers ------------------------
 
 // The operator pins a resolver because the host's is not trusted. Every
@@ -694,6 +982,7 @@ async function run() {
     await aBrokenLookupReadsAsABrokenLookup();
     await theBudgetRejectsAStalledQuestionAsAFailure();
     aBudgetHasNoOffPosition();
+    aHandleTheReportCannotAskIsRefusedAtConstruction();
     await aStalledPolicyLookupIsAnsweredRatherThanWaitedOn();
     await aStalledMxOrTlsaLookupIsBoundedToo();
     await aSubdomainCoveredByItsParentIsNotReportedUnprotected();
@@ -702,7 +991,11 @@ async function run() {
     await twoDmarcRecordsAreNamedAsTwo();
     await anSpfRecordWithAModifierAfterAllPasses();
     await anSpfRecordThatRedirectsIsDescribedAsRedirecting();
+    await everyRedirectEndingIsNamedForWhatItIs();
+    await aRecordTooLongForAReceiverIsNotAPass();
+    await aDmarcRecordTooLongToReadIsNotAPass();
     await aSoftFailEndingStillFails();
+    await aResolverThatSaysNothingAboutDnssecIsNotReadAsEither();
     await everyLookupGoesThroughThePinnedResolver();
 
     var cfg = config.load({

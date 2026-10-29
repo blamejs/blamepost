@@ -186,12 +186,9 @@ async function everyAttemptIsRecordedAgainstTheEntry(dataDir) {
   // What this asserts is that the posture is RECORDED rather than
   // omitted: a row carrying `false` and a row carrying nothing are
   // different rows, and only one of them can be read back later to say
-  // what was in force. The value itself cannot be anything but `false`
-  // here, and that is deliberate rather than a weakened assertion:
-  // `delivery.create` refuses a REQUIRETLS request outright, because the
-  // parameter does not reach the wire and a posture that is recorded but
-  // never applied is worse than one that was never asked for. When the
-  // framework carries the extension, this is where the true case belongs.
+  // what was in force. `theRecordedPostureIsTheOneInForce` below drives
+  // the same read on a handle that asked for REQUIRETLS, because a row
+  // that always says `false` records nothing at all.
   check("the transport security in force at the time is recorded with it",
     row.requireTls === false);
   check("a receiver the framework did not name is recorded as unknown rather than guessed",
@@ -216,6 +213,26 @@ async function everyAttemptIsRecordedAgainstTheEntry(dataDir) {
     later.history[1].attempt === 2 && later.history[2].attempt === 3);
   check("and the entry counts how many times it has been tried",
     later.attemptsRecorded === 3);
+}
+
+// The posture recorded against an attempt has to be the one that was in
+// force for it. A field that always reads `false` is one an operator
+// cannot use to answer the question it exists for: whether the message
+// that did not arrive was one this server had asked a receiver to
+// protect. The case above drives the off posture; this one drives on, so
+// the pair separates a recorded value from a hardcoded one.
+async function theRecordedPostureIsTheOneInForce(dataDir) {
+  var delivery = handleOn(dataDir, withheldResolver(), {
+    policy:     { mtaSts: "enforce", dane: "off" },
+    requireTls: true,
+  });
+  await spoolOne(delivery);
+  var id = onlyId(dataDir);
+  check("a handle asking for REQUIRETLS spools its recipient", id !== null);
+
+  var entry = await delivery.queue.show(id);
+  check("and the attempt records the posture that was asked for",
+    entry.history.length === 1 && entry.history[0].requireTls === true);
 }
 
 // A listing is read for a hundred entries at a time, so it carries the
@@ -409,6 +426,8 @@ async function run() {
   try {
     await helpers.withTestTimeout("delivery history: every attempt is recorded against the entry",
       function () { return everyAttemptIsRecordedAgainstTheEntry(freshDir("dlv-hist-each")); });
+    await helpers.withTestTimeout("delivery history: the recorded posture is the one in force",
+      function () { return theRecordedPostureIsTheOneInForce(freshDir("dlv-hist-posture")); });
     await helpers.withTestTimeout("delivery history: a listing carries the last answer",
       function () { return aListingCarriesTheLastAnswerRatherThanAllOfThem(freshDir("dlv-hist-list")); });
     await helpers.withTestTimeout("delivery history: the entry says how it ends",

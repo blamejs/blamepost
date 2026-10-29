@@ -21,8 +21,16 @@
  * the same volume, one tamper each, and the refusal each one earns. A
  * chain that catches only the careless edit is not tamper evidence, so
  * the cases here are deletion from the middle, an unlinked row appended
- * at the end, a truncated tail with and without the on-disk anchor, two
- * rows exchanged, and the signed checkpoint itself rewritten.
+ * at the end, a truncated tail with and without the on-disk anchor, the
+ * whole table emptied, two rows exchanged, one row moved onto a
+ * different operator, and the signed checkpoint itself rewritten.
+ *
+ * One case on the list is not a refusal and is here for that reason. A
+ * row written by hand and linked onto the tip correctly agrees with
+ * every reading this verb makes, and an append is what the trail does
+ * all day, so there is nothing in it to refuse. What the verb owes an
+ * operator there is a sentence bounded by who could have written the
+ * row, and the case reads the sentence.
  *
  * The last three are the ones that matter most and they are the ones the
  * others make you believe cannot happen. Rewrite a row, recompute every
@@ -89,6 +97,12 @@ var ALICE_PASSWORD   = "quiet lantern bicycle 4291";
 // to reach the rows the verb reads.
 var AUDIT_TABLE      = "audit_log";
 var CHECKPOINT_TABLE = "audit_checkpoints";
+
+// Where the framework records that a range was archived and then deleted
+// on purpose. A purge writes it and signs it; the cases below write it
+// by hand so the cut lands exactly on the counter the volume recorded,
+// and then sign it the same way the shipped verb does.
+var PURGE_ANCHOR_TABLE = "_blamejs_audit_purge_anchor";
 
 // The rollback-detection sidecar the framework writes beside the
 // database every time it anchors the chain. It records the counter and
@@ -196,6 +210,66 @@ function appendLinkedRow(changes) {
   return row;
 }
 
+// The anchor row the framework's purge writes, in the shape a build that
+// predates anchor signing left behind: the five columns that have always
+// been there and neither of the two a signature needs.
+function writeLegacyPurgeAnchor(cut, rowHash, bundleId) {
+  b.db.prepare("INSERT INTO " + PURGE_ANCHOR_TABLE + " " +
+    '("scope","lastPurgedCounter","lastPurgedRowHash","archiveBundleId","purgedAt") ' +
+    "VALUES (?,?,?,?,?)")
+    .run("audit", cut, String(rowHash), String(bundleId), Date.now());
+}
+
+// Sign the row that was just written, through the framework's own repair
+// verb rather than by assembling a signature here. A fixture that minted
+// its own would be asserting against a second implementation of the
+// payload, and the layout it covers is the framework's to change.
+async function signPurgeAnchor() {
+  var signed = await b.auditTools.signExistingPurgeAnchor({ allow: ["unsigned"] });
+  if (signed.signed !== true) {
+    throw new Error("audit-chain-tamper: the purge anchor was not signed: " +
+      String(signed.reason));
+  }
+  return signed;
+}
+
+// The rows and the anchor row a retention run whose cut landed on the
+// counter the volume recorded leaves behind, without the signature. The
+// three cases that start here differ only in what is done to the anchor
+// afterwards, so the rows they leave on disk are identical and the
+// signature is the whole of the difference between them.
+function _purgeAwayTheAnchoredRow(dataDir) {
+  dropAppendOnlyTriggers(AUDIT_TABLE);
+  dropAppendOnlyTriggers(CHECKPOINT_TABLE);
+  var anchored = anchorCounterOnDisk(dataDir);
+  var anchoredRow = b.db.prepare("SELECT rowHash FROM " + AUDIT_TABLE +
+    " WHERE monotonicCounter=?").get(anchored);
+  // Something has to be left for the next event to attach to, which is
+  // what the shipped purge refuses without.
+  appendLinkedRow({
+    _id:              b.uuid.v7(),
+    monotonicCounter: anchored + 1,
+    action:           "blamepost.audit.read",
+    outcome:          "success",
+  });
+  b.db.runSql("DELETE FROM " + AUDIT_TABLE + " WHERE monotonicCounter <= " + anchored);
+  b.db.runSql("DELETE FROM " + CHECKPOINT_TABLE + " WHERE atMonotonicCounter <= " + anchored);
+  writeLegacyPurgeAnchor(anchored, anchoredRow.rowHash, "archive-under-test");
+  return anchored;
+}
+
+// Move a field the signature covers, leaving the signature and the key
+// fingerprint where they are. This is the edit somebody makes to widen
+// the range an anchor licenses, and it is the case the row's signature
+// exists to catch.
+function editSignedPurgeAnchorRange(by) {
+  var row = b.db.prepare("SELECT lastPurgedCounter FROM " + PURGE_ANCHOR_TABLE +
+    " WHERE scope='audit'").get();
+  b.db.prepare("UPDATE " + PURGE_ANCHOR_TABLE +
+    ' SET "lastPurgedCounter"=? WHERE scope=?')
+    .run(Number(row.lastPurgedCounter) + by, "audit");
+}
+
 var TAMPERS = {
   // The careless edit, kept here beside its siblings so the family reads
   // as one list. The operator-facing report for this shape is asserted in
@@ -244,6 +318,47 @@ var TAMPERS = {
     var counters = auditCounters();
     b.db.runSql("DELETE FROM " + AUDIT_TABLE + " WHERE monotonicCounter > " +
       counters[counters.length - 3]);
+  },
+
+  // The whole table, rather than a tail of it. Every other deletion case
+  // leaves a prefix for the walk to agree with; this one leaves the walk
+  // nothing to disagree with at all, so a check built around comparing
+  // rows has no rows and reports a clean chain over an empty table.
+  "truncate-whole-table": function () {
+    dropAppendOnlyTriggers(AUDIT_TABLE);
+    b.db.runSql("DELETE FROM " + AUDIT_TABLE);
+  },
+
+  // A row written into the table by hand and linked onto the tip
+  // correctly, which is the append the walk cannot separate from an
+  // honest one. Every hash agrees, the counter goes up rather than down,
+  // and the row the volume's record names is untouched, so all three
+  // readings pass. What this case is for is the sentence the verb prints
+  // afterwards rather than the exit code.
+  "append-linked-row-at-the-tip": function () {
+    dropAppendOnlyTriggers(AUDIT_TABLE);
+    appendLinkedRow({
+      _id:              b.uuid.v7(),
+      monotonicCounter: auditCounters().pop() + 1,
+      action:           "account.reinstated",
+      outcome:          "success",
+      reason:           "a row nobody wrote",
+    });
+  },
+
+  // One row moved onto a different operator, with nothing else touched.
+  //
+  // It is the edited-row case aimed at the column an incident asks about
+  // first. A trail that proves an account was suspended and lets
+  // somebody choose which operator it says suspended it is worse than
+  // one naming nobody: the second reads as unattributed and the first is
+  // acted on.
+  "reattribute-a-row": function () {
+    dropAppendOnlyTriggers(AUDIT_TABLE);
+    var first = auditCounters()[0];
+    b.db.prepare("UPDATE " + AUDIT_TABLE +
+      ' SET "actorUserId"=? WHERE monotonicCounter=?')
+      .run("cli:somebody-else@another-host", first);
   },
 
   "alter-checkpoint": function () {
@@ -296,8 +411,8 @@ var TAMPERS = {
   // The one legitimate way a counter loses its row, left in the state a
   // verified archive and purge leaves it in: the rows up to a cut gone,
   // the checkpoints covering them gone with them, and the framework's
-  // purge anchor recording where the deletion stopped and what the last
-  // deleted row hashed to.
+  // purge anchor recording where the deletion stopped, what the last
+  // deleted row hashed to, and a signature over both.
   //
   // It is here rather than beside the CLI's archive and purge flow
   // because that flow cuts by timestamp, and the case that matters is
@@ -305,26 +420,32 @@ var TAMPERS = {
   // check strict enough to catch the case above and not this one refuses
   // a boot after an ordinary retention run, which is the failure that
   // gets a check deleted rather than fixed.
-  "purge-away-the-anchored-row": function (dataDir) {
-    dropAppendOnlyTriggers(AUDIT_TABLE);
-    dropAppendOnlyTriggers(CHECKPOINT_TABLE);
-    var anchored = anchorCounterOnDisk(dataDir);
-    var anchoredRow = b.db.prepare("SELECT rowHash FROM " + AUDIT_TABLE +
-      " WHERE monotonicCounter=?").get(anchored);
-    // Something has to be left for the next event to attach to, which is
-    // what the shipped purge refuses without.
-    appendLinkedRow({
-      _id:              b.uuid.v7(),
-      monotonicCounter: anchored + 1,
-      action:           "blamepost.audit.read",
-      outcome:          "success",
-    });
-    b.db.runSql("DELETE FROM " + AUDIT_TABLE + " WHERE monotonicCounter <= " + anchored);
-    b.db.runSql("DELETE FROM " + CHECKPOINT_TABLE + " WHERE atMonotonicCounter <= " + anchored);
-    b.db.prepare("INSERT INTO _blamejs_audit_purge_anchor " +
-      '("scope","lastPurgedCounter","lastPurgedRowHash","archiveBundleId","purgedAt") ' +
-      "VALUES (?,?,?,?,?)")
-      .run("audit", anchored, String(anchoredRow.rowHash), "archive-under-test", Date.now());
+  //
+  // The signature is what tells this apart from the two cases under it,
+  // and all three leave the same rows on disk. Signing an anchor costs
+  // the audit-signing key, which is sealed under the vault passphrase,
+  // so the three differ in exactly what the row cost whoever wrote it.
+  "purge-away-the-anchored-row": async function (dataDir) {
+    _purgeAwayTheAnchoredRow(dataDir);
+    await signPurgeAnchor();
+  },
+
+  // The same gap, held open by an anchor written before the framework
+  // signed them. The columns a signature lives in are not filled in,
+  // which is the shape a volume purged by an earlier build carries.
+  "purge-anchor-left-unsigned": function (dataDir) {
+    _purgeAwayTheAnchoredRow(dataDir);
+  },
+
+  // The same gap again, held open by an anchor that was signed and then
+  // widened. The signature and the key fingerprint are the ones the
+  // framework wrote; the range they cover is not the range the row now
+  // claims, which is what somebody licensing rows they deleted does to
+  // an anchor they cannot re-sign.
+  "purge-anchor-signature-edited": async function (dataDir) {
+    _purgeAwayTheAnchoredRow(dataDir);
+    await signPurgeAnchor();
+    editSignedPurgeAnchorRange(1);
   },
 
   // The same honest retention run, cut where the framework's own two
@@ -344,7 +465,7 @@ var TAMPERS = {
   // that reads "the name resolves to nothing" as evidence of a rewrite
   // passes it and fails this one. The difference between the two is the
   // whole reason this case exists.
-  "purge-at-the-covering-checkpoint": function (dataDir) {
+  "purge-at-the-covering-checkpoint": async function (dataDir) {
     dropAppendOnlyTriggers(AUDIT_TABLE);
     dropAppendOnlyTriggers(CHECKPOINT_TABLE);
     var anchored = anchorCounterOnDisk(dataDir);
@@ -377,11 +498,10 @@ var TAMPERS = {
     b.db.runSql("DELETE FROM " + AUDIT_TABLE + " WHERE monotonicCounter <= " + cut);
     b.db.runSql("DELETE FROM " + CHECKPOINT_TABLE + " WHERE atMonotonicCounter <= " + cut);
     // The anchor the shipped purge writes, naming the checkpoint the
-    // archive covered itself with: the one the line above just deleted.
-    b.db.prepare("INSERT INTO _blamejs_audit_purge_anchor " +
-      '("scope","lastPurgedCounter","lastPurgedRowHash","archiveBundleId","purgedAt") ' +
-      "VALUES (?,?,?,?,?)")
-      .run("audit", cut, String(cutRow.rowHash), String(covering._id), Date.now());
+    // archive covered itself with: the one the line above just deleted,
+    // and signed the way the shipped purge signs it.
+    writeLegacyPurgeAnchor(cut, cutRow.rowHash, covering._id);
+    await signPurgeAnchor();
   },
 };
 
@@ -406,7 +526,7 @@ async function tamperChild(name, dataDir, workDir) {
   }
   process.env.BLAMEJS_TMPDIR = workDir;
   var handle = await store.open(configFor(dataDir));
-  try { TAMPERS[name](dataDir); } finally { handle.close(); }
+  try { await TAMPERS[name](dataDir); } finally { handle.close(); }
 }
 
 function configFor(dataDir) {
@@ -622,6 +742,97 @@ function aTruncatedTailIsRefused(root) {
     String(seen.verdict.chain.reason).slice(0, 300));
 }
 
+// The whole table emptied rather than a tail of it taken off.
+//
+// It is here beside the tail case because the two fail differently for a
+// reader built around comparing rows: a tail leaves a prefix that still
+// agrees with itself, and this leaves nothing, so a walk is handed an
+// empty table and has nothing to report. The counter the volume recorded
+// outside the database is what answers, and the number it is held
+// against is zero, which is the one comparison a check reading a count
+// as "no rows, nothing to check" would skip.
+function anEmptiedTableIsRefused(root) {
+  var seen = verdictAfter(root, "truncate-whole-table");
+  chainRefusal("every row deleted", seen,
+    "db/audit-rollback-detected", /rollback detected/);
+  count("every row deleted: the refusal says the table now stands at counter zero, so " +
+    "the operator reads how much is gone rather than that something is",
+    /current DB max counter: 0\b/.test(String(seen.verdict.chain.reason)),
+    String(seen.verdict.chain.reason).slice(0, 300));
+  count("every row deleted: and the operator is never told the trail is intact",
+    !/inserted, altered or removed/.test(seen.text.both), seen.text.both.slice(0, 400));
+}
+
+// A row appended and linked onto the tip correctly, which is the one
+// rewrite on this list that nothing here detects.
+//
+// Every reading the verb makes is a reading about rows that are already
+// there. The walk agrees because the forged row's hashes were computed
+// the way the walk computes them; the counter went up, so nothing was
+// rolled back; and the row the volume's record names is untouched, so
+// the record agrees as well. An append is also what the trail does all
+// day, so there is nothing about the shape of one to refuse.
+//
+// What the verb owes the operator is therefore not a refusal but an
+// honest sentence, and that is what is read here. The claim it prints is
+// bounded by who could have made the change: writing a row into this
+// table costs the vault passphrase, and the passphrase unseals the key
+// that signs the checkpoints as well. An unbounded version of the same
+// sentence would be false on this volume, over a row that is sitting in
+// it.
+//
+// The answer to the case is the fourth trust root rather than anything
+// here: a copy of the trail somewhere this server cannot reach, which is
+// what the closing sentence sends the operator to.
+function anAppendedLinkedRowIsNotDetectedAndIsNotDeniedEither(root) {
+  var volume = anchoredVolume(root, "case-append-linked-row");
+  _child("the append-linked-row tamper",
+    ["--tamper", "append-linked-row-at-the-tip", volume.dataDir, volume.workDir]);
+
+  var text    = volume.cli(["audit", "verify-chain"]);
+  var verdict = parseJson(volume.cli(["audit", "verify-chain", "--json"]).stdout);
+  var read    = volume.cli(["audit", "read", "--limit", "200"]);
+
+  count("a row written into the table by hand and linked onto the tip is on the volume",
+    /a row nobody wrote/.test(read.stdout), read.stdout.slice(0, 400));
+
+  count("and the chain still verifies, because every reading this verb makes is a " +
+    "reading of rows that are already there and an append disagrees with none of them",
+    text.status === 0, "exit " + text.status + " " + text.both.slice(0, 400));
+
+  count("and the reading against the volume's own record still passes, because the row " +
+    "that record names was not the row that moved",
+    verdict !== null && verdict.anchor && verdict.anchor.checked === true,
+    JSON.stringify(verdict && verdict.anchor));
+
+  count("so what the operator is owed here is a bounded sentence rather than a refusal, " +
+    "and the claim names who it excludes",
+    /inserted, altered or removed/.test(text.stdout) &&
+    /who did not hold/.test(text.stdout) && /vault passphrase/.test(text.stdout),
+    text.stdout.slice(0, 900));
+
+  count("and it sends the operator to the copy held where this server cannot reach it, " +
+    "which is the only thing that answers an append",
+    /somewhere this server cannot reach/.test(text.stdout), text.stdout.slice(0, 900));
+}
+
+// One row moved onto a different operator, nothing else touched.
+//
+// The column is inside the row's own digest, so this is refused as an
+// edited row. It is driven through the shipped binary here rather than
+// only against the walk, because the column is the one an incident asks
+// about first and a refusal that never reached the operator would be no
+// refusal at all. Which columns the digest covers, all of them, is
+// established next door in `audit-row-digest-coverage.test.js`.
+function aReattributedRowIsRefused(root) {
+  var seen = verdictAfter(root, "reattribute-a-row");
+  chainRefusal("a row moved onto a different operator", seen,
+    "db/audit-chain-break", /rowHash mismatch/);
+  count("a row moved onto a different operator: the refusal names the row it stopped " +
+    "at, so the operator can see which action has been reattributed",
+    /break row _id/.test(seen.text.both), seen.text.both.slice(0, 400));
+}
+
 // The same truncation with the on-disk record removed as well, which is
 // the move somebody who has read this far would make. The signed
 // checkpoint anchors a counter that is no longer in the table, and that
@@ -723,19 +934,159 @@ function aPurgedAnchoredRowIsNotARefusal(root) {
     second.status === 0, "exit " + second.status + " " + second.both.slice(0, 400));
   count("and that second run reaches the same verdict rather than an ordinary volume, " +
     "because the reading was written down before the re-anchoring could consume it",
-    /unsigned/.test(second.stdout), second.stdout.slice(0, 600));
+    /a gap this run did not read/.test(second.stdout), second.stdout.slice(0, 600));
+}
+
+// The same gap held open by a purge record the framework signed, which
+// is what every purge this build performs writes.
+//
+// The record used to be worth less than everything else read on this
+// path: no signature over it, no link into the chain, no checkpoint
+// covering it, so writing the row was the whole cost of making a
+// deletion read as a retention run. It is signed now, and the signing
+// key is sealed under the same passphrase as the database, so writing
+// one costs what rewriting the rows costs. A reader that goes on calling
+// every anchor unsigned hands the operator the weaker of the two facts
+// and hands it to them as the only one.
+//
+// What does not change is the range. The rows are still gone, this run
+// still read none of them, and the archive named is still off the
+// volume, so the verdict stays a gap the run did not read. The signature
+// moves what is holding the gap open, not what was checked in it.
+function aSignedPurgeBoundaryIsNotReportedAsUnsigned(root) {
+  var volume = anchoredVolume(root, "case-signed-purge-boundary");
+  _child("the purge-away-the-anchored-row tamper",
+    ["--tamper", "purge-away-the-anchored-row", volume.dataDir, volume.workDir]);
+
+  // The machine-readable run first and the text run after it, so the
+  // second one answers from the file the first wrote. Both have to say
+  // the same thing about the boundary: a monitor reading the run that
+  // found the gap and an operator reading the run after it are looking
+  // at one volume.
+  var json    = volume.cli(["audit", "verify-chain", "--json"]);
+  var verdict = parseJson(json.stdout);
+  var text    = volume.cli(["audit", "verify-chain"]);
+
+  count("a gap held open by a purge record this volume's own audit-signing key signed " +
+    "does not cost the volume its next boot",
+    text.status === 0, "exit " + text.status + " " + text.both.slice(0, 500));
+
+  count("and the operator is not told the record carries no signature, which is the " +
+    "one thing about it that has stopped being true",
+    /carries no signature/.test(text.stdout) === false &&
+    /unsigned/.test(text.stdout) === false, text.stdout.slice(0, 900));
+
+  count("and the report says what the signature covers, so an operator can tell what " +
+    "moving the boundary would have cost whoever moved it",
+    /signature covers/.test(text.stdout), text.stdout.slice(0, 900));
+
+  count("and the machine-readable verdict says the boundary is signed, so a monitor " +
+    "can tell the two records apart without reading the sentence",
+    verdict !== null && verdict.anchor && verdict.anchor.purged === true &&
+    verdict.anchor.signed === true, JSON.stringify(verdict && verdict.anchor));
+
+  count("and it still does not answer for the rows it did not read, because a signed " +
+    "boundary is a boundary rather than a reading of the range behind it",
+    /inserted, altered or removed/.test(text.stdout) === false,
+    text.stdout.slice(0, 900));
+
+  count("and it still does not claim the archive was resolved, because nothing here " +
+    "resolves one",
+    /verified archive/.test(text.stdout) === false, text.stdout.slice(0, 900));
+}
+
+// The same gap held open by an anchor written before the framework
+// signed them, which is what a volume purged by an earlier build
+// carries. The rows on disk are identical to the case above.
+//
+// It is refused, and what the operator is told is which of the two
+// records they have. A refusal that named the wrong one would send them
+// to look for an intruder over a volume nobody touched, or leave them
+// reading an edit as an upgrade they never made.
+function anOldFormatPurgeAnchorIsNamedAsUnsigned(root) {
+  var volume = anchoredVolume(root, "case-purge-anchor-left-unsigned");
+  _child("the purge-anchor-left-unsigned tamper",
+    ["--tamper", "purge-anchor-left-unsigned", volume.dataDir, volume.workDir]);
+
+  var text = volume.cli(["audit", "verify-chain"]);
+  var json = volume.cli(["audit", "verify-chain", "--json"]);
+  var verdict = parseJson(json.stdout);
+
+  count("a gap held open by an anchor with no signature over it is refused rather than " +
+    "read as a retention run",
+    text.status !== 0, "exit " + text.status + " " + text.both.slice(0, 500));
+
+  count("and the refusal says the record carries no signature, which is what tells an " +
+    "operator it is a record an older build wrote",
+    /carries no signature/.test(String(verdict && verdict.chain && verdict.chain.reason)),
+    String(verdict && verdict.chain && verdict.chain.reason).slice(0, 400));
+
+  count("and it does not read as a record that was edited, which is the other way an " +
+    "anchor fails to verify and needs the opposite response",
+    /does not cover its own fields/.test(
+      String(verdict && verdict.chain && verdict.chain.reason)) === false,
+    String(verdict && verdict.chain && verdict.chain.reason).slice(0, 400));
+
+  count("and the operator is never told the trail is intact over the range that anchor " +
+    "claims",
+    /inserted, altered or removed/.test(text.both) === false, text.both.slice(0, 600));
+}
+
+// The third answer, and the one the reader had no way to give: an anchor
+// carrying a signature that does not cover the fields it now holds.
+//
+// The rows on disk are the same rows again. The signature and the key
+// fingerprint are the ones the framework wrote, and the range they cover
+// is not the range the row claims, which is what widening a boundary
+// looks like to somebody who cannot re-sign it. It must not read as the
+// signed retention run and it must not read as the older record, because
+// the three call for three different responses: nothing, an upgrade, and
+// taking a copy of the volume.
+function anEditedPurgeAnchorIsNotReadAsMerelyOld(root) {
+  var volume = anchoredVolume(root, "case-purge-anchor-signature-edited");
+  _child("the purge-anchor-signature-edited tamper",
+    ["--tamper", "purge-anchor-signature-edited", volume.dataDir, volume.workDir]);
+
+  var text = volume.cli(["audit", "verify-chain"]);
+  var json = volume.cli(["audit", "verify-chain", "--json"]);
+  var verdict = parseJson(json.stdout);
+
+  count("an anchor whose signature no longer covers the range it claims is refused",
+    text.status !== 0, "exit " + text.status + " " + text.both.slice(0, 500));
+
+  count("and the refusal says the signature does not cover the anchor's own fields, " +
+    "which is the finding rather than the symptom",
+    /does not cover its own fields/.test(
+      String(verdict && verdict.chain && verdict.chain.reason)),
+    String(verdict && verdict.chain && verdict.chain.reason).slice(0, 400));
+
+  count("and it does not read as an anchor an older build left unsigned, which is the " +
+    "reading that would turn an edit into an upgrade note",
+    /carries no signature/.test(
+      String(verdict && verdict.chain && verdict.chain.reason)) === false,
+    String(verdict && verdict.chain && verdict.chain.reason).slice(0, 400));
+
+  count("and it does not read as the retention run it was edited to look like",
+    /a gap this run did not read/.test(text.both) === false, text.both.slice(0, 600));
+
+  count("and the operator is never told the trail is intact",
+    /inserted, altered or removed/.test(text.both) === false, text.both.slice(0, 600));
+
+  count("and the verb tells them to take a copy of the volume before anything else",
+    /copy/i.test(text.both), text.both.slice(0, 600));
 }
 
 // The same gap read the other way round: not "does the volume still
 // boot" but "what has the operator just been told, and is it true".
 //
 // The gap above and a wholesale deletion are the same bytes on disk. A
-// purge writes one row into `_blamejs_audit_purge_anchor`, and that row
-// carries no signature, sits in no chain, is covered by no checkpoint
-// and is bound to no archive that anything resolves. So whatever the
-// verb decides to DO about the gap, what it may SAY about it is bounded
-// by what it checked, and the two things it says here are outside that
-// bound.
+// purge writes one row into `_blamejs_audit_purge_anchor`, and a
+// signature over that row says who wrote it and says nothing about the
+// rows it names: the row sits in no chain, is covered by no checkpoint,
+// and is bound to no archive that anything here resolves. So whatever
+// the verb decides to DO about the gap, what it may SAY about it is
+// bounded by what it checked, and the two things it says here are
+// outside that bound.
 //
 // It reports the gap as one "a verified archive and purge has since
 // removed" while having verified no archive: the anchor names one, the
@@ -775,8 +1126,8 @@ function aPurgeGapIsNotReportedAsMoreThanWasChecked(root) {
     "the difference between a retention run and an erasure",
     /verified archive/.test(text.stdout) === false, text.stdout.slice(0, 700));
 
-  count("and it does not answer for rows it did not read: a range trusted on an " +
-    "unsigned counter is a range this verb cannot say nothing was removed from",
+  count("and it does not answer for rows it did not read: a range trusted on a purge " +
+    "boundary is a range this verb cannot say nothing was removed from",
     /inserted, altered or removed/.test(text.stdout) === false,
     text.stdout.slice(0, 700));
 
@@ -860,12 +1211,18 @@ async function run() {
     aRowDeletedFromTheMiddleIsRefused(root);
     aRowAppendedWithoutALinkIsRefused(root);
     twoRowsExchangedAreRefused(root);
+    aReattributedRowIsRefused(root);
     aTruncatedTailIsRefused(root);
+    anEmptiedTableIsRefused(root);
+    anAppendedLinkedRowIsNotDetectedAndIsNotDeniedEither(root);
     aTruncatedTailWithoutItsAnchorIsRefused(root);
     arewrittenCheckpointIsRefused(root);
     aRecomputedChainWithItsCheckpointsRemovedIsRefused(root);
     theAnchoredRowErasedIsRefused(root);
     aPurgedAnchoredRowIsNotARefusal(root);
+    aSignedPurgeBoundaryIsNotReportedAsUnsigned(root);
+    anOldFormatPurgeAnchorIsNamedAsUnsigned(root);
+    anEditedPurgeAnchorIsNotReadAsMerelyOld(root);
     aPurgeGapIsNotReportedAsMoreThanWasChecked(root);
     aPurgeAtTheCoveringCheckpointIsNotCalledAForgery(root);
     anAbsentAnchorIsReportedRatherThanForfeited(root);

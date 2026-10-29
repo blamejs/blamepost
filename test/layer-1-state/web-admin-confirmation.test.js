@@ -390,6 +390,13 @@ async function testRemovingAnAliasAsksBeforeItActs(operator, identity) {
 // wrong: a domain part way through a rotation holds two pairs and only
 // one of them is the one the new records belong to. Retiring the other
 // erases private keys nothing puts back.
+//
+// What is typed is the name the pair's record is published at, which
+// carries the domain as well as the selector. The default selector is the
+// same on every domain keyed in the same month, so the selector alone
+// would confirm a press on another domain's card.
+// `test/layer-1-state/web-admin-confirmation-target.test.js` asks that
+// question directly.
 async function testRetiringASelectorAsksBeforeItActs(operator, server) {
   function activeSelector() {
     var rows = server.mail.dkim.list(DOMAIN);
@@ -407,8 +414,8 @@ async function testRetiringASelectorAsksBeforeItActs(operator, server) {
     label:    "retiring a signing pair",
     path:     "/admin/dkim",
     fields:   { action: "retire", domain: DOMAIN, selector: selector },
-    phrase:      selector,
-    wrongPhrase: selector + "x",
+    phrase:      selector + "._domainkey." + DOMAIN,
+    wrongPhrase: selector,
     notice:      "keys-retiring",
     before:      selector,
     after:       "",

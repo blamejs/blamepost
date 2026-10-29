@@ -48,7 +48,7 @@ var ALICE_PASSWORD   = "quiet lantern bicycle 4291";
 // leave unmarked. The bodies are distinguishable on sight, because the
 // point of reading one is seeing what it does.
 var ACTIVE_SCRIPT = "require [\"fileinto\"];\n" +
-  "if header :contains \"Subject\" \"invoice\" { fileinto \"Archive\"; }\n";
+  "if header :contains \"Subject\" \"receipt\" { fileinto \"Archive\"; }\n";
 var IDLE_SCRIPT = "require [\"fileinto\"];\n" +
   "if header :contains \"Subject\" \"newsletter\" { fileinto \"Junk\"; }\n";
 
@@ -86,9 +86,9 @@ async function run() {
     // checks on a write; the operator read this file is about carries
     // none, which is the point of the next few lines.
     var actor = { id: alice.id, address: alice.address, roles: ["account"] };
-    identity.mailbox.sieveScripts.put(actor, "file-invoices", ACTIVE_SCRIPT, { force: true });
+    identity.mailbox.sieveScripts.put(actor, "file-receipts", ACTIVE_SCRIPT, { force: true });
     identity.mailbox.sieveScripts.put(actor, "file-newsletters", IDLE_SCRIPT, { force: true });
-    identity.mailbox.sieveScripts.setActive(actor, "file-invoices");
+    identity.mailbox.sieveScripts.setActive(actor, "file-receipts");
     identity.close();
     identity = null;
 
@@ -116,10 +116,10 @@ async function run() {
     count("with a reason, the listing succeeds", listed.status === 0,
       "exit " + listed.status + " " + listed.both.slice(0, 120));
     count("both scripts are listed",
-      /file-invoices/.test(listed.stdout) && /file-newsletters/.test(listed.stdout),
+      /file-receipts/.test(listed.stdout) && /file-newsletters/.test(listed.stdout),
       listed.stdout.slice(0, 200));
     count("the active one is marked",
-      /^\*\s+file-invoices$/m.test(listed.stdout), listed.stdout.slice(0, 200));
+      /^\*\s+file-receipts$/m.test(listed.stdout), listed.stdout.slice(0, 200));
     count("and the idle one is not",
       /^\s+file-newsletters$/m.test(listed.stdout), listed.stdout.slice(0, 200));
     count("the listing says which script actually runs",
@@ -128,7 +128,7 @@ async function run() {
     // ---- reading one -----------------------------------------------------
 
     var body = cli(["account", "sieve", ADDRESS,
-      "--reason", "incident 4471", "--script", "file-invoices"]);
+      "--reason", "incident 4471", "--script", "file-receipts"]);
     count("a named script can be read", body.status === 0,
       "exit " + body.status + " " + body.both.slice(0, 120));
     count("and its body is what was stored",

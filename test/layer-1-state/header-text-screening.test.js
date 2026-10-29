@@ -226,7 +226,7 @@ async function run() {
 
     // The folder listing renders every subject and every sender name on
     // one page, which is where a reader decides what to open.
-    var list = await reader.get("/mail/INBOX");
+    var list = await reader.get("/mail?folder=INBOX");
     markupIsEscaped(list, "the folder listing");
     invisiblesAreScreened(list, "the folder listing");
     legitimateTextSurvives(list, "the folder listing, Arabic", ARABIC);
@@ -235,7 +235,8 @@ async function run() {
     // And the message page, which renders the same two values again in
     // its title and its heading.
     for (var i = 0; i < seeded.length; i += 1) {
-      var page = await reader.get("/mail/INBOX/" + encodeURIComponent(seeded[i].objectId));
+      var page = await reader.get("/mail/" + encodeURIComponent(seeded[i].objectId) +
+        "?folder=INBOX");
       if (seeded[i].label === "markup") {
         markupIsEscaped(page, "the message page, markup");
       }

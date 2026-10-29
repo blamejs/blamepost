@@ -371,6 +371,13 @@ Container.prototype.waitHealthy = async function (label) {
   return settled.healthy;
 };
 
+// Stop the container the way the operator guide does, with `docker stop`,
+// which sends SIGTERM and waits for the server to shut down and give its
+// volume lock back. `remove` alone kills it, which is a crash.
+Container.prototype.stop = async function () {
+  await docker(["stop", "--time", "30", this.name]);
+};
+
 Container.prototype.remove = async function () {
   var i = _containers.indexOf(this.name);
   if (i !== -1) _containers.splice(i, 1);

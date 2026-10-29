@@ -6,17 +6,17 @@
  * folder.
  *
  * A wire name is the only handle an account has on one of its
- * mailboxes, and it arrives from three directions: a URL path segment,
- * an IMAP command, and a JMAP identifier. Nothing in this server
- * creates a folder yet, so today the rule is only ever read. That is
- * exactly why it is worth pinning now: the first create verb to land
- * inherits whatever this file asserts, and a name already stored in
+ * mailboxes, and it arrives from four directions: a URL path segment,
+ * an IMAP command, a JMAP identifier, and the name an account holder
+ * types into a client's new folder control. The last of those is the
+ * one that puts a name INTO the namespace, and a name already stored in
  * somebody's mailbox is a name nobody can take back.
  *
  * The rule lives inside `blamepost.mail.mailbox.create`, in one
  * function, applied both where a name arrives from a client and where
  * one enters the namespace, so there is one answer to what a wire name
- * may be.
+ * may be. `blamepost.mail.mailbox.createFolder` applies it per level,
+ * because a level is a name a client addresses on its own.
  *
  * The cases below are the collisions, not a spelling preference. A name
  * carrying a bidi override renders as one folder and addresses another
@@ -37,6 +37,7 @@ var nodePath = require("node:path");
 var helpers = require("../helpers");
 var config  = require("../../lib/config");
 var store   = require("../../lib/store");
+var mailbox = require("../../lib/mail/mailbox");
 
 // The assertion that quotes the value that produced the verdict, and
 // the counter behind it, are both the shared ones. A file that kept its
@@ -172,6 +173,19 @@ function testNamespaceCollisions(handle, actor) {
     "would name both",
     "INBOX/obj_deadbeef");
 
+  // The same class as the level above. A mailbox name is written into a
+  // URL path segment by the browser surface, and in a path `a/../b`
+  // names `b`, so a level spelled as one of the two relative tokens is
+  // a name that addresses somewhere else wherever the name is joined to
+  // anything. A dot inside a level is ordinary and stays ordinary.
+  refuses(handle, actor,
+    "a mailbox level spelled as the parent-directory token is refused", "..");
+  refuses(handle, actor,
+    "a nested mailbox level spelled as the parent-directory token is refused",
+    "../bob@example.com/INBOX");
+  refuses(handle, actor,
+    "a mailbox level spelled as the current-directory token is refused", "Work/./2026");
+
   // RFC 9051 section 6.3.9 gives LIST two wildcards. A folder named
   // for one of them cannot be asked for by the command that lists it.
   refuses(handle, actor, "a mailbox name carrying the LIST wildcard '*' is refused",
@@ -227,6 +241,77 @@ function testTheDefaultSetSurvivesItsOwnRule(handle, actor) {
     "listed under", unopenable.length === 0, unopenable.join(", "));
 }
 
+// A name entering the namespace is screened the way a name arriving
+// from a client is, per level, and it is stored as the screen wrote it.
+// That is what keeps a stored name reachable: a mailbox whose row
+// carries a name the screen rewrites is a mailbox that answers to
+// nothing a client can send.
+function testWhatEnteringTheNamespaceIsScreenedBy(handle, actor) {
+  var made = handle.mailbox.createFolder(actor, "Clients/Acme/2026");
+  count("a nested name reports the levels it brought into existence",
+    made.name === "Clients/Acme/2026" &&
+      made.created.join(",") === "Clients,Clients/Acme,Clients/Acme/2026",
+    made.created.join(","));
+
+  var opened = [];
+  for (var i = 0; i < made.created.length; i += 1) {
+    try { handle.mailbox.selectFolder(actor, made.created[i], {}); opened.push(made.created[i]); }
+    catch (_e) { /* left out of the list below, which is what the count reads */ }
+  }
+  count("every level it created can be opened by the name it was created under",
+    opened.length === made.created.length, opened.join(","));
+
+  // What is above a name, from the one derivation every surface that
+  // reports a hierarchy reads: the IMAP listing keeps a removed level
+  // reachable from it, and the JMAP mailbox answer builds `parentId` and
+  // the level-only name from it. CREATE names the same levels from the
+  // other direction, so the two are compared against each other rather
+  // than against a list written out here.
+  var above = mailbox.superiorLevels("Clients/Acme/2026");
+  count("the levels above a name are the ones CREATE brought into existence under it",
+    above.join(",") === made.created.slice(0, made.created.length - 1).join(","),
+    above.join(",") + " against " + made.created.join(","));
+  count("a name with nothing above it has no levels above it",
+    mailbox.superiorLevels("INBOX").length === 0,
+    JSON.stringify(mailbox.superiorLevels("INBOX")));
+
+  var second = handle.mailbox.createFolder(actor, "Clients/Acme/2025");
+  count("a second name under an existing parent creates the leaf alone",
+    second.created.join(",") === "Clients/Acme/2025", second.created.join(","));
+
+  // RFC 9051 section 5.1 matches INBOX without regard to case, so a
+  // level spelling it is INBOX whatever case it arrives in. Screening
+  // per level is what keeps a second row from being written under that
+  // name, which would be a mailbox with no name of its own to open it
+  // by.
+  var undeINBOX = handle.mailbox.createFolder(actor, "inbox/Kept");
+  count("a first level spelling inbox is the INBOX the account already has",
+    undeINBOX.created.join(",") === "inbox/Kept", undeINBOX.created.join(","));
+  count("so no second mailbox is written under that name",
+    handle.mailbox.accountFolders(actor).filter(function (f) {
+      return f.name.toUpperCase() === "INBOX";
+    }).length === 1,
+    handle.mailbox.accountFolders(actor).map(function (f) { return f.name; }).join(","));
+
+  var refused = [];
+  [
+    cp(0x202E) + "Reversed", "Wild*card", "Two//Levels", "obj_beef", " Padded",
+    "Trailing ", "", cp(0x200B) + "Invisible",
+  ].forEach(function (name) {
+    try { handle.mailbox.createFolder(actor, name); }
+    catch (e) { if (e.code === BAD_NAME) refused.push(name); }
+  });
+  count("every name the rule refuses on the way in is refused on the way out too",
+    refused.length === 8, String(refused.length));
+
+  // The ceiling is the same number the wire is driven to, read from the
+  // module rather than written a second time here.
+  count("the module names how many mailboxes one account may hold",
+    typeof mailbox.MAX_FOLDERS_PER_ACCOUNT === "number" &&
+      mailbox.MAX_FOLDERS_PER_ACCOUNT > 6,
+    String(mailbox.MAX_FOLDERS_PER_ACCOUNT));
+}
+
 async function run() {
   var root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "blamepost-namespace-"));
   var dataDir = nodePath.join(root, "data");
@@ -256,6 +341,7 @@ async function run() {
     testControlCharacters(handle, alice);
     testNamespaceCollisions(handle, alice);
     testWhatTheRuleAccepts(handle, alice);
+    testWhatEnteringTheNamespaceIsScreenedBy(handle, alice);
 
     store.close();
   } finally {

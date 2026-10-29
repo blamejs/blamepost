@@ -739,11 +739,26 @@ function aDeclaredPolarityIsImmutable() {
   // The same hole checkSinceUntracked closed for introduction versions: a
   // declaration the record never held is frozen by nothing, so the first
   // value it gets is whatever source says on the day somebody looks.
-  var untracked = snap.checkMembershipFrozen({},
+  //
+  // It is answered by its own reader, for the reason checkSinceUntracked is:
+  // the two callers read the set in opposite dispositions. The GATE reads it as
+  // a violation. The REFRESH reads it as the work it was run to do, and refusing
+  // it there left no way to record a new array at all, because the refresh is
+  // the only thing that writes the snapshot.
+  var untracked = snap.checkMembershipUntracked({},
     { "blamepost.mail.THE_LIST": "constraint" });
   count("a polarity the snapshot never recorded is refused as frozen by nothing",
     untracked.length === 1 && /frozen by nothing/.test(untracked[0]),
     JSON.stringify(untracked));
+
+  // The other half of that split, held here so the two cannot quietly become
+  // one reader again. A first declaration is not a change, so the polarity
+  // check has nothing to say about it.
+  count("and the polarity check itself stays silent on a first declaration, " +
+    "so the refresh that records it is not refused by it",
+  snap.checkMembershipFrozen({}, { "blamepost.mail.THE_LIST": "constraint" }).length === 0,
+  JSON.stringify(snap.checkMembershipFrozen({},
+    { "blamepost.mail.THE_LIST": "constraint" })));
 
   // A tree with no record at all is the bootstrap, which the gate refuses
   // earlier and with its own message. Reporting every array here would bury

@@ -1,0 +1,52 @@
+# libFuzzer dictionary for the IMAP command reader.
+#
+# The line terminators are here for the reason given in
+# fuzz/smtp-command.dict: a curated seed is a text file and cannot carry
+# a CR byte, so the framing arrives from the dictionary.
+#
+# The literal openers are the other half. RFC 9051 section 2.2.2 puts the
+# byte count at the end of the line, and an opener anywhere else is the
+# smuggling shape `detectLiteralSmuggling` reads for, so both placements
+# need to be reachable.
+
+crlf="\x0d\x0a"
+bare_cr="\x0d"
+bare_lf="\x0a"
+nul="\x00"
+
+literal="{10}"
+literal_nonsync="{10+}"
+literal_zero="{0}"
+literal_huge="{1073741824}"
+
+tag="a1 "
+capability="CAPABILITY"
+starttls="STARTTLS"
+authenticate="AUTHENTICATE PLAIN "
+login="LOGIN "
+select="SELECT INBOX"
+examine="EXAMINE "
+create="CREATE "
+delete="DELETE "
+rename="RENAME "
+subscribe="SUBSCRIBE "
+list="LIST \"\" *"
+status="STATUS INBOX (MESSAGES)"
+append="APPEND INBOX "
+idle="IDLE"
+done="DONE"
+close="CLOSE"
+expunge="EXPUNGE"
+search="SEARCH "
+fetch="FETCH 1 BODY[]"
+store="STORE 1 +FLAGS "
+copy="COPY "
+move="MOVE "
+uid="UID "
+logout="LOGOUT"
+noop="NOOP"
+
+flag_deleted="(\\Deleted)"
+flag_seen="(\\Seen)"
+range="1:*"
+header="HEADER MESSAGE-ID "

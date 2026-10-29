@@ -82,7 +82,7 @@ var QUOTED_TO      = "<alice@" + DOMAIN + ">, \"Doe, Jane\" <jane@example.net>, 
 // A message whose images are all carried inside it. Nothing here points
 // off site, which is the case a count of remote images reads as no
 // images at all.
-var INLINE_SUBJECT = "Floor plan for the offsite";
+var INLINE_SUBJECT = "Room layout for the offsite";
 var INLINE_PIXEL   = "data:image/gif;base64," +
   "R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
 
@@ -90,7 +90,7 @@ var INLINE_PIXEL   = "data:image/gif;base64," +
 // allowlist keeps and which goes with the tag when the tag is dropped.
 // So finding one and not the other is the whole assertion about which
 // message a reader's request for images reached.
-var INLINE_ALT       = "floor plan";
+var INLINE_ALT       = "room layout";
 var INLINE_REPLY_ALT = "site map";
 
 function inlineHtml(alt) {
@@ -224,7 +224,7 @@ async function testABulkActionCannotReachAnotherAccountsMessage(reader, agent, v
   // The mutation is asserted before the status code, because a route
   // that writes the flag and then answers 404 has done the damage and
   // hidden it, and a status-first assertion stops at the cover story.
-  var flagged = await reader.form("/mail/INBOX/actions", {
+  var flagged = await reader.form("/mail/actions?folder=INBOX", {
     action: "flag", objectId: victim.objectId,
   });
   var afterFlag = await flagsOf(agent, victim.accountId, victim.inbox, victim.objectId);
@@ -233,7 +233,7 @@ async function testABulkActionCannotReachAnotherAccountsMessage(reader, agent, v
   count("a bulk flag naming another account's message is refused",
     flagged.status === 404 || flagged.status === 403, flagged.status);
 
-  var read = await reader.form("/mail/INBOX/actions", {
+  var read = await reader.form("/mail/actions?folder=INBOX", {
     action: "read", objectId: victim.objectId,
   });
   var afterRead = await flagsOf(agent, victim.accountId, victim.inbox, victim.objectId);
@@ -245,7 +245,7 @@ async function testABulkActionCannotReachAnotherAccountsMessage(reader, agent, v
   // A batch that mixes one of the reader's own messages with one of the
   // other account's must not act on either. A route that filters the
   // list and proceeds has still told the caller which identifiers exist.
-  var mixed = await reader.form("/mail/INBOX/actions", {
+  var mixed = await reader.form("/mail/actions?folder=INBOX", {
     action: "flag", objectId: [victim.readerObjectId, victim.objectId],
   });
   count("a batch mixing an owned message with another account's is refused whole",
@@ -261,19 +261,19 @@ async function testABulkActionCannotReachAnotherAccountsMessage(reader, agent, v
   // the leak, and that is exactly why they are driven: the refusal has
   // to come from this surface rather than from a layer below it that
   // could stop scoping them tomorrow.
-  var moved = await reader.form("/mail/INBOX/actions", {
+  var moved = await reader.form("/mail/actions?folder=INBOX", {
     action: "move", objectId: victim.objectId, destination: "Archive",
   });
   count("a move naming another account's message is refused",
     moved.status === 404 || moved.status === 403, moved.status);
 
-  var purged = await reader.form("/mail/INBOX/actions", {
+  var purged = await reader.form("/mail/actions?folder=INBOX", {
     action: "purge", objectId: victim.objectId,
   });
   count("a purge naming another account's message is refused",
     purged.status === 404 || purged.status === 403, purged.status);
 
-  var trashed = await reader.form("/mail/INBOX/actions", {
+  var trashed = await reader.form("/mail/actions?folder=INBOX", {
     action: "trash", objectId: victim.objectId,
   });
   count("a trash naming another account's message is refused",
@@ -294,13 +294,13 @@ async function testABulkActionIsBounded(reader) {
   var many = [];
   for (var i = 0; i < 400; i += 1) many.push("obj_" + String(i));
 
-  var asForm = await reader.form("/mail/INBOX/actions", {
+  var asForm = await reader.form("/mail/actions?folder=INBOX", {
     action: "read", objectId: many,
   });
   count("a form naming more messages than the body parser accepts is refused there",
     asForm.status === 413, asForm.status);
 
-  var asJson = await reader.post("/mail/INBOX/actions", "application/json",
+  var asJson = await reader.post("/mail/actions?folder=INBOX", "application/json",
     JSON.stringify({ action: "read", objectId: many }));
   count("a JSON body naming far more messages than a page holds is refused by the route",
     asJson.status === 400, asJson.status + " " + asJson.body.slice(0, 160));
@@ -310,7 +310,7 @@ async function testABulkActionIsBounded(reader) {
 // that refuses everything has certified a broken mailbox rather than an
 // isolated one.
 async function testTheReadersOwnBulkActionStillWorks(reader, agent, own) {
-  var flagged = await reader.form("/mail/INBOX/actions", {
+  var flagged = await reader.form("/mail/actions?folder=INBOX", {
     action: "flag", objectId: own.objectId,
   });
   count("the reader's own message takes a bulk flag",
@@ -320,7 +320,7 @@ async function testTheReadersOwnBulkActionStillWorks(reader, agent, own) {
   count("the reader's own message is flagged afterwards",
     after !== null && after.indexOf("\\Flagged") !== -1, JSON.stringify(after));
 
-  var unflagged = await reader.form("/mail/INBOX/actions", {
+  var unflagged = await reader.form("/mail/actions?folder=INBOX", {
     action: "unflag", objectId: own.objectId,
   });
   count("the reader's own message takes the flag back off",
@@ -332,17 +332,17 @@ async function testTheReadersOwnBulkActionStillWorks(reader, agent, own) {
 
   // Filing the message away and bringing it back, because a check that
   // only ever drives the flag verbs would let a move break unnoticed.
-  var filed = await reader.form("/mail/INBOX/actions", {
+  var filed = await reader.form("/mail/actions?folder=INBOX", {
     action: "move", objectId: own.objectId, destination: "Archive",
   });
   count("the reader's own message moves to a folder the reader owns",
     filed.status === 302, filed.status + " " + filed.body.slice(0, 160));
 
-  var archive = await reader.get("/mail/Archive");
+  var archive = await reader.get("/mail?folder=Archive");
   count("the moved message is in the folder it was moved to",
     archive.body.indexOf(ALICE_SUBJECT) !== -1, archive.status);
 
-  var back = await reader.form("/mail/Archive/actions", {
+  var back = await reader.form("/mail/actions?folder=Archive", {
     action: "move", objectId: own.objectId, destination: "INBOX",
   });
   count("and it moves back", back.status === 302, back.status);
@@ -350,7 +350,7 @@ async function testTheReadersOwnBulkActionStillWorks(reader, agent, own) {
   // A destination this account does not own used to send the reader back
   // to the folder with no notice, which reads on screen as a move that
   // happened.
-  var nowhere = await reader.form("/mail/INBOX/actions", {
+  var nowhere = await reader.form("/mail/actions?folder=INBOX", {
     action: "move", objectId: own.objectId, destination: "no-such-folder",
   });
   count("a move to a folder this account does not own is refused rather than ignored",
@@ -363,7 +363,7 @@ async function testTheReadersOwnBulkActionStillWorks(reader, agent, own) {
 // entirely: gone from the folder it was in, absent from the folder the
 // reader would look in, and not deleted either.
 async function testTrashLandsInTheReadersOwnTrash(reader, agent, own) {
-  var trashed = await reader.form("/mail/INBOX/actions", {
+  var trashed = await reader.form("/mail/actions?folder=INBOX", {
     action: "trash", objectId: own.objectId,
   });
   count("the reader's own message takes a trash action",
@@ -373,11 +373,11 @@ async function testTrashLandsInTheReadersOwnTrash(reader, agent, own) {
   // this account's inbox carries the parent's subject inside its own, so
   // a subject match would report the message as still there when what is
   // still there is its reply.
-  var inbox = await reader.get("/mail/INBOX");
+  var inbox = await reader.get("/mail?folder=INBOX");
   count("the trashed message has left the inbox",
     inbox.body.indexOf(own.objectId) === -1, inbox.status);
 
-  var trash = await reader.get("/mail/Trash");
+  var trash = await reader.get("/mail?folder=Trash");
   count("the trashed message is in the reader's own Trash",
     trash.status === 200 && trash.body.indexOf(own.objectId) !== -1, trash.status);
 
@@ -386,7 +386,7 @@ async function testTrashLandsInTheReadersOwnTrash(reader, agent, own) {
   count("and it carries the deleted mark a soft delete sets",
     flags !== null && flags.indexOf("\\Deleted") !== -1, JSON.stringify(flags));
 
-  var restored = await reader.form("/mail/Trash/actions", {
+  var restored = await reader.form("/mail/actions?folder=Trash", {
     action: "move", objectId: own.objectId, destination: "INBOX",
   });
   count("the reader can take it back out of Trash", restored.status === 302, restored.status);
@@ -636,17 +636,17 @@ async function testThePreferenceRedirectStaysOnThisServer(reader) {
     scheme.location);
 
   var ordinary = await reader.form("/prefs/theme", {
-    theme: "dark", back: "/mail/INBOX",
+    theme: "dark", back: "/mail?folder=INBOX",
   });
   count("an ordinary path is still where the reader lands",
-    ordinary.location === "/mail/INBOX", ordinary.location);
+    ordinary.location === "/mail?folder=INBOX", ordinary.location);
 }
 
 // The physical folder name is the token the one namespacing layer keeps
 // to itself. A page that prints one anywhere has handed a caller the
 // name it would need to address another account's mail directly.
 async function testNoStoreFolderNameReachesAnyPage(reader) {
-  var pages = ["/mail/INBOX", "/compose", "/search?q=quarterly"];
+  var pages = ["/mail?folder=INBOX", "/compose", "/search?q=quarterly"];
   for (var i = 0; i < pages.length; i += 1) {
     var page = await reader.get(pages[i]);
     count(pages[i] + " renders for the signed in reader", page.status === 200, page.status);
@@ -666,7 +666,7 @@ async function testTheWayBackToMailIsThisAccountsOwnFolder(reader, own) {
   var hit = pattern.exec(compose.body);
   while (hit !== null) {
     var href = hit[1] || hit[2] || "";
-    if (href.indexOf("/mail/") === 0 && links.indexOf(href) === -1) links.push(href);
+    if (href.indexOf("/mail?") === 0 && links.indexOf(href) === -1) links.push(href);
     hit = pattern.exec(compose.body);
   }
   count("the page offers a way back to this reader's mail", links.length > 0, links.join(","));
@@ -791,15 +791,16 @@ async function testTheSendingIdentitySetIsThisAccountsOwn(reader, stranger, own,
 // count that reads only the off-site ones leaves a message whose images
 // are all inline showing no images and offering no way to ask for them.
 async function testHeldImagesAreOfferedBackToTheReader(reader, inline) {
-  var page = await reader.get("/mail/INBOX/" + encodeURIComponent(inline.objectId));
+  var page = await reader.get("/mail/" + encodeURIComponent(inline.objectId) +
+    "?folder=INBOX");
   count("the message with inline images renders", page.status === 200, page.status);
   count("the reader is told images are being held back",
     page.body.indexOf("images are held back") !== -1, page.status);
   count("and is offered a way to ask for them",
-    page.body.indexOf("?images=on") !== -1, page.status);
+    page.body.indexOf("images=on") !== -1, page.status);
 
-  var shown = await reader.get("/mail/INBOX/" + encodeURIComponent(inline.objectId) +
-    "?images=on");
+  var shown = await reader.get("/mail/" + encodeURIComponent(inline.objectId) +
+    "?folder=INBOX&images=on");
   count("asking for them renders the image",
     shown.status === 200 && shown.body.indexOf("<img") !== -1, shown.status);
 }
@@ -810,22 +811,25 @@ async function testHeldImagesAreOfferedBackToTheReader(reader, inline) {
 // reach the message it names and no other, and every message still
 // holding images has to carry its own way to ask.
 async function testAskingForImagesReachesOneMessage(reader, opened, alongside) {
-  var held = await reader.get("/mail/INBOX/" + encodeURIComponent(opened.objectId));
+  var held = await reader.get("/mail/" + encodeURIComponent(opened.objectId) +
+    "?folder=INBOX");
   count("both messages in the conversation hold their images back",
     held.body.indexOf("alt=\"" + INLINE_ALT + "\"") === -1 &&
     held.body.indexOf("alt=\"" + INLINE_REPLY_ALT + "\"") === -1, held.status);
   count("and the other message offers its own way to ask",
-    held.body.indexOf(encodeURIComponent(alongside.objectId) + "?images=on") !== -1,
+    held.body.indexOf(encodeURIComponent(alongside.objectId) +
+      "?folder=INBOX&amp;images=on") !== -1,
     held.status);
 
-  var shown = await reader.get("/mail/INBOX/" + encodeURIComponent(opened.objectId) +
-    "?images=on");
+  var shown = await reader.get("/mail/" + encodeURIComponent(opened.objectId) +
+    "?folder=INBOX&images=on");
   count("asking renders the image in the message that was asked about",
     shown.body.indexOf("alt=\"" + INLINE_ALT + "\"") !== -1, shown.status);
   count("and leaves the other message's image held back",
     shown.body.indexOf("alt=\"" + INLINE_REPLY_ALT + "\"") === -1, shown.status);
   count("the other message still offers its own way to ask",
-    shown.body.indexOf(encodeURIComponent(alongside.objectId) + "?images=on") !== -1,
+    shown.body.indexOf(encodeURIComponent(alongside.objectId) +
+      "?folder=INBOX&amp;images=on") !== -1,
     shown.status);
 }
 
@@ -840,13 +844,13 @@ async function testAskingForImagesReachesOneMessage(reader, opened, alongside) {
 // this runs against is the one every other vector already used, so the
 // numbers it holds are the ordinary ones rather than a fresh folder's.
 async function testAPurgeLeavesTheRestOfTheFolderReadable(reader, readerId, doomed, survivors) {
-  var purged = await reader.form("/mail/INBOX/actions", {
+  var purged = await reader.form("/mail/actions?folder=INBOX", {
     action: "purge", objectId: doomed.objectId,
   });
   count("the reader's own message takes a purge",
     purged.status === 302, purged.status + " " + purged.body.slice(0, 200));
 
-  var page = await reader.get("/mail/INBOX");
+  var page = await reader.get("/mail?folder=INBOX");
   count("the folder still renders after the purge", page.status === 200, page.status);
   count("the purged message is gone from it",
     page.body.indexOf(doomed.objectId) === -1, page.status);

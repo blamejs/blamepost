@@ -1,0 +1,23 @@
+From: alice@example.com
+To: bob@example.net
+Subject: =?utf-8?B?VGhlIHN1YmplY3Q=?=
+Date: Sat, 23 Aug 2026 12:00:00 +0000
+Message-ID: <alt@example.com>
+In-Reply-To: <earlier@example.net>
+References: <first@example.net> <earlier@example.net>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="alt-boundary-1"
+
+--alt-boundary-1
+Content-Type: text/plain; charset=us-ascii
+
+The plain half.
+
+--alt-boundary-1
+Content-Type: text/html; charset=us-ascii
+Content-Transfer-Encoding: quoted-printable
+
+<p>The <b>html</b> half with a <a href=3D"https://example.org/">link</a>.</=
+p>
+
+--alt-boundary-1--

@@ -71,11 +71,12 @@ var nodeCrypto = require("node:crypto");
 var nodeFs     = require("node:fs");
 var nodePath   = require("node:path");
 
-var helpers   = require("../helpers");
-var cliHelper = require("../helpers/cli");
-var b         = require("../../lib/vendor/blamejs");
-var config    = require("../../lib/config");
-var store     = require("../../lib/store");
+var helpers       = require("../helpers");
+var cliHelper     = require("../helpers/cli");
+var snapshotVerbs = require("../helpers/snapshot-verbs");
+var b             = require("../../lib/vendor/blamejs");
+var config        = require("../../lib/config");
+var store         = require("../../lib/store");
 
 var count = cliHelper.count;
 
@@ -86,31 +87,52 @@ var ADDRESS  = "alice@" + DOMAIN;
 var VAULT_PASSPHRASE = "a long enough vault passphrase for one test run";
 var ALICE_PASSWORD   = "quiet lantern bicycle 4291";
 
-// The verbs that read the database, report what they found, and record
-// nothing. Every one of them answers from a read-only open while the
-// server holds the volume.
-//
-// `blobs report` and `audit verify-chain` are here rather than among the
-// refusals below, and both are load-bearing. Their exit status is their
-// verdict, so an exit of zero here is the assertion that each reached
-// one: `blobs report` must not count the body that arrived after the
-// last flush as unreferenced, and `audit verify-chain` must be able to
-// verify the checkpoint signatures rather than skipping them.
-var REPORTING_VERBS = [
-  ["account", "list"],
-  ["account", "show", ADDRESS],
-  ["domain", "list"],
-  ["domain", "show", DOMAIN],
-  ["dkim", "list", DOMAIN],
-  ["dkim", "records", DOMAIN],
-  ["blobs", "report", "--verify"],
-  ["audit", "verify-chain"],
-];
+// The codes the read-only open answers with. Frozen contracts: each
+// survives a rename of the function that raises it and disappears if the
+// raise is deleted, and each is what an operator filters a log on, so
+// they are pinned exactly rather than matched as prose. A refusal
+// reworded is a documentation change; a refusal recoded is a break for
+// everything reading it.
+var NO_SOURCE   = "store/snapshot-no-source";
+var UNREADABLE  = "store/snapshot-unreadable";
+var OUT_OF_STEP = "store/snapshot-out-of-step";
+var READ_ONLY   = "store/snapshot-is-read-only";
 
-// `doctor` is separated only because it resolves DNS and so is the slow
-// one, not because the rule treats it differently. It is the whole
-// reason this exists.
-var DOCTOR = ["doctor", "--domain", DOMAIN];
+// The zone reads are run with a provider named, because they refuse
+// before opening anything while none is set.
+var ZONE_PROVIDER = snapshotVerbs.ZONE_PROVIDER;
+
+// The commands that read the database, report what they found, and
+// record nothing, one invocation each, from the table the files driving
+// these commands share. Every one of them answers from a read-only open
+// while the server holds the volume, and the set they cover is reconciled
+// against the store's own table below, so a command added there and not
+// driven here fails rather than going untested.
+//
+// Each entry names the group and verb it stands for as well as the
+// invocation, and the two are checked against each other: a vector that
+// claims one command and drives another would satisfy the reconciliation
+// while testing nothing it claimed.
+//
+// `answers` is the ordinary shape: the command reaches the copy, reads
+// it, and exits zero. `stopsOn` is for one that reaches the copy and
+// then stops on its own subject, which offline is the strongest evidence
+// available for it. What each must NOT say is that the volume is held,
+// and that is asserted for both shapes.
+//
+// `blobs report` and `audit verify-chain` carry the load among the first
+// group. Their exit status is their verdict, so an exit of zero is the
+// assertion that each reached one: `blobs report` must not count the
+// body that arrived after the last flush as unreferenced, and `audit
+// verify-chain` must be able to verify the checkpoint signatures rather
+// than skipping them.
+//
+// `doctor` is last because it resolves DNS and so is the slow one. Its
+// own exit status offline is about the zone, so what is asserted is that
+// it reached a verdict about the server it was asked about.
+var REPORTING_VERBS = snapshotVerbs.vectors({
+  address: ADDRESS, domain: DOMAIN, hostname: HOSTNAME,
+});
 
 // Verbs that read and still refuse, each for its own reason. Grouping
 // them here is the point: "it only reads" is not the test.
@@ -237,32 +259,89 @@ function plaintextCopies(workDir) {
 
 // ---- cases -----------------------------------------------------------------
 
-// The verbs that report answer while the server holds the volume. They
-// are not refused, and they answer with what is actually on the volume
-// rather than with an empty listing that would read the same as a clean
-// one.
-function aReportingVerbAnswersWhileTheServerRuns(cli) {
+// The vectors above cover the store's table exactly.
+//
+// This is the reconciliation, and it is worth being clear about what it
+// proves and what it does not. It decides WHICH commands are driven, not
+// whether any of them passes: every assertion below still spawns the
+// binary and reads what came back, so a command wrongly added to the
+// table is a command this file then drives against a read-only open and
+// fails on when the open refuses its write. What the reconciliation
+// removes is the silent case, where a command joins the table and no
+// vector here ever names it.
+function everyEligibleCommandHasAVectorHere() {
+  var eligible = [];
+  Object.keys(store.SNAPSHOT_VERBS).forEach(function (group) {
+    store.SNAPSHOT_VERBS[group].forEach(function (verb) {
+      eligible.push(group + " " + verb);
+    });
+  });
+
+  count("the store publishes the commands it will serve from a read-only open",
+    eligible.length >= 8, eligible.length + " command(s)");
+
+  var driven = REPORTING_VERBS.map(function (entry) {
+    return entry.group + " " + entry.verb;
+  });
+
+  var untested = eligible.filter(function (name) { return driven.indexOf(name) === -1; });
+  count("every one of them has a vector in this file, so a command added to the table and " +
+    "not driven here fails rather than going untested" +
+    (untested.length ? ": " + untested.join(", ") : ""),
+    untested.length === 0, untested.join(", ") || "none");
+
+  var stray = driven.filter(function (name) { return eligible.indexOf(name) === -1; });
+  count("and every vector stands for a command the table holds, so one left behind by a " +
+    "command the store stopped serving fails too" + (stray.length ? ": " + stray.join(", ") : ""),
+    stray.length === 0, stray.join(", ") || "none");
+
+  // A vector declares the command it stands for and then drives an
+  // invocation. Nothing so far has held those two together, and a vector
+  // that claimed `zone preview` while running `domain list` would
+  // satisfy every check above.
+  var mismatched = REPORTING_VERBS.filter(function (entry) {
+    if (entry.argv[0] !== entry.group) return true;
+    return entry.verb !== "" && entry.argv[1] !== entry.verb;
+  }).map(function (entry) {
+    return entry.group + " " + entry.verb + " drives `" + entry.argv.join(" ") + "`";
+  });
+  count("and each vector drives the command it claims" +
+    (mismatched.length ? ": " + mismatched.join("; ") : ""),
+    mismatched.length === 0, mismatched.join("; ") || "none");
+}
+
+// The commands that report answer while the server holds the volume.
+// None is refused as a second opener, and each reaches the copy: the
+// ones that end on an answer exit zero, and the ones that stop on their
+// own subject say what they stopped on rather than saying the volume is
+// held.
+function aReportingVerbAnswersWhileTheServerRuns(cli, zoneCli) {
   for (var i = 0; i < REPORTING_VERBS.length; i += 1) {
-    var verb = REPORTING_VERBS[i];
-    var label = verb.join(" ");
-    var result = cli(verb);
-    count("`" + label + "` answers while the server holds the volume",
-      result.status === 0, "exit " + result.status + " " + result.both.slice(0, 300));
+    var entry = REPORTING_VERBS[i];
+    var label = entry.argv.join(" ");
+    var result = (entry.provider ? zoneCli : cli)(entry.argv);
+
     count("`" + label + "` is not refused as a second opener",
       !/already open|store\/volume-in-use/i.test(result.both), result.both.slice(0, 300));
+
+    if (entry.answers) {
+      count("`" + label + "` answers while the server holds the volume",
+        result.status === 0, "exit " + result.status + " " + result.both.slice(0, 300));
+      continue;
+    }
+
+    // It got past the open and stopped on its own subject. Both halves
+    // are asserted: the text names what it stopped on, and the check
+    // above has already established it is not the volume.
+    count("`" + label + "` reaches the copy and stops on its own subject rather than on " +
+      "the volume being held",
+      result.both.indexOf(entry.stopsOn) !== -1,
+      "exit " + result.status + " " + result.both.slice(0, 400));
   }
 
   var listed = cli(["account", "list"]);
   count("`account list` answers with the account that is on the volume",
     listed.both.indexOf(ADDRESS) !== -1, listed.both.slice(0, 300));
-
-  var doctored = cli(DOCTOR);
-  count("`" + DOCTOR.join(" ") + "` runs rather than refusing",
-    !/already open|store\/volume-in-use/i.test(doctored.both), doctored.both.slice(0, 400));
-  // Its own exit code is about the zone, which offline is a failing one.
-  // What matters here is that it got as far as having an opinion.
-  count("`" + DOCTOR.join(" ") + "` reports on the server it was asked about",
-    doctored.both.indexOf(HOSTNAME) !== -1, doctored.both.slice(0, 400));
 }
 
 // The answer is old, and both readers are told. A script parsing stdout
@@ -481,6 +560,38 @@ function aMutatingVerbStillRefuses(cli) {
   }
 }
 
+// The refusal an operator actually reads names every command that would
+// have answered.
+//
+// The refusal is the one place a person meets this rule, and being sent
+// away with an incomplete list is being sent away from the command they
+// needed. So the text captured off a real refusal is held against the
+// table, rather than the sentence in the source being read and trusted:
+// a list built at the wrong moment, or rendered into a string nobody
+// interpolates, reads exactly like a correct one from inside the module.
+function theRefusalNamesEveryCommandThatWouldHaveAnswered(cli) {
+  var refused = cli(MUTATING_VERBS[0]);
+  count("a write verb is refused, so there is a refusal to read",
+    /already open|store\/volume-in-use/i.test(refused.both), refused.both.slice(0, 400));
+
+  var text = refused.both.replace(/\s+/g, " ");
+  var absent = [];
+  Object.keys(store.SNAPSHOT_VERBS).forEach(function (group) {
+    store.SNAPSHOT_VERBS[group].forEach(function (verb) {
+      var command = verb === "" ? group : group + " " + verb;
+      if (text.indexOf(command) === -1) absent.push(command);
+    });
+  });
+  count("and it names every command that answers from a read-only open, so the operator it " +
+    "sent away is told about all of them" +
+    (absent.length ? ", and these are not: " + absent.join(", ") : ""),
+    absent.length === 0, absent.join(", ") || "none");
+
+  count("and it states no total beside that list, which is the copy that goes stale",
+    !/\b(two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|\d+) verbs?\b/i.test(text),
+    text.slice(0, 400));
+}
+
 // Nothing on the volume moved. The encrypted database is the obvious
 // half; the record of where the audit chain was last anchored is the
 // half that would go unnoticed, and it is the one that turns a report
@@ -673,8 +784,31 @@ async function aWriteThroughAReportingHandleIsRefused(cfg) {
     try { await copy.domains.remove({ domain: DOMAIN, reason: "testing the refusal" }); }
     catch (e2) { keyThrew = e2; }
     count("and the verb that would unlink a sealed key refuses before reaching the volume",
-      keyThrew !== null,
-      keyThrew === null ? "the removal was accepted" : String(keyThrew.message).slice(0, 200));
+      keyThrew !== null && keyThrew.code === READ_ONLY,
+      keyThrew === null ? "the removal was accepted" : keyThrew.code + ": " + keyThrew.message);
+
+    // The other verb that reaches past the database. `blobs.reclaim`
+    // unlinks sealed message bodies from the live volume, and no
+    // read-only database handle can stop a filesystem call: the bodies
+    // would go on the strength of rows frozen at the last flush, with
+    // every message delivered since unaccounted for, and the audit row
+    // that is the only record they were here could not be written. It
+    // refuses before it reads its own arguments, so an invalid call
+    // still reports this rather than the argument.
+    var reclaimThrew = null;
+    try { await copy.blobs.reclaim({ reason: "testing the refusal" }); }
+    catch (e3) { reclaimThrew = e3; }
+    count("and reclaiming sealed bodies refuses on a frozen handle rather than unlinking them",
+      reclaimThrew !== null && reclaimThrew.code === READ_ONLY,
+      reclaimThrew === null ? "the reclaim was accepted"
+        : reclaimThrew.code + ": " + reclaimThrew.message);
+
+    var noReason = null;
+    try { await copy.blobs.reclaim({}); }
+    catch (e4) { noReason = e4; }
+    count("and it refuses for being frozen rather than for the argument it never read",
+      noReason !== null && noReason.code === READ_ONLY,
+      noReason === null ? "the reclaim was accepted" : noReason.code + ": " + noReason.message);
   } finally {
     copy.close();
   }
@@ -730,6 +864,103 @@ async function theHandleSaysWhichItIs(cfg, workDir, serverCopies) {
   nothingDecryptedSurvivesTheRun(workDir, serverCopies);
 }
 
+// What the read-only open answers with when it will not open, read as
+// the code rather than as the sentence.
+//
+// The cases above drive these same three conditions through the binary
+// and assert what an operator READS. The code is the other half and it
+// is not printed anywhere: a script branching on a refusal, and the
+// verbs inside this repository that tell one refusal from another, both
+// read `err.code`, and a run that only matched the prose would pass
+// through a rename of any of them.
+//
+// Three conditions, and each fails in its own direction:
+//
+//   - No database at all, which is a data directory that has never been
+//     through `init`, or one whose encrypted file has been moved while a
+//     process still holds the lock.
+//   - A database that will not decrypt, which is where damage on disk
+//     lands and where a wrong passphrase lands.
+//   - Rows behind the volume's own record of where its audit trail
+//     reached, which is what a server starting up while a report was
+//     being read looks like.
+//
+// The volume is restored between them, and the last check reads it back
+// through an ordinary open, because a run that damaged the volume and
+// left it damaged would make every case after it meaningless.
+async function theSnapshotRefusalsCarryTheirCodes(cfg, root, dataDir) {
+  var absentDir = nodePath.join(root, "never-initialized");
+  nodeFs.mkdirSync(absentDir, { recursive: true });
+  var absentCfg = config.load({
+    env: {
+      BLAMEPOST_HOSTNAME:         HOSTNAME,
+      BLAMEPOST_DATA_DIR:         absentDir,
+      BLAMEPOST_VAULT_PASSPHRASE: VAULT_PASSPHRASE,
+      BLAMEPOST_DNS_ACKNOWLEDGED: "1",
+    },
+    cwd: root,
+  });
+
+  var noSource = null;
+  try { await store.openSnapshot(absentCfg); }
+  catch (e) { noSource = e; }
+  count("a read-only open of a directory with no database refuses under its own code",
+    noSource !== null && noSource.code === NO_SOURCE,
+    noSource === null ? "the open was accepted" : noSource.code + ": " + noSource.message);
+  count("and the refusal names the verb that puts a database there",
+    noSource !== null && String(noSource.message).indexOf("blamepost init") !== -1,
+    noSource === null ? "" : String(noSource.message).slice(0, 300));
+
+  var encPath = nodePath.join(dataDir, "db.enc");
+  var whole   = nodeFs.readFileSync(encPath);
+  var damaged = Buffer.from(whole);
+  damaged[damaged.length - 100] ^= 0xff;
+
+  var unreadable = null;
+  try {
+    nodeFs.writeFileSync(encPath, damaged);
+    try { await store.openSnapshot(cfg); }
+    catch (e2) { unreadable = e2; }
+  } finally {
+    nodeFs.writeFileSync(encPath, whole);
+  }
+  count("a database altered where it lies refuses under its own code rather than reporting " +
+    "on a partial read",
+    unreadable !== null && unreadable.code === UNREADABLE,
+    unreadable === null ? "the open was accepted" : unreadable.code + ": " + unreadable.message);
+  count("and the refusal says the volume itself was not changed",
+    unreadable !== null && /nothing on the volume was changed/i.test(String(unreadable.message)),
+    unreadable === null ? "" : String(unreadable.message).slice(0, 300));
+
+  var anchorPath = nodePath.join(dataDir, "audit.tip");
+  var anchor     = nodeFs.readFileSync(anchorPath);
+  var moved      = JSON.parse(String(anchor));
+  moved.atMonotonicCounter = Number(moved.atMonotonicCounter) + 100000;
+
+  var outOfStep = null;
+  try {
+    nodeFs.writeFileSync(anchorPath, JSON.stringify(moved, null, 2));
+    try { await store.openSnapshot(cfg); }
+    catch (e3) { outOfStep = e3; }
+  } finally {
+    nodeFs.writeFileSync(anchorPath, anchor);
+  }
+  count("rows behind the volume's audit anchor refuse under their own code rather than as " +
+    "the accusation the same check makes about a volume",
+    outOfStep !== null && outOfStep.code === OUT_OF_STEP,
+    outOfStep === null ? "the open was accepted" : outOfStep.code + ": " + outOfStep.message);
+
+  // The volume survived being broken twice, read back the ordinary way.
+  var live = await store.open(cfg);
+  try {
+    count("and the volume opens normally afterwards, so nothing above damaged it",
+      live.accounts.list().some(function (a) { return a.address === ADDRESS; }),
+      JSON.stringify(live.accounts.list().map(function (a) { return a.address; })));
+  } finally {
+    live.close();
+  }
+}
+
 // The operator visible consequence, which is the only reason any of this
 // matters: mail that arrived around the reporting verbs is still there
 // once the server has been restarted.
@@ -768,6 +999,18 @@ async function run() {
       workDir:         workDir,
       hostname:        HOSTNAME,
       vaultPassphrase: VAULT_PASSPHRASE,
+    });
+
+    // The same volume with a zone provider named. The two `zone` reads
+    // refuse before opening anything while none is set, so without this
+    // they would be measured against a refusal that never reached the
+    // store at all.
+    var zoneCli = cliHelper.create({
+      dataDir:         dataDir,
+      workDir:         workDir,
+      hostname:        HOSTNAME,
+      vaultPassphrase: VAULT_PASSPHRASE,
+      env:             { BLAMEPOST_ZONE_PROVIDER: ZONE_PROVIDER },
     });
 
     var cfg = config.load({
@@ -841,7 +1084,8 @@ async function run() {
       copies:  plaintextCopies(workDir),
     };
 
-    aReportingVerbAnswersWhileTheServerRuns(cli);
+    everyEligibleCommandHasAVectorHere();
+    aReportingVerbAnswersWhileTheServerRuns(cli, zoneCli);
     theAnswerSaysItIsASnapshot(cli, flushedAt);
     theBodyThatArrivedSinceIsNotCalledUnreferenced(cli, 1);
     anOrphanOlderThanTheRowsIsStillReported(cli, dataDir, flushedAt);
@@ -849,6 +1093,7 @@ async function run() {
     theVerbsThatDoNotQualifyStillRefuse(cli,
       { backupDir: backupDir, passphraseFile: passphraseFile });
     aMutatingVerbStillRefuses(cli);
+    theRefusalNamesEveryCommandThatWouldHaveAnswered(cli);
 
     theLiveVolumeIsUntouched(before, {
       enc:     digestOf(nodePath.join(dataDir, "db.enc")),
@@ -878,6 +1123,7 @@ async function run() {
 
     await theHandleSaysWhichItIs(cfg, workDir, plaintextCopies(workDir));
     await aWriteThroughAReportingHandleIsRefused(cfg);
+    await theSnapshotRefusalsCarryTheirCodes(cfg, root, dataDir);
 
     return helpers.getChecks();
   } finally {

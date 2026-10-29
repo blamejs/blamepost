@@ -1,0 +1,17 @@
+From: alice@example.com
+To: bob@example.net
+Subject: multipart
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="alt-1"
+
+--alt-1
+Content-Type: text/plain; charset=utf-8
+
+plain
+
+--alt-1
+Content-Type: text/html; charset=utf-8
+
+<p>html</p>
+
+--alt-1--

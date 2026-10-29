@@ -424,9 +424,49 @@ async function theDataDirectoryModeIsDocumentedAtTheNumberBootEnforces() {
     "enforced 0" + (enforced.mode === null ? "?" : enforced.mode.toString(8)));
 }
 
+// The stop grace the compose stack gives the container, against the two
+// constants the shutdown actually spends. `bin/blamepost.js` drains for
+// one and then force-exits after the other, so a grace under their sum
+// severs the drain: sessions are cut mid-command and the queue can stop
+// between the body it wrote and the descriptor that names it. The
+// runtime's own default is ten seconds, under the sum, so an unset value
+// ships the case the shutdown code and SECURITY.md both warn about.
+//
+// Read from the source rather than restated, because the number in
+// compose.yml is a third copy of a fact two constants already hold, and
+// this repository has found more of that shape than any other.
+function theStopGraceOutlastsTheShutdownItHasToCover() {
+  var cli     = read("bin/blamepost.js");
+  var compose = read(COMPOSE_FILE);
+
+  var seconds = function (name) {
+    var found = new RegExp("var\\s+" + name + "\\s*=\\s*TIME\\.seconds\\((\\d{1,4})\\)").exec(cli);
+    return found ? Number(found[1]) : null;
+  };
+  var grace  = seconds("SHUTDOWN_GRACE_MS");
+  var margin = seconds("SHUTDOWN_FORCE_MARGIN_MS");
+
+  count("the shutdown constants are still readable, so this compares numbers " +
+    "rather than passing over a rename",
+    grace !== null && margin !== null, "grace " + grace + "s, margin " + margin + "s");
+  if (grace === null || margin === null) return;
+
+  var declared = /stop_grace_period:\s*(\d{1,5})s/.exec(compose);
+  count("the compose stack names a stop grace rather than inheriting the " +
+    "runtime default, which is shorter than this server's own shutdown",
+    declared !== null, declared ? declared[1] + "s" : "unset");
+  if (declared === null) return;
+
+  count("and the grace it names outlasts the drain and the force margin " +
+    "together, so a stop is a shutdown rather than a kill",
+    Number(declared[1]) > grace + margin,
+    declared[1] + "s against " + grace + " + " + margin + " = " + (grace + margin) + "s");
+}
+
 // ---- runner -----------------------------------------------------------------
 
 async function run() {
+  theStopGraceOutlastsTheShutdownItHasToCover();
   noDocumentClaimsAnAbsenceTheBaseDoesNotHave();
   theHalfOfTheClaimThatHoldsIsStillStated();
   noDocumentClaimsTheFloorStopsTheBind();

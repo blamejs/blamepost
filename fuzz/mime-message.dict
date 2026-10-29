@@ -1,0 +1,61 @@
+# libFuzzer dictionary for the message reader.
+#
+# The CRLF entries are here for the reason given in
+# fuzz/smtp-command.dict: an .eml seed is a text file and cannot carry a
+# CR byte, so the wire's own header folding and blank-line separator
+# arrive from the dictionary. `safeMime` accepts both spellings, and the
+# header-block boundary is one of the places where which one arrived
+# changes the reading.
+
+crlf="\x0d\x0a"
+header_break="\x0d\x0a\x0d\x0a"
+fold="\x0d\x0a\x20"
+bare_cr="\x0d"
+nul="\x00"
+
+from="From: "
+to="To: "
+cc="Cc: "
+subject="Subject: "
+date="Date: "
+message_id="Message-ID: <a@example.com>"
+in_reply_to="In-Reply-To: "
+references="References: "
+return_path="Return-Path: "
+dkim_signature="DKIM-Signature: v=1; a=ed25519-sha256; d="
+mime_version="MIME-Version: 1.0"
+
+content_type="Content-Type: "
+text_plain="text/plain; charset=utf-8"
+text_html="text/html; charset=utf-8"
+multipart_mixed="multipart/mixed; boundary=\"b1\""
+multipart_alt="multipart/alternative; boundary=\"b1\""
+multipart_report="multipart/report; report-type=delivery-status"
+message_rfc822="message/rfc822"
+delivery_status="message/delivery-status"
+
+cte="Content-Transfer-Encoding: "
+base64="base64"
+quoted_printable="quoted-printable"
+eight_bit="8bit"
+binary="binary"
+disposition="Content-Disposition: attachment; filename="
+
+boundary_open="--b1"
+boundary_close="--b1--"
+
+rfc2047="=?utf-8?B?"
+rfc2047_q="=?utf-8?Q?"
+rfc2231="filename*=UTF-8''"
+
+reporting_mta="Reporting-MTA: dns; relay.example.net"
+final_recipient="Final-Recipient: rfc822; bob@example.net"
+action_failed="Action: failed"
+action_delayed="Action: delayed"
+status_perm="Status: 5.1.1"
+diagnostic="Diagnostic-Code: smtp; 550"
+
+script_tag="<script>"
+img_tag="<img src=x onerror=1>"
+entity="&amp;"
+rlo="\xe2\x80\xae"

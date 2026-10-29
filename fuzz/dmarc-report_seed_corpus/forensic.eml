@@ -1,0 +1,37 @@
+Authentication-Results: mx.example.com; dmarc=pass header.from=reporter.example
+From: dmarc-noreply@reporter.example
+To: dmarc-failures@example.com
+Subject: DMARC failure report
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=feedback-report; boundary="bnd-forensic"
+
+--bnd-forensic
+Content-Type: text/plain; charset=utf-8
+
+An authentication failure report.
+
+--bnd-forensic
+Content-Type: message/feedback-report
+
+Feedback-Type: auth-failure
+User-Agent: Reporter/1.0
+Version: 1
+Auth-Failure: dmarc
+Original-Mail-From: stranger@third-party.example
+Original-Rcpt-To: victim@example.com
+Arrival-Date: Mon, 15 Jun 2025 09:00:00 +0000
+Reported-Domain: example.com
+Source-IP: 203.0.113.99
+Delivery-Result: reject
+Identity-Alignment: none
+
+--bnd-forensic
+Content-Type: message/rfc822
+
+From: "Someone Real" <stranger@third-party.example>
+To: victim@example.com
+Subject: a stranger's subject
+
+a stranger's body
+
+--bnd-forensic--

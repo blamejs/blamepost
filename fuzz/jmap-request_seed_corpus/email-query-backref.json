@@ -1,0 +1,1 @@
+{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"],"methodCalls":[["Email/query",{"accountId":"a1","filter":{"inMailbox":"mbx1"},"limit":20},"c0"],["Email/get",{"accountId":"a1","#ids":{"resultOf":"c0","name":"Email/query","path":"/ids"},"properties":["subject","from","receivedAt"]},"c1"]]}

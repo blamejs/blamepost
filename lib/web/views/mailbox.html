@@ -8,7 +8,7 @@
   <header class="pane-head">
     <div>
       <h1 class="pane-title">{{ folder.label }}</h1>
-      <p class="pane-sub">{{ quotaCount }} stored, {{ quotaUsed }}{% if quotaCap %} of {{ quotaCap }}{% endif %}</p>
+      <p class="pane-sub">{{ quotaCount }} stored in this mailbox, {{ quotaUsed }}{% if quotaCap %} of {{ quotaCap }}{% endif %}</p>
     </div>
     {% if quotaBucket %}
     <div class="meter" title="{{ quotaPercent }} percent of the cap in use">
@@ -27,8 +27,8 @@
   {% endif %}
 
   <nav class="pager" aria-label="More messages">
-    {% if newestHref %}<a class="btn btn-quiet" href="{{ newestHref }}">Newest</a>{% endif %}
-    {% if olderHref %}<a class="btn btn-quiet" href="{{ olderHref }}">Older</a>{% endif %}
+    {% if newestHref %}<a class="btn btn-quiet" href="/{{ newestHref }}">Newest</a>{% endif %}
+    {% if olderHref %}<a class="btn btn-quiet" href="/{{ olderHref }}">Older</a>{% endif %}
   </nav>
 </section>
 {% endblock %}

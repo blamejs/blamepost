@@ -120,12 +120,6 @@ var DECLARED_EXEMPT = {
     "dozen connection errors. A checkout has nothing bound to probe: its " +
     "verdict is about a running server, not about the committed tree.",
 
-  "check-swallow-coverage.js":
-    "Reads an lcov report to prove every swallowing catch body is entered " +
-    "by a test, so it needs a coverage run to have happened first. It is " +
-    "invoked through the coverage script that produces that report rather " +
-    "than read straight from the source tree.",
-
   "release.js":
     "The release orchestrator. It invokes gates rather than being one, and " +
     "its subcommands drive git, gh and the signed release commit, none of " +
@@ -288,12 +282,22 @@ function _runLines(text) {
  * _gateScripts() returns every script in `scripts/` that answers a
  * question about the tree.
  *
- * Two shapes count, and both are structural rather than a hand-kept list.
- * A `check-` or `validate-` prefix is the naming convention this
- * repository uses for a gate. A script offering a `--check` flag is
- * asserting something about the tree whatever it is called, which is how
- * the changelog and release-notes gates are found: neither carries the
- * prefix and both are gates.
+ * Three shapes count, and all three are structural rather than a
+ * hand-kept list. A `check-` or `validate-` prefix is the naming
+ * convention this repository uses for a gate. A script offering a
+ * `--check` flag is asserting something about the tree whatever it is
+ * called, which is how the changelog and release-notes gates are found:
+ * neither carries the prefix and both are gates. And a script the
+ * declared chain runs is a gate by the only definition that matters,
+ * whatever it is named and however it parses its flags.
+ *
+ * The third shape is not redundant with the other two. Both of those read
+ * the script; the chain says what the static battery actually executes,
+ * and a script can sit in it while carrying neither the prefix nor a
+ * double-quoted `"--check"` token. Such a script drops out of this
+ * population and stays in the battery, which silently retires both
+ * questions built on it, and a gate invoked directly by a workflow step
+ * has no runner keeping a tally to notice.
  *
  * It is EXPORTED because a second file asks a second question of the same
  * population: this one asks whether every gate is reachable before a
@@ -305,10 +309,19 @@ function _runLines(text) {
  * script and reports a clean sweep of a smaller tree.
  */
 function _gateScripts() {
+  var pkg     = _packageJson();
+  var inChain = {};
+  _chainSegments(pkg.scripts && pkg.scripts[CHAIN_KEY]).forEach(function (segment) {
+    _scriptPathsIn(segment).forEach(function (rel) {
+      if (rel.indexOf("scripts/") === 0) inChain[rel.slice("scripts/".length)] = true;
+    });
+  });
+
   return fs.readdirSync(SCRIPTS_DIR)
     .filter(function (f) { return /\.js$/.test(f); })
     .filter(function (f) {
       if (/^(check|validate)-/.test(f)) return true;
+      if (inChain[f]) return true;
       return fs.readFileSync(path.join(SCRIPTS_DIR, f), "utf8").indexOf('"--check"') !== -1;
     })
     .sort();
@@ -364,6 +377,31 @@ function _chainCases(pkg) {
   var pathless = segments.filter(function (s) { return _scriptPathsIn(s).length === 0; });
   count("every link in the chain names the file it runs", pathless.length === 0,
     pathless.join(" | "));
+
+  // The chain is the authority for what the static battery runs, and
+  // `_gateScripts()` is the authority for what counts as a gate. A link the
+  // classifier does not recognize is a gate that both questions built on
+  // that classifier stop asking about: whether it is reachable before a
+  // merge, and whether it publishes what it examined. Neither absence has
+  // a symptom, because the script keeps working and nothing asserts it.
+  //
+  // The classifier reads two shapes off the script itself, a `check-` or
+  // `validate-` prefix and a `"--check"` flag spelled in double quotes. A
+  // gate that carries neither falls out of the population while staying in
+  // the chain, so the chain is unioned in rather than relied on to agree.
+  var known      = _gateScripts();
+  var unclassified = [];
+  segments.forEach(function (segment) {
+    _scriptPathsIn(segment).forEach(function (rel) {
+      if (rel.indexOf("scripts/") !== 0) return;
+      var name = rel.slice("scripts/".length);
+      if (known.indexOf(name) === -1) unclassified.push(name);
+    });
+  });
+  count("every script the chain runs is classified as a gate, so the reachability " +
+    "and published-count questions both reach it",
+  unclassified.length === 0,
+  unclassified.length === 0 ? "" : "unclassified: " + unclassified.join(", "));
 
   return segments;
 }

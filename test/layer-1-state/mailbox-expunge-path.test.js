@@ -235,10 +235,16 @@ async function testTheStoreKeepsItsDestructiveWorkAtomic(handle, alice) {
     rawCopiesOf(raw, folder, appended.objectid) === 0);
 
   // A backend whose `transaction` neither runs the body nor hands back
-  // anything to run it with. Both destructive paths have to refuse it.
+  // anything to run it with, and that cannot open a savepoint either,
+  // which the store tries first. Both destructive paths have to refuse it.
   var unusable = b.mailStore.create({
     backend: {
-      prepare:     function (sql) { return b.db.prepare(sql); },
+      prepare: function (sql) {
+        if (/^\s*(SAVEPOINT|RELEASE|ROLLBACK)\b/i.test(String(sql))) {
+          throw new Error("this backend cannot open a savepoint");
+        }
+        return b.db.prepare(sql);
+      },
       transaction: function () { return null; },
     },
     init: false,

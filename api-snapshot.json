@@ -1,6 +1,6 @@
 {
   "generator": "scripts/refresh-api-snapshot.js",
-  "packageVersion": "0.1.0",
+  "packageVersion": "0.1.1",
   "surface": {
     "certificateReport": {
       "kind": "function",
@@ -9,6 +9,155 @@
     "create": {
       "kind": "function",
       "arity": 1
+    },
+    "dns": {
+      "kind": "object",
+      "members": {
+        "CODES": {
+          "kind": "object",
+          "members": {
+            "badRecord": {
+              "kind": "string"
+            },
+            "confirmRequired": {
+              "kind": "string"
+            },
+            "mxWriteDisabled": {
+              "kind": "string"
+            },
+            "noProvider": {
+              "kind": "string"
+            },
+            "noToken": {
+              "kind": "string"
+            },
+            "previewForeign": {
+              "kind": "string"
+            },
+            "previewRequired": {
+              "kind": "string"
+            },
+            "reasonRequired": {
+              "kind": "string"
+            },
+            "recordDrift": {
+              "kind": "string"
+            },
+            "tokenNotSealed": {
+              "kind": "string"
+            },
+            "tokenSealUnopened": {
+              "kind": "string"
+            },
+            "tokenTwoSources": {
+              "kind": "string"
+            },
+            "tooManyChanges": {
+              "kind": "string"
+            },
+            "writeIncomplete": {
+              "kind": "string"
+            },
+            "writeNotAllowed": {
+              "kind": "string"
+            }
+          }
+        },
+        "GateError": {
+          "kind": "function",
+          "arity": 4
+        },
+        "clearToken": {
+          "kind": "function",
+          "arity": 1
+        },
+        "cloudflare": {
+          "kind": "object",
+          "members": {
+            "CODES": {
+              "kind": "object",
+              "members": {
+                "badRequest": {
+                  "kind": "string"
+                },
+                "credentialEgress": {
+                  "kind": "string"
+                },
+                "endpointNotAllowed": {
+                  "kind": "string"
+                },
+                "malformedResponse": {
+                  "kind": "string"
+                },
+                "providerUnavailable": {
+                  "kind": "string"
+                },
+                "rateLimited": {
+                  "kind": "string"
+                },
+                "recordConflict": {
+                  "kind": "string"
+                },
+                "recordNotFound": {
+                  "kind": "string"
+                },
+                "requestFailed": {
+                  "kind": "string"
+                },
+                "tokenScopeMissing": {
+                  "kind": "string"
+                },
+                "tokenUnverified": {
+                  "kind": "string"
+                },
+                "zoneAmbiguous": {
+                  "kind": "string"
+                },
+                "zoneNotFound": {
+                  "kind": "string"
+                }
+              }
+            },
+            "DEFAULT_BASE_URL": {
+              "kind": "string"
+            },
+            "DnsProviderError": {
+              "kind": "function",
+              "arity": 4
+            },
+            "RATE_LIMIT_REQUESTS": {
+              "kind": "number"
+            },
+            "RATE_LIMIT_WINDOW_MS": {
+              "kind": "number"
+            },
+            "create": {
+              "kind": "function",
+              "arity": 1
+            }
+          }
+        },
+        "create": {
+          "kind": "function",
+          "arity": 1
+        },
+        "fromConfig": {
+          "kind": "function",
+          "arity": 2
+        },
+        "sealToken": {
+          "kind": "function",
+          "arity": 2
+        },
+        "storeToken": {
+          "kind": "function",
+          "arity": 3
+        },
+        "tokenPath": {
+          "kind": "function",
+          "arity": 1
+        }
+      }
     },
     "frameworkVersion": {
       "kind": "string"
@@ -19,6 +168,10 @@
         "compose": {
           "kind": "object",
           "members": {
+            "angleAddressCount": {
+              "kind": "function",
+              "arity": 2
+            },
             "create": {
               "kind": "function",
               "arity": 1
@@ -29,7 +182,7 @@
             },
             "splitAddressHeader": {
               "kind": "function",
-              "arity": 1
+              "arity": 2
             }
           }
         },
@@ -49,6 +202,10 @@
             "daneEnforcementStatus": {
               "kind": "function",
               "arity": 2
+            },
+            "tlsRptResultFor": {
+              "kind": "function",
+              "arity": 1
             },
             "wireDeliveryStatus": {
               "kind": "function",
@@ -79,6 +236,12 @@
                 "keyNotSealed": {
                   "kind": "string"
                 },
+                "keyRecordMismatch": {
+                  "kind": "string"
+                },
+                "keySealForeign": {
+                  "kind": "string"
+                },
                 "keySealUnopened": {
                   "kind": "string"
                 },
@@ -86,6 +249,9 @@
                   "kind": "string"
                 },
                 "keysAlreadyActive": {
+                  "kind": "string"
+                },
+                "keysNotResealed": {
                   "kind": "string"
                 },
                 "keysStranded": {
@@ -118,9 +284,171 @@
             }
           }
         },
+        "dmarcPolicy": {
+          "kind": "object",
+          "members": {
+            "CODES": {
+              "kind": "object",
+              "members": {
+                "alignmentShort": {
+                  "kind": "string"
+                },
+                "atStrongestPolicy": {
+                  "kind": "string"
+                },
+                "dkimUnpublished": {
+                  "kind": "string"
+                },
+                "evidenceAbsent": {
+                  "kind": "string"
+                },
+                "evidenceGapped": {
+                  "kind": "string"
+                },
+                "evidenceSparse": {
+                  "kind": "string"
+                },
+                "evidenceStale": {
+                  "kind": "string"
+                },
+                "evidenceYoung": {
+                  "kind": "string"
+                },
+                "fixClaimContradicted": {
+                  "kind": "string"
+                },
+                "markingsNotFullyListed": {
+                  "kind": "string"
+                },
+                "postureUnpublished": {
+                  "kind": "string"
+                },
+                "postureUnresolved": {
+                  "kind": "string"
+                },
+                "postureUnusable": {
+                  "kind": "string"
+                },
+                "quarantineAgeUnobserved": {
+                  "kind": "string"
+                },
+                "quarantineHeldShort": {
+                  "kind": "string"
+                },
+                "reportersThin": {
+                  "kind": "string"
+                },
+                "retentionShorterThanWindow": {
+                  "kind": "string"
+                },
+                "sampleNotWhole": {
+                  "kind": "string"
+                },
+                "sourceAddressUnreadable": {
+                  "kind": "string"
+                },
+                "sourcesNotFullyListed": {
+                  "kind": "string"
+                },
+                "sourcesUnreviewed": {
+                  "kind": "string"
+                },
+                "spfNotStrict": {
+                  "kind": "string"
+                },
+                "volumeThin": {
+                  "kind": "string"
+                }
+              }
+            },
+            "DISPOSITIONS": {
+              "kind": "array",
+              "length": 2,
+              "members": [
+                "ours-and-fixed",
+                "not-ours"
+              ]
+            },
+            "FIX_GRACE_DAYS": {
+              "kind": "number"
+            },
+            "LEVELS": {
+              "kind": "array",
+              "length": 3,
+              "members": [
+                "none",
+                "quarantine",
+                "reject"
+              ]
+            },
+            "MARKED_ACTION": {
+              "kind": "string"
+            },
+            "MARKING_LIMIT": {
+              "kind": "number"
+            },
+            "MARK_NOT_OURS": {
+              "kind": "string"
+            },
+            "MARK_OURS_FIXED": {
+              "kind": "string"
+            },
+            "MAX_GAP_DAYS": {
+              "kind": "number"
+            },
+            "OBSERVED_ACTION": {
+              "kind": "string"
+            },
+            "SOURCE_FLOOR_MESSAGES": {
+              "kind": "number"
+            },
+            "SOURCE_LIST_LIMIT": {
+              "kind": "number"
+            },
+            "create": {
+              "kind": "function",
+              "arity": 1
+            },
+            "recordFor": {
+              "kind": "function",
+              "arity": 1
+            }
+          }
+        },
         "listeners": {
           "kind": "object",
           "members": {
+            "AUTH_SURFACES": {
+              "kind": "object",
+              "members": {
+                "MAILBOX": {
+                  "kind": "string"
+                },
+                "SUBMISSION": {
+                  "kind": "string"
+                }
+              }
+            },
+            "BODY_RATE_FLOOR_BYTES_PER_SECOND": {
+              "kind": "number"
+            },
+            "CODES": {
+              "kind": "object",
+              "members": {
+                "fromHeaderNotOwned": {
+                  "kind": "string"
+                },
+                "sendingCredentialCeiling": {
+                  "kind": "string"
+                },
+                "sendingCredentialCeilingUnreadable": {
+                  "kind": "string"
+                },
+                "sendingCredentialStopped": {
+                  "kind": "string"
+                }
+              }
+            },
             "DEFAULTS": {
               "kind": "object",
               "members": {
@@ -132,6 +460,9 @@
                     },
                     "enabled": {
                       "kind": "boolean"
+                    },
+                    "maxLineBytes": {
+                      "kind": "number"
                     },
                     "port": {
                       "kind": "number"
@@ -147,6 +478,9 @@
                     "enabled": {
                       "kind": "boolean"
                     },
+                    "maxLineBytes": {
+                      "kind": "number"
+                    },
                     "port": {
                       "kind": "number"
                     }
@@ -160,6 +494,9 @@
                     },
                     "enabled": {
                       "kind": "boolean"
+                    },
+                    "maxLineBytes": {
+                      "kind": "number"
                     },
                     "port": {
                       "kind": "number"
@@ -175,6 +512,9 @@
                     "enabled": {
                       "kind": "boolean"
                     },
+                    "maxLineBytes": {
+                      "kind": "number"
+                    },
                     "port": {
                       "kind": "number"
                     }
@@ -188,6 +528,9 @@
                     },
                     "enabled": {
                       "kind": "boolean"
+                    },
+                    "maxLineBytes": {
+                      "kind": "number"
                     },
                     "port": {
                       "kind": "number"
@@ -203,10 +546,24 @@
                     "enabled": {
                       "kind": "boolean"
                     },
+                    "maxLineBytes": {
+                      "kind": "number"
+                    },
                     "port": {
                       "kind": "number"
                     }
                   }
+                }
+              }
+            },
+            "DEFAULT_INBOUND": {
+              "kind": "object",
+              "members": {
+                "mode": {
+                  "kind": "string"
+                },
+                "onTemperror": {
+                  "kind": "string"
                 }
               }
             },
@@ -226,6 +583,15 @@
                   "kind": "string"
                 }
               }
+            },
+            "MAX_CONNECTIONS": {
+              "kind": "number"
+            },
+            "MAX_LINE_BYTES": {
+              "kind": "number"
+            },
+            "MIN_LINE_BYTES": {
+              "kind": "number"
             },
             "RATE_LIMIT_KEYS": {
               "kind": "array",
@@ -265,7 +631,19 @@
               "kind": "function",
               "arity": 0
             },
+            "permittedAuthor": {
+              "kind": "function",
+              "arity": 3
+            },
             "permittedAuthors": {
+              "kind": "function",
+              "arity": 2
+            },
+            "screenReceiverVerdicts": {
+              "kind": "function",
+              "arity": 3
+            },
+            "verifySendingCredential": {
               "kind": "function",
               "arity": 2
             }
@@ -275,6 +653,12 @@
           "kind": "object",
           "members": {
             "DNS_ANSWER_BUDGET_MS": {
+              "kind": "number"
+            },
+            "MAX_DMARC_RECORD_CHARS": {
+              "kind": "number"
+            },
+            "MAX_SPF_RECORD_OCTETS": {
               "kind": "number"
             },
             "SEVERITY": {
@@ -292,6 +676,10 @@
               "kind": "function",
               "arity": 1
             },
+            "dmarcRecord": {
+              "kind": "function",
+              "arity": 2
+            },
             "tlsRptEndpoint": {
               "kind": "function",
               "arity": 2
@@ -303,6 +691,115 @@
             "withinDnsBudget": {
               "kind": "function",
               "arity": 3
+            }
+          }
+        },
+        "reports": {
+          "kind": "object",
+          "members": {
+            "AUTHENTICITY": {
+              "kind": "object",
+              "members": {
+                "carrierUnreadable": {
+                  "kind": "string"
+                },
+                "dmarcNotPass": {
+                  "kind": "string"
+                },
+                "forensicNoIdentity": {
+                  "kind": "string"
+                },
+                "notAuthenticatedHere": {
+                  "kind": "string"
+                },
+                "reporterMismatch": {
+                  "kind": "string"
+                },
+                "reporterUnnamed": {
+                  "kind": "string"
+                },
+                "verified": {
+                  "kind": "string"
+                }
+              }
+            },
+            "CODES": {
+              "kind": "object",
+              "members": {
+                "containerEmpty": {
+                  "kind": "string"
+                },
+                "containerEntryTooLarge": {
+                  "kind": "string"
+                },
+                "containerNested": {
+                  "kind": "string"
+                },
+                "containerRatioRefused": {
+                  "kind": "string"
+                },
+                "containerTooLarge": {
+                  "kind": "string"
+                },
+                "containerTooManyEntries": {
+                  "kind": "string"
+                },
+                "containerUnreadable": {
+                  "kind": "string"
+                },
+                "containerUnsupported": {
+                  "kind": "string"
+                },
+                "messageTooLarge": {
+                  "kind": "string"
+                },
+                "messageUnreadable": {
+                  "kind": "string"
+                },
+                "notAReport": {
+                  "kind": "string"
+                },
+                "notAReportingAddress": {
+                  "kind": "string"
+                },
+                "reportTooLarge": {
+                  "kind": "string"
+                },
+                "reportUnreadable": {
+                  "kind": "string"
+                },
+                "reportWindowImplausible": {
+                  "kind": "string"
+                },
+                "storeUnavailable": {
+                  "kind": "string"
+                }
+              }
+            },
+            "DEFAULT_MAX_ARCHIVE_ENTRIES": {
+              "kind": "number"
+            },
+            "DEFAULT_MAX_COMPRESSED_BYTES": {
+              "kind": "number"
+            },
+            "DEFAULT_MAX_EXPANSION_RATIO": {
+              "kind": "number"
+            },
+            "DEFAULT_MAX_MESSAGE_BYTES": {
+              "kind": "number"
+            },
+            "DEFAULT_MAX_REPORT_WINDOW_MS": {
+              "kind": "number"
+            },
+            "DEFAULT_MAX_WINDOW_SKEW_MS": {
+              "kind": "number"
+            },
+            "DEFAULT_RECENT_LIMIT": {
+              "kind": "number"
+            },
+            "create": {
+              "kind": "function",
+              "arity": 1
             }
           }
         }
@@ -351,6 +848,28 @@
                 }
               }
             },
+            "alias-disabled": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "alias-enabled": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
             "alias-removed": {
               "kind": "object",
               "members": {
@@ -363,6 +882,28 @@
               }
             },
             "archived": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "credential-ceilings-set": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "credential-window-released": {
               "kind": "object",
               "members": {
                 "kind": {
@@ -703,6 +1244,28 @@
                 }
               }
             },
+            "site-hidden": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "site-published": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
             "suspended": {
               "kind": "object",
               "members": {
@@ -715,6 +1278,50 @@
               }
             },
             "trashed": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "zone-published": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "zone-published-conflict": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "zone-published-pending": {
+              "kind": "object",
+              "members": {
+                "kind": {
+                  "kind": "string"
+                },
+                "text": {
+                  "kind": "string"
+                }
+              }
+            },
+            "zone-published-unread": {
               "kind": "object",
               "members": {
                 "kind": {
@@ -776,7 +1383,7 @@
         },
         "REQUIRED_STORE": {
           "kind": "array",
-          "length": 17,
+          "length": 30,
           "members": [
             "accounts.authenticate",
             "accounts.get",
@@ -794,7 +1401,20 @@
             "domains.setStatus",
             "aliases.add",
             "aliases.list",
-            "aliases.remove"
+            "aliases.remove",
+            "settings.get",
+            "settings.set",
+            "reports.rollup",
+            "reports.describe",
+            "reports.failingSources",
+            "reports.reporters",
+            "credentials.verify",
+            "credentials.counters.record",
+            "credentials.list",
+            "credentials.show",
+            "credentials.setCeilings",
+            "credentials.counters.read",
+            "credentials.counters.release"
           ]
         },
         "SESSION_COOKIE": {
@@ -820,7 +1440,32 @@
   "sinceByPrimitive": {
     "blamepost.config.load": "0.1.0",
     "blamepost.config.redacted": "0.1.0",
+    "blamepost.config.limitInEffect": "0.1.0",
     "blamepost.config.ensureDataDirectories": "0.1.0",
+    "blamepost.config.assertAbsoluteDataDir": "0.1.0",
+    "blamepost.config.assertAbsoluteDataPaths": "0.1.0",
+    "blamepost.config.applyLogLevel": "0.1.0",
+    "blamepost.config.logLevelInEffect": "0.1.0",
+    "blamepost.dns.cloudflare.create": "0.1.0",
+    "blamepost.dns.cloudflare.verifyToken": "0.1.0",
+    "blamepost.dns.cloudflare.zoneId": "0.1.0",
+    "blamepost.dns.cloudflare.listRecords": "0.1.0",
+    "blamepost.dns.cloudflare.createRecord": "0.1.0",
+    "blamepost.dns.cloudflare.updateRecord": "0.1.0",
+    "blamepost.dns.cloudflare.deleteRecord": "0.1.0",
+    "blamepost.dns.cloudflare.state": "0.1.0",
+    "blamepost.dns.cloudflare.close": "0.1.0",
+    "blamepost.dns.sealToken": "0.1.0",
+    "blamepost.dns.create": "0.1.0",
+    "blamepost.dns.preview": "0.1.0",
+    "blamepost.dns.apply": "0.1.0",
+    "blamepost.dns.verify": "0.1.0",
+    "blamepost.dns.allowlist": "0.1.0",
+    "blamepost.dns.close": "0.1.0",
+    "blamepost.dns.tokenPath": "0.1.0",
+    "blamepost.dns.storeToken": "0.1.0",
+    "blamepost.dns.clearToken": "0.1.0",
+    "blamepost.dns.fromConfig": "0.1.0",
     "blamepost.resolver": "0.1.0",
     "blamepost.tlsContext": "0.1.0",
     "blamepost.certificateReport": "0.1.0",
@@ -828,13 +1473,15 @@
     "blamepost.create": "0.1.0",
     "blamepost.mail.compose.normalizeAddress": "0.1.0",
     "blamepost.mail.compose.splitAddressHeader": "0.1.0",
+    "blamepost.mail.compose.angleAddressCount": "0.1.0",
     "blamepost.mail.compose.create": "0.1.0",
     "blamepost.mail.compose.build": "0.1.0",
     "blamepost.mail.compose.send": "0.1.0",
     "blamepost.mail.compose.reply": "0.1.0",
     "blamepost.mail.compose.forward": "0.1.0",
-    "blamepost.mail.delivery.wireDeliveryStatus": "0.1.0",
+    "blamepost.mail.delivery.tlsRptResultFor": "0.1.0",
     "blamepost.mail.delivery.daneEnforcementStatus": "0.1.0",
+    "blamepost.mail.delivery.wireDeliveryStatus": "0.1.0",
     "blamepost.mail.delivery.create": "0.1.0",
     "blamepost.mail.delivery.send": "0.1.0",
     "blamepost.mail.delivery.bounce": "0.1.0",
@@ -849,31 +1496,62 @@
     "blamepost.mail.dkim.rotate": "0.1.0",
     "blamepost.mail.dkim.retire": "0.1.0",
     "blamepost.mail.dkim.sweep": "0.1.0",
+    "blamepost.mail.dkim.reseal": "0.1.0",
     "blamepost.mail.dkim.list": "0.1.0",
     "blamepost.mail.dkim.dnsRecords": "0.1.0",
     "blamepost.mail.dkim.signerFor": "0.1.0",
     "blamepost.mail.dkim.sign": "0.1.0",
+    "blamepost.mail.dmarcPolicy.recordFor": "0.1.0",
+    "blamepost.mail.dmarcPolicy.create": "0.1.0",
+    "blamepost.mail.dmarcPolicy.evaluate": "0.1.0",
+    "blamepost.mail.dmarcPolicy.markSource": "0.1.0",
+    "blamepost.mail.dmarcPolicy.markings": "0.1.0",
+    "blamepost.mail.dmarcPolicy.describe": "0.1.0",
     "blamepost.mail.listeners.keyAgreementGroups": "0.1.0",
+    "blamepost.mail.listeners.screenReceiverVerdicts": "0.1.0",
     "blamepost.mail.listeners.permittedAuthors": "0.1.0",
+    "blamepost.mail.listeners.permittedAuthor": "0.1.0",
+    "blamepost.mail.listeners.verifySendingCredential": "0.1.0",
     "blamepost.mail.listeners.compileSearch": "0.1.0",
     "blamepost.mail.listeners.create": "0.1.0",
     "blamepost.mail.listeners.relay": "0.1.0",
+    "blamepost.mail.listeners.authorBinding": "0.1.0",
+    "blamepost.mail.listeners.sendingCredentialGate": "0.1.0",
     "blamepost.mail.listeners.start": "0.1.0",
     "blamepost.mail.listeners.stop": "0.1.0",
     "blamepost.mail.listeners.bound": "0.1.0",
     "blamepost.mail.listeners.describe": "0.1.0",
+    "blamepost.mail.mailbox.HIERARCHY_DELIMITER": "0.1.0",
+    "blamepost.mail.mailbox.superiorLevels": "0.1.0",
     "blamepost.mail.mailbox.TABLES": "0.1.0",
     "blamepost.mail.mailbox.headerBreak": "0.1.0",
     "blamepost.mail.mailbox.reportedHeaderBlock": "0.1.0",
+    "blamepost.mail.mailbox.leafParts": "0.1.0",
+    "blamepost.mail.mailbox.attachmentState": "0.1.0",
+    "blamepost.mail.mailbox.isAttachmentKeyword": "0.1.0",
+    "blamepost.mail.mailbox.attachmentMark": "0.1.0",
     "blamepost.mail.mailbox.sequenceSet": "0.1.0",
     "blamepost.mail.mailbox.assertRoleGate": "0.1.0",
     "blamepost.mail.mailbox.agent": "0.1.0",
     "blamepost.mail.mailbox.create": "0.1.0",
+    "blamepost.mail.mailbox.createFolder": "0.1.0",
+    "blamepost.mail.mailbox.deleteFolder": "0.1.0",
+    "blamepost.mail.mailbox.renameFolder": "0.1.0",
+    "blamepost.mail.mailbox.listFolders": "0.1.0",
+    "blamepost.mail.mailbox.subscribeFolder": "0.1.0",
+    "blamepost.mail.mailbox.unsubscribeFolder": "0.1.0",
     "blamepost.mail.mailbox.accountFolders": "0.1.0",
+    "blamepost.mail.mailbox.namespaceRevision": "0.1.1",
+    "blamepost.mail.mailbox.accountQuota": "0.1.0",
     "blamepost.mail.mailbox.onFiled": "0.1.0",
+    "blamepost.mail.mailbox.attachmentReport": "0.1.0",
+    "blamepost.mail.mailbox.markAttachments": "0.1.0",
     "blamepost.mail.mailbox.searchScan": "0.1.0",
+    "blamepost.mail.mailbox.readMessageSource": "0.1.0",
     "blamepost.mail.mailbox.expungeObjects": "0.1.0",
     "blamepost.mail.mailbox.moveObjects": "0.1.0",
+    "blamepost.mail.mailbox.unfiledIn": "0.1.0",
+    "blamepost.mail.mailbox.sweepUnfiled": "0.1.0",
     "blamepost.mail.mailbox.eraseAccountMail": "0.1.0",
     "blamepost.mail.mailbox.legalHold.place": "0.1.0",
     "blamepost.mail.mailbox.legalHold.release": "0.1.0",
@@ -882,8 +1560,13 @@
     "blamepost.mail.posture.withinDnsBudget": "0.1.0",
     "blamepost.mail.posture.txtLookup": "0.1.0",
     "blamepost.mail.posture.tlsRptEndpoint": "0.1.0",
+    "blamepost.mail.posture.dmarcRecord": "0.1.0",
     "blamepost.mail.posture.create": "0.1.0",
     "blamepost.mail.posture.check": "0.1.0",
+    "blamepost.mail.reports.create": "0.1.0",
+    "blamepost.mail.reports.receive": "0.1.0",
+    "blamepost.mail.reports.describe": "0.1.0",
+    "blamepost.mail.reports.recent": "0.1.0",
     "blamepost.store.accounts.create": "0.1.0",
     "blamepost.store.accounts.get": "0.1.0",
     "blamepost.store.accounts.list": "0.1.0",
@@ -914,6 +1597,22 @@
     "blamepost.store.blobs.create": "0.1.0",
     "blamepost.store.blobs.reconcile": "0.1.0",
     "blamepost.store.blobs.reclaim": "0.1.0",
+    "blamepost.store.blobs.repairQuota": "0.1.0",
+    "blamepost.store.credentials.create": "0.1.0",
+    "blamepost.store.credentials.verify": "0.1.0",
+    "blamepost.store.credentials.stillSending": "0.1.0",
+    "blamepost.store.credentials.show": "0.1.0",
+    "blamepost.store.credentials.list": "0.1.0",
+    "blamepost.store.credentials.byReturnPathTag": "0.1.0",
+    "blamepost.store.credentials.returnPathReport": "0.1.0",
+    "blamepost.store.credentials.rotate": "0.1.0",
+    "blamepost.store.credentials.revoke": "0.1.0",
+    "blamepost.store.credentials.remove": "0.1.0",
+    "blamepost.store.credentials.setRefusedLocalParts": "0.1.0",
+    "blamepost.store.credentials.setCeilings": "0.1.0",
+    "blamepost.store.credentials.counters.record": "0.1.0",
+    "blamepost.store.credentials.counters.read": "0.1.0",
+    "blamepost.store.credentials.counters.release": "0.1.0",
     "blamepost.store.domains.add": "0.1.0",
     "blamepost.store.domains.get": "0.1.0",
     "blamepost.store.domains.list": "0.1.0",
@@ -930,13 +1629,44 @@
     "blamepost.store.isOpen": "0.1.0",
     "blamepost.store.snapshotInEffect": "0.1.0",
     "blamepost.store.StoreError": "0.1.0",
+    "blamepost.store.reports.create": "0.1.0",
+    "blamepost.store.reports.ingestAggregate": "0.1.0",
+    "blamepost.store.reports.ingestForensic": "0.1.0",
+    "blamepost.store.reports.rollup": "0.1.0",
+    "blamepost.store.reports.failingSources": "0.1.0",
+    "blamepost.store.reports.reporters": "0.1.0",
+    "blamepost.store.reports.forgetAddress": "0.1.0",
+    "blamepost.store.reports.sweep": "0.1.0",
+    "blamepost.store.reports.start": "0.1.0",
+    "blamepost.store.reports.stop": "0.1.0",
+    "blamepost.store.reports.describe": "0.1.0",
     "blamepost.store.resolve": "0.1.0",
+    "blamepost.store.settings.get": "0.1.0",
+    "blamepost.store.settings.set": "0.1.0",
+    "blamepost.text.forDisplay": "0.1.0",
+    "blamepost.text.hasControlChar": "0.1.0",
     "blamepost.web.create.drainJmapWebSockets": "0.1.0",
     "blamepost.web.create.mountJmapWebSocket": "0.1.0",
     "blamepost.web.serve": "0.1.0",
     "blamepost.web.serve.start": "0.1.0",
     "blamepost.web.serve.stop": "0.1.0",
-    "blamepost.web.serve.describe": "0.1.0"
+    "blamepost.web.serve.describe": "0.1.0",
+    "blamepost.web.links.path": "0.1.0",
+    "blamepost.web.links.href": "0.1.0",
+    "blamepost.web.wiki.blocks.tagMap": "0.1.0",
+    "blamepost.web.wiki.blocks.at": "0.1.0",
+    "blamepost.web.wiki.blocks.libSources": "0.1.0",
+    "blamepost.web.wiki.blocks.relative": "0.1.0",
+    "blamepost.web.wiki.blocks.collect": "0.1.0",
+    "blamepost.web.wiki.blocks.collectPrimitives": "0.1.0",
+    "blamepost.web.wiki.blocks.collectModules": "0.1.0",
+    "blamepost.web.wiki.build": "0.1.0",
+    "blamepost.web.wiki.build.page": "0.1.0",
+    "blamepost.web.wiki.build.paths": "0.1.0",
+    "blamepost.web.wiki.specs.slug": "0.1.0",
+    "blamepost.web.wiki.specs.parse": "0.1.0",
+    "blamepost.web.wiki.specs.naturalCompare": "0.1.0",
+    "blamepost.web.wiki.specs.index": "0.1.0"
   },
   "removedPrimitives": {
     "blamepost.store.snapshotPathFor": {
@@ -945,6 +1675,8 @@
     }
   },
   "membershipByArray": {
+    "blamepost.mail.dmarcPolicy.LEVELS": "capability",
+    "blamepost.mail.dmarcPolicy.DISPOSITIONS": "capability",
     "blamepost.mail.listeners.STALE_AFTER_ROTATION": "constraint",
     "blamepost.mail.listeners.RATE_LIMIT_KEYS": "capability",
     "blamepost.web.REQUIRED_AGENT": "constraint",

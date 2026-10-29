@@ -63,4 +63,12 @@ jobs:
           # `A AND B` license passes only when every clause is
           # allow-listed.
           allow-licenses: Apache-2.0, MIT, BSD-2-Clause, BSD-2-Clause-Views, BSD-3-Clause, ISC, 0BSD, Unlicense, CC0-1.0, BlueOak-1.0.0, Python-2.0
+          # One package is exempt by name rather than by license, so
+          # CC-BY-4.0 stays refused everywhere else. caniuse-lite is the
+          # browser-support table browserslist reads, pulled into
+          # fuzz/package-lock.json by the Babel instrumentation
+          # @jazzer.js/core runs on. It is data under CC-BY-4.0, it is a
+          # dev dependency of the fuzz harnesses only, and fuzz/ is in
+          # neither the npm tarball nor the container image.
+          allow-dependencies-licenses: pkg:npm/caniuse-lite
           comment-summary-in-pr: on-failure

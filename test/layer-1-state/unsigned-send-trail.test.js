@@ -61,9 +61,10 @@ var HOSTNAME = "mx.example.com";
 // Three hosted domains, one per key state, so every vector runs against
 // the same server and the same form and differs only in what is on the
 // volume under `keys/`.
-var DAMAGED = "damaged.example";
-var WORKING = "working.example";
-var NO_KEY  = "unkeyed.example";
+var DAMAGED    = "damaged.example";
+var WORKING    = "working.example";
+var NO_KEY     = "unkeyed.example";
+var MISMATCHED = "mismatched.example";
 
 var SELECTOR = "bp202608";
 
@@ -92,7 +93,21 @@ var WIRE_DAMAGED    = "blamepost.mail.listeners.submission_unsigned";
 // The signer's own refusal codes, which are the contract a caller reads
 // to decide what it records.
 var CODE_NO_SELECTOR = "dkim/no-active-selector";
-var CODE_UNOPENED    = "dkim/key-seal-unopened";
+var CODE_NOT_THIS_KEY = "dkim/key-seal-foreign";
+var CODE_MISMATCH    = "dkim/key-record-mismatch";
+
+// The context a signing key is sealed under. Spelled out rather than
+// imported, because it is the contract deciding whether a key already on
+// a volume opens and a test reading the constant cannot tell a changed
+// tuple from a working one.
+function keySealContext(domain, selector, algorithm) {
+  return {
+    purpose:   "blamepost.mail.dkim.signing-key",
+    domain:    domain,
+    selector:  selector,
+    algorithm: algorithm,
+  };
+}
 
 // How much of a sealed key file is left in place. Far enough in to keep
 // the marker the vault reads to recognize one of its own, and far short
@@ -129,12 +144,8 @@ async function rowsFor(action) {
 }
 
 // The chain stores the metadata as text, so it is read back the way
-// every other file that reads this trail reads it.
-function metadataOf(row) {
-  if (!row) return {};
-  try { return JSON.parse(row.metadata || "{}"); }
-  catch (_e) { return {}; }
-}
+// every other file that reads an audit row reads it.
+var metadataOf = helpers.metadataOf;
 
 function signatureCount(rfc822) {
   var text = Buffer.isBuffer(rfc822) ? rfc822.toString("latin1") : String(rfc822 || "");
@@ -176,7 +187,7 @@ async function aDamagedKeySendsAnywayAndFilesTheCause(reader, log) {
     carried.domain === DAMAGED, String(carried.domain));
   count("and carries the signer's own code in a field of its own, so a key that will not " +
     "open is distinguishable from a domain nobody has set up yet without reading prose",
-    carried.cause === CODE_UNOPENED, String(carried.cause));
+    carried.cause === CODE_NOT_THIS_KEY, String(carried.cause));
   count("and the reason it carries is the signer's message rather than an empty string",
     typeof carried.reason === "string" && carried.reason.length > 0,
     String(carried.reason).slice(0, 120));
@@ -184,6 +195,50 @@ async function aDamagedKeySendsAnywayAndFilesTheCause(reader, log) {
     "whoever asked",
     typeof carried.reason === "string" && carried.reason.indexOf(".sealed") === -1,
     String(carried.reason).slice(0, 160));
+}
+
+// A key file that opens and parses under a record carrying a different
+// public half. It is the quietest of the three states: the selector row
+// is intact, so the record the operator publishes and every reading this
+// server offers are unchanged, and the file itself gives no sign. A
+// signature made with it fails at every receiver that resolves the
+// selector, and without this row nothing anywhere would say so.
+async function aKeyThatIsNotItsRecordsSendsUnsignedAndFilesTheCause(reader, log) {
+  var before = log.count();
+  var sent = await reader.form("/compose", {
+    to:      "buyer@peer.example",
+    subject: "sent while the key and the record disagreed",
+    text:    "This one leaves without a signature too.",
+  });
+  count("a message from a domain whose key is not the one its record publishes is still sent",
+    sent.status === 302, "HTTP " + sent.status);
+  count("and it reached the outbound path", log.count() === before + 1,
+    log.count() + " after " + before);
+  count("carrying no signature, rather than one no receiver resolving the selector can " +
+    "verify",
+    log.last() !== null && signatureCount(log.last().rfc822) === 0,
+    log.last() === null ? "nothing sent" : signatureCount(log.last().rfc822) + " signature(s)");
+
+  var rows = await rowsFor(COMPOSE_DAMAGED);
+  var mine = rows.filter(function (row) {
+    return metadataOf(row).domain === MISMATCHED;
+  });
+  count("the send left a row an operator can find", mine.length >= 1,
+    mine.length + " row(s) under " + COMPOSE_DAMAGED + " for " + MISMATCHED);
+  count("filed as a failure, which is what an operator queries the trail on",
+    mine[0] && mine[0].outcome === "failure", JSON.stringify(mine[0] && mine[0].outcome));
+
+  var carried = metadataOf(mine[0]);
+  count("and carrying its own code, so a key that disagrees with its record is not read as " +
+    "a key that will not open",
+    carried.cause === CODE_MISMATCH, String(carried.cause));
+  count("the reason names the selector the operator has to compare",
+    typeof carried.reason === "string" && carried.reason.indexOf(SELECTOR) !== -1,
+    String(carried.reason).slice(0, 200));
+  count("and names nothing of the volume's layout, because the same message is shown to " +
+    "whoever asked",
+    typeof carried.reason === "string" && carried.reason.indexOf(".sealed") === -1,
+    String(carried.reason).slice(0, 200));
 }
 
 // A domain nobody has finished setting up is a different condition with
@@ -301,21 +356,23 @@ async function run() {
     await identity.domains.add({ domain: DAMAGED });
     await identity.domains.add({ domain: WORKING });
     await identity.domains.add({ domain: NO_KEY });
+    await identity.domains.add({ domain: MISMATCHED });
 
     var owners = {};
-    var names = [DAMAGED, WORKING, NO_KEY];
+    var names = [DAMAGED, WORKING, NO_KEY, MISMATCHED];
     for (var i = 0; i < names.length; i += 1) {
       owners[names[i]] = await identity.accounts.create({
         address: "sender@" + names[i], password: PASSWORD,
       });
     }
 
-    // Two of the three domains get a pair. The third is left as a domain
-    // an operator added and has not finished setting up, which is the
-    // state the second action name exists for.
+    // Three of the four domains get a pair. The fourth is left as a
+    // domain an operator added and has not finished setting up, which is
+    // the state the second action name exists for.
     var minting = blamepost.mail.dkim.create({ dataDir: dataDir, store: identity });
     await minting.generate({ domain: DAMAGED, selector: SELECTOR });
     await minting.generate({ domain: WORKING, selector: SELECTOR });
+    await minting.generate({ domain: MISMATCHED, selector: SELECTOR });
 
     // A prefix of the file the server just wrote, which is what a restore
     // that copied part of a volume leaves behind. A seal authenticates
@@ -326,6 +383,29 @@ async function run() {
     count("the damaged domain's key file is on the volume before anything is done to it",
       nodeFs.existsSync(damagedKeyPath), damagedKeyPath);
     nodeFs.truncateSync(damagedKeyPath, TRUNCATED_KEY_BYTES);
+
+    // Another domain's sealed key put under this one's name. It opens,
+    // it parses, and it is not the key the selector row publishes, which
+    // is what a `keys` folder and a database restored from different
+    // points in time leave behind. The key is one the server minted a
+    // moment ago, so nothing in this file carries private key material.
+    var mismatchedKeyPath = nodePath.join(dataDir, "keys",
+      MISMATCHED + "." + SELECTOR + ".ed25519.sealed");
+    count("the mismatched domain's key file is on the volume before anything is done to it",
+      nodeFs.existsSync(mismatchedKeyPath), mismatchedKeyPath);
+    // The seal is redone rather than the file copied. A key is sealed to
+    // the selector it belongs to, so a file copied whole from another
+    // domain does not open here and is refused before the record is
+    // consulted. What this leaves is the state a database restored from
+    // before a selector was minted again under the same name leaves: a
+    // key that opens correctly and is not the one the row publishes.
+    var workingPem = b.vault.aad.unseal(
+      nodeFs.readFileSync(
+        nodePath.join(dataDir, "keys", WORKING + "." + SELECTOR + ".ed25519.sealed"), "utf8"),
+      keySealContext(WORKING, SELECTOR, "ed25519"));
+    nodeFs.writeFileSync(mismatchedKeyPath,
+      b.vault.aad.seal(workingPem, keySealContext(MISMATCHED, SELECTOR, "ed25519")),
+      { mode: 0o600 });
 
     // A signer is built once per domain and kept, so the handle that
     // minted the pair answers from what it built rather than from the
@@ -368,6 +448,7 @@ async function run() {
     }
 
     await aDamagedKeySendsAnywayAndFilesTheCause(readers[DAMAGED], log);
+    await aKeyThatIsNotItsRecordsSendsUnsignedAndFilesTheCause(readers[MISMATCHED], log);
     await aDomainWithNoSelectorIsFiledApart(readers[NO_KEY], log);
     await aWorkingKeyDrawsNoRowAtAll(readers[WORKING], log);
     await bothSurfacesFileTheSameShape();

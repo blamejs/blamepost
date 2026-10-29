@@ -115,6 +115,10 @@ var ANSWERING_RESOLVER = {
     return Promise.reject(new Error("no mail exchanger for " + name));
   },
   queryTxt: function () { return Promise.resolve([]); },
+  // The posture checker asks every hosted domain for a TLSA record and
+  // refuses a handle that cannot answer, so a fixture standing in for a
+  // resolver carries this reader whether or not its own subject is DANE.
+  queryTlsa: function () { return Promise.resolve({ rrs: [] }); },
   queryPtr: function () { return Promise.resolve([]); },
   query:    function () { return Promise.resolve([]); },
 };
@@ -280,7 +284,7 @@ async function aQueuePastItsReservationReducesTheVerdict(ctx, stopsAt) {
     "the operator would open to read and cancel what is waiting",
     over.status === 200 && over.status !== 503, over.said);
 
-  // The same reading on the other tier. A restart re-reads the same spool
+  // The same reading on the liveness probe. A restart re-reads the same spool
   // off the same volume, so every stuck entry is still stuck and the
   // attempts in flight are lost and repeated.
   var live = await liveness(ctx.httpPort);

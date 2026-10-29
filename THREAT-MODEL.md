@@ -33,18 +33,19 @@ carries the reporting process.
   not protected, which is why it is listed beside the passphrase rather than
   instead of it.
 
-  One route into this asset costs neither the passphrase nor the volume, and it
-  is the reason a purged range is reported the way it is. The table recording
-  where an archive and purge stopped is unsigned, unchained, uncovered by any
-  checkpoint and unguarded by any trigger, and one row written into it discards
-  every audit row at or below the counter it names. Write access to the
-  database is the whole price. Nothing this server reads can tell that row
-  apart from the one an honest retention run leaves, so the boundary is drawn
-  at what is said rather than at what is refused: the range is reported as
-  unread and trusted on an unsigned counter, never as a range nothing was
-  removed from, and the reading is recorded so a second run cannot answer more
-  softly than the first. What closes it is the archive bundle, which lives off
-  this volume and is the operator's to hold against the counter.
+  The row recording where an archive and purge stopped is the reason a purged
+  range is reported the way it is. It is unchained, uncovered by any checkpoint
+  and unguarded by any trigger, and one row written there discards every audit
+  row at or below the counter it names. What stands over it is a signature made
+  with the same key the checkpoints are signed with, covering the counter, the
+  hash the row at it held and the archive it names, so writing one costs the
+  vault passphrase and the volume refuses to open when it does not hold. That
+  says who wrote the row and nothing about the rows it names, so the boundary is
+  still drawn at what is said: the range is reported as unread and trusted on
+  that boundary, never as a range nothing was removed from, and the reading is
+  recorded so a second run cannot answer more softly than the first. What closes
+  it is the archive bundle, which lives off this volume and is the operator's to
+  hold against the counter.
 - **Deliverability.** The standing of the sending domain and IP with receivers.
   It is slow to build, fast to lose, and an attacker who gets a server to emit
   spam destroys it without ever reading a message.
@@ -58,12 +59,12 @@ carries the reporting process.
 |---|---|---|
 | Inbound SMTP on port 25, from anyone | **Untrusted** | Strict RFC 5321 state machine, per-peer connection budgets, HELO discipline, envelope screening, SPF / DKIM / DMARC evaluated before the message is accepted, and the ARC chain evaluated alongside them and reported without entering that decision. RBL and greylisting are gates the listener accepts and this release wires nothing into, so neither is a defense a deployment has today |
 | Message bytes and MIME structure, inbound or outbound | **Untrusted, always** | Bounded parsing under size and depth caps; a structure that violates the standard is refused rather than repaired |
-| A submission client after SASL AUTH | **Authenticated, not trusted** | The envelope sender must be the account's own address, and a SASL response whose authorization identity names a second account is refused. The finished message is measured too: every address in `From` or `Sender` at a domain this server hosts has to be one the account may write, and at least one across the two has to be. Rate limits and storage quotas still apply. An author at a domain hosted elsewhere is not screened; the first threat class has the boundaries |
+| A submission client after SASL AUTH | **Authenticated, not trusted** | The envelope sender must be an address the account may write, and a SASL response whose authorization identity names a second account is refused. The finished message is measured too: every address in `From` or `Sender` at a domain this server hosts has to be one the account may write, and at least one across the two has to be. Rate limits and storage quotas still apply. An author at a domain hosted elsewhere is not screened; the first threat class has the boundaries |
 | An IMAP, POP3, JMAP or ManageSieve client after AUTH | **Authenticated, scoped** | Every verb dispatches through one adapter that resolves the authenticated account before it reads a row, so a session reaches its own folders, messages and filter scripts and nothing else. Destruction and moves go on through the agent that holds the retention floor and writes the audit row |
 | A webmail browser session | **Authenticated, scoped** | Same scoping, plus the full HTTP middleware chain: CSRF, origin and fetch-metadata checks, cookie prefixes, strict CSP |
 | An admin session | **Operator** | The administrator flag is held by an account and covers the whole server rather than one domain, so an account that has it administers every hosted domain. Changes are audited; the pages it reads are not, so the record answers what an administrator altered and not what they looked at. An admin session claims no mail scope, so it reaches no mailbox but its own through this interface |
-| DNS answers | **Untrusted, and unauthenticated** | MTA-STS is the one policy anchored outside DNS: the record says only that a policy exists, and the policy itself is fetched over HTTPS from a name the certificate has to match. Everything else is taken on the resolver's word. No lookup this server makes asks its upstream for a DNSSEC verdict, and no TLSA record is checked against a peer's certificate, so a signed zone buys nothing on this side today. The resolver is built by the server rather than named in the configuration, which is what an operator running their own validating recursive needs to know |
-| A remote MX during delivery | **Untrusted** | The TLS requirement comes from the sending side's policy, never from what the far side offers. MTA-STS is in force. DANE authenticates a peer only once the operator has stated that the resolver this server uses validates DNSSEC, and REQUIRETLS is composed and reaches no wire; the transport threat class has the detail |
+| DNS answers | **Untrusted, and unauthenticated** | MTA-STS is the one policy anchored outside DNS: the record says only that a policy exists, and the policy itself is fetched over HTTPS from a name the certificate has to match. Everything else is taken on the resolver's word, and no lookup this server makes asks its upstream for a DNSSEC verdict. DANE is the one place a signed zone counts, and it counts on the operator's statement rather than on anything the protocol proves here: with `outboundPolicy.dnssecValidated: true` set, TLSA records are fetched over that same resolver and the transport matches the peer's certificate chain against them, and without it none is fetched under either posture. The resolver is built by the server rather than named in the configuration, which is what an operator running their own validating recursive needs to know |
+| A remote MX during delivery | **Untrusted** | The TLS requirement comes from the sending side's policy, never from what the far side offers. MTA-STS is in force. DANE authenticates a peer only once the operator has stated that the resolver this server uses validates DNSSEC, and REQUIRETLS is off unless the operator turns it on; the transport threat class has the detail |
 | Operator configuration and environment | **Trusted** | Validated at boot; a bad value throws where the operator is watching |
 | The vendored framework | **Trusted after verification at vendoring time** | Pinned to a published version, with the publisher's integrity digest verified before the tarball is extracted and recorded in the manifest. The running process does not re-verify the tree at boot, so a host that can rewrite files under `lib/vendor/` is already inside the trust boundary below |
 | The host kernel and filesystem | **Trusted runtime** | Assumed intact; see the last section |
@@ -161,8 +162,8 @@ hypervisor.
    authenticated to nobody.
 
    The submission listener refuses `MAIL FROM` until AUTH succeeds, and then
-   refuses any envelope sender other than the authenticated account's own
-   address, with
+   refuses any envelope sender outside the set the authenticated account may
+   write, with
    `553 5.7.1 Sender address rejected: not owned by authenticated identity`,
    before any recipient is accepted. That is the string to filter for when
    watching logs for credential misuse. Nothing turns that one off: the
@@ -176,14 +177,14 @@ hypervisor.
    answered `500 5.5.2` at the point of parse and never becomes an address to
    compare. SMTPUTF8 is not advertised, so a client has no way to ask for that
    to change. A punycode label does survive the guard, because it is ASCII,
-   and then simply is not the account's address, which ends in a refusal
-   rather than a match. What is left is case, and both sides are folded on an
+   and then simply is not in the set, which ends in a refusal rather than a
+   match. What is left is case, and both sides are folded on an
    alphabet where folding has one answer.
 
-   The header a person reads is bound separately, and the two bindings are
-   easy enough to confuse that it is worth saying which covers
-   what. `MAIL FROM` is the envelope, checked at the wire before a recipient
-   is accepted. `From` and `Sender` are checked on the finished message,
+   The header a person reads is checked at a different moment against the same
+   set, and the two are easy enough to confuse that it is worth saying which
+   covers what. `MAIL FROM` is the envelope, checked at the wire before a
+   recipient is accepted. `From` and `Sender` are checked on the finished message,
    after it has been accepted and before anything signs, stores or relays it:
    every address in either header that sits at a domain this server hosts has
    to be one the account may write, and at least one address across the two
@@ -203,19 +204,20 @@ hypervisor.
    address the domain could ever carry, which is the forgery this binding
    exists to refuse rather than a set of identities.
 
-   The refusal reaches the client as `451 4.3.0`, a transient code for a
-   permanent condition, because that is the only reply a refused relay handoff
-   can produce; tracked upstream as blamejs#668. It fails closed, so the
-   mismatched class here is the reporting rather than the decision: a sender
-   reads the 4 and retries something that will be refused identically every
-   time. The reason it cannot carry goes to the log and to an audit row
+   The refusal is permanent on the wire and separates the two classes. An
+   author the account may not write is `550 5.7.1`, and a `From` and `Sender`
+   pair that names no single readable author is `550 5.6.0`, so a sender is
+   told to stop rather than to retry something that would be refused
+   identically every time. The reply names no address, because it goes onto a
+   line-oriented protocol and the peer chose the address; the addresses go to
+   the log and to an audit row
    under `blamepost.mail.listeners.submission_from_not_owned`, naming the
    address that was rejected and the ones that would have been accepted. That
    row is what to watch, and it separates the two cases that produce it: an
    account probing the boundary, and an account holder whose shared address
    was never made an alias.
 
-   Three things bound the guarantee. An author at a domain this server hosts
+   Two things bound the guarantee. An author at a domain this server hosts
    nothing for is not screened at all, so `From: alice@example.com,
    partner@example.net` with no `Sender` is accepted: alice's address makes
    the message attributable, and nothing here signs for `example.net` or
@@ -225,14 +227,7 @@ hypervisor.
    mailbox is delivered to that mailbox and is still not an address it may
    write; the asymmetry errs toward refusing, which costs a legitimate message
    rather than admitting a forged one, and the fix is an alias pointing
-   directly at the account. And the envelope half cannot fold a plus tag while
-   the author half can, so `alice+receipts@example.com` is an address alice
-   may write in `From` and may not write in `MAIL FROM`, on the same server
-   that accepts it as a recipient and delivers it to her. That comparison is a
-   lookup in a fixed list built inside the vendored framework with no callback
-   an application could answer from, so it is not something this repository can
-   close. It fails closed, so it is a false refusal rather than a way in.
-   [ROADMAP.md](ROADMAP.md) tracks both open halves.
+   directly at the account.
 
    The residual an operator decides about is that an alias is a sending
    identity. Pointing a shared address at an account grants that account the
@@ -247,21 +242,30 @@ hypervisor.
    accounts do not trust each other should read every alias they hand out as a
    name those accounts may sign mail with.
 
-   How much that residual costs depends on alignment, and alignment follows
-   the envelope rather than the author. DKIM signs with the envelope domain,
-   and the envelope is always the account's own address, so an alias in the
-   same domain as the account leaves signed and aligned, while an alias an
-   operator put in a second hosted domain leaves signed for the account's
-   domain and displaying the other. That one does not align, so the displayed
-   domain's own DMARC record decides what a receiver does with it.
+   Alignment does not soften that residual. The browser and JMAP sign for the
+   domain in the `From` header, and the submission port signs for the domain in
+   the envelope sender, which a mail client fills with the same address. So an
+   alias grants aligned mail for its own domain on every surface, an alias in a
+   second hosted domain included: an account holding one can emit mail a
+   receiver authenticates as that second domain rather than as the account's.
+
+   SPF alignment does not follow the author. The browser and JMAP keep the
+   account's own address in the envelope and SPF authenticates the envelope
+   domain, so a message displaying an alias in a second hosted domain aligns
+   under DKIM and not under SPF. DMARC passes when either mechanism aligns and
+   passes (RFC 9989), so the message passes.
+
+   A client configured with the envelope at one hosted domain and the author at
+   another aligns under neither. The submission port signs the envelope domain,
+   so the signature names a domain the recipient is never shown.
 
    The browser interface and JMAP offer the same set the wire binds against
    rather than a wider one. Both read it from the derivation the submission
    port uses, so a compose form cannot offer an author the wire would refuse,
    and an alias the operator withdraws stops being offered at the next
-   message rather than at the next sign in. The envelope stays the account's
-   own address in both, so what choosing an alias changes is the displayed
-   author and not the return path.
+   message rather than at the next sign in. On those two the envelope stays
+   the account's own address, so a bounce lands in the mailbox of whoever
+   pressed send rather than in the shared address.
 
 2. **Credential attack.** Passwords are stored as Argon2id verifiers, and a
    miss spends the same Argon2id work a hit does, so an address that has no
@@ -351,8 +355,8 @@ hypervisor.
    matches the bytes that reach the socket, so the session stays framed and the
    client never reads one response as part of another; what the client cannot
    do is verify a signature over what it received. It is a limit in the
-   vendored framework, filed upstream, and the stored message is untouched, so
-   the same message read over POP3 comes back whole.
+   vendored framework, and the stored message is untouched, so the same message
+   read over POP3 comes back whole.
 
    The other way a retrieval answer can be wrong is to be incomplete and say
    nothing about it, and IMAP `SEARCH` is where that would happen. This server
@@ -413,9 +417,14 @@ hypervisor.
    is the one an operator has to act on. A stripped STARTTLS on a mailbox port
    means the client has already put the password on the wire in the clear by
    the time the server says no. Nothing the server does can call that back. Two
-   things close it and neither is set here: a mail client configured to require
-   encryption, and a terminator offering implicit TLS on 993 and 995 in front
-   of the in-band ports. Both are the operator's to put in place.
+   thing closes it and it is not set here: a mail client configured to require
+   encryption, which refuses to send the credential at all until the upgrade has
+   happened. That is the operator's to put in place on each client. A terminator
+   offering implicit TLS on 993 or 995 in front of the in-band ports does NOT
+   close it and is not an option: the listener behind one is handed a plaintext
+   connection and refuses every credential, so the arrangement binds a port and
+   signs nobody in. Implicit TLS on the mailbox listeners themselves would close
+   it, and ROADMAP.md carries that.
 
    Outbound is where the sending side's policy decides, and it decides before
    the socket opens. The delivery composer resolves the recipient domain's
@@ -455,16 +464,18 @@ hypervisor.
    validate them either way, and `blamepost doctor --dane` checks that they
    resolve.
 
-   REQUIRETLS is composed and cannot be turned on. Nothing puts the keyword on
-   the wire: the flag reaches the transport and the transport has no reader for
-   it, so no receiver is ever asked. The setting that requests it therefore
-   stops the boot rather than being accepted and dropped, which is the
-   difference that matters for a threat model. A protection that is accepted
-   and silently not applied produces the same evidence as one that works, so an
-   operator who believed confidential mail was being withheld from peers that
-   cannot encrypt would have no way to discover otherwise. Refusing removes
-   that belief rather than the protection, because there was no protection to
-   remove.
+   REQUIRETLS is off by default and reaches the wire when it is turned on. The
+   keyword goes on `MAIL FROM` for a peer whose EHLO advertises the extension,
+   and a peer that does not advertise it is failed over from and then
+   permanently failed rather than delivered to, which RFC 8689 §4.1 requires.
+   That refusal is what makes the setting worth anything in a threat model: a
+   sender told the message went cannot tell delivery over an encrypted
+   connection from delivery over one the receiver would not promise to
+   encrypt, so a peer that cannot answer the question has to be a peer the
+   message does not go to. The cost is deliverability, and it is the reason
+   this is off by default rather than on: most receivers do not implement the
+   extension, so a server that asks every peer for it stops delivering to most
+   of them.
 
 6. **Disk theft.** Message content, credentials and DKIM private keys are sealed
    under the vault before they reach disk. The volume alone is opaque without the
@@ -528,7 +539,7 @@ hypervisor.
    the runtime before it costs a parser or a state machine. Beyond that, capacity
    in front of the server is the answer, which is why volumetric denial of
    service is listed as outside this model. Neither the byte-rate floor nor the
-   per-listener ceiling is settable; the four per-address budgets are.
+   per-listener socket ceiling is settable; the four per-address budgets are.
 
    Accepting a message costs time in proportion to its size. The SMTP reader
    scans each arriving chunk once for the terminator and for the smuggling
@@ -714,18 +725,28 @@ hypervisor.
     `blobs/` named by the digest of their own content, and a row naming that
     digest goes in the database. A filesystem write is not part of a database
     transaction and never can be, so a process that stops between the two
-    leaves one half alone and neither half complains. Four states follow, and
-    no protocol reports any of them. Octets nothing references sit on the
+    leaves one half alone and neither half complains. Several states follow,
+    and no protocol reports any of them. Octets nothing references sit on the
     volume, never served and never reclaimed. A row whose octets are missing
     lists in IMAP, JMAP and POP3 and then fails to return a body, which is an
     outage for one message that is invisible until somebody opens it. Octets
     that no longer hash to the digest naming them are the same outage with a
-    reason to look at the volume rather than at the mailbox. And a quota
-    charged for a message no protocol can list fills a mailbox up against
-    nothing. `blamepost blobs report` names all four and `blamepost doctor`
-    runs the same check; both count the bodies rather than opening them, so
-    the one that has been altered in place is only visible under `blobs report
-    --verify`, which unseals each referenced body and hashes it back.
+    reason to look at the volume rather than at the mailbox. A quota charged
+    for a message no protocol can list fills a mailbox up against nothing. And
+    a mailbox row whose account row is gone, or a message row whose mailbox row
+    is gone, holds its bodies on the volume for as long as the volume exists:
+    the rows are intact, so the reference-counted release never fires and no
+    protocol lists that mail. The quota comparison walks mailbox rows, and that
+    separates the two shapes. A mailbox row whose account row is gone is still
+    on that table, so the comparison reaches it and reports the mailbox under
+    an account with no row, once the counter and the rows under it disagree. A
+    message row whose mailbox row is gone leaves nothing on that table for the
+    walk to reach, so the comparison never reads those rows at all.
+    `blamepost blobs report` names every one of them and `blamepost doctor`
+    runs the same check; both count the bodies rather than opening them, so the
+    one that has been altered in place is only visible under
+    `blobs report --verify`, which unseals each referenced body and hashes it
+    back.
 
     Reporting is deliberately separate from deleting, and the two answer
     differently while the server runs. The report opens the volume read-only,

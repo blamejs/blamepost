@@ -283,6 +283,74 @@ async function aMoveMovesTheState(reader, accountId, objectId, destination, befo
   return after;
 }
 
+// Creating, renaming and deleting a mailbox change what Mailbox/get
+// answers without touching any message, so each of them has to move the
+// state as well, or a client keeps showing a mailbox under a name it no
+// longer has. Deleting a mailbox that held mail takes its counter out of
+// the total, and the state must still not fall.
+async function theNamespaceVerbsMoveTheState(reader, identity, accountId, before, log) {
+  var actor = { id: accountId, roles: ["account"] };
+  var revisionBefore = identity.mailbox.namespaceRevision(actor);
+  identity.mailbox.createFolder(actor, "Projects");
+  count("blamepost.mail.mailbox.namespaceRevision rises when a mailbox is created",
+    identity.mailbox.namespaceRevision(actor) > revisionBefore,
+    revisionBefore + " then " + identity.mailbox.namespaceRevision(actor));
+  var created = await accountState(reader, accountId, log);
+  count("creating an empty mailbox moves the state",
+    created !== before, JSON.stringify(before) + " then " + JSON.stringify(created));
+
+  await identity.mailbox.renameFolder(actor, "Projects", "Projects2");
+  var renamed = await accountState(reader, accountId, log);
+  count("renaming a mailbox moves the state",
+    renamed !== created, JSON.stringify(created) + " then " + JSON.stringify(renamed));
+
+  await identity.mailbox.deleteFolder(actor, "Projects2");
+  var deleted = await accountState(reader, accountId, log);
+  count("deleting a mailbox moves the state",
+    deleted !== renamed, JSON.stringify(renamed) + " then " + JSON.stringify(deleted));
+
+  // A query over a mailbox that is deleted and created again under the
+  // same name answers for a different mailbox, so its queryState moves.
+  async function queryStateOf(name) {
+    var answer = await reader.jmap([["Email/query", {
+      accountId: accountId, filter: { inMailbox: name } }, "q0"]]);
+    return browser.answer(answer, 0)[1].queryState;
+  }
+  identity.mailbox.createFolder(actor, "Queried");
+  var queriedBefore = await queryStateOf("Queried");
+  await identity.mailbox.deleteFolder(actor, "Queried");
+  identity.mailbox.createFolder(actor, "Queried");
+  var queriedAfter = await queryStateOf("Queried");
+  count("a query over a mailbox deleted and created again under its name answers a new " +
+    "queryState", queriedAfter !== queriedBefore,
+    JSON.stringify(queriedBefore) + " then " + JSON.stringify(queriedAfter));
+
+  // Two renames that put an emptier mailbox under the queried name raise
+  // the namespace revision by as much as the counters differ. The state
+  // still moves, because the two numbers are not added together.
+  identity.mailbox.createFolder(actor, "SwapA");
+  identity.mailbox.appendMessage("SwapA", message("swap-one"), { actor: actor });
+  identity.mailbox.appendMessage("SwapA", message("swap-two"), { actor: actor });
+  identity.mailbox.createFolder(actor, "SwapB");
+  var swapBefore = await queryStateOf("SwapA");
+  await identity.mailbox.renameFolder(actor, "SwapA", "SwapC");
+  await identity.mailbox.renameFolder(actor, "SwapB", "SwapA");
+  var swapAfter = await queryStateOf("SwapA");
+  count("a query over a name that now holds a different mailbox answers a new queryState, " +
+    "whatever the two counters add up to",
+    swapAfter !== swapBefore, JSON.stringify(swapBefore) + " then " + JSON.stringify(swapAfter));
+
+  identity.mailbox.createFolder(actor, "Filled");
+  identity.mailbox.appendMessage("Filled", message("namespace-filled"), { actor: actor });
+  identity.mailbox.appendMessage("Filled", message("namespace-filled-2"), { actor: actor });
+  var filled = await accountState(reader, accountId, log);
+  await identity.mailbox.deleteFolder(actor, "Filled");
+  var emptied = await accountState(reader, accountId, log);
+  count("deleting a mailbox that held mail moves the state and does not lower it",
+    emptied !== filled && Number(emptied) > Number(filled),
+    JSON.stringify(filled) + " then " + JSON.stringify(emptied));
+}
+
 // ---- the identity string ---------------------------------------------------
 
 async function anIdleIdentityKeepsItsState(reader, accountId, log) {
@@ -503,7 +571,9 @@ async function run() {
       reader, alice.id, draftIds[0], idle, accountLog);
     var afterBusy = await aChangeInTheBusiestFolderMovesTheState(
       reader, alice.id, inboxIds[0], afterQuiet, accountLog);
-    await aMoveMovesTheState(reader, alice.id, inboxIds[1], "Archive", afterBusy, accountLog);
+    var afterMove = await aMoveMovesTheState(
+      reader, alice.id, inboxIds[1], "Archive", afterBusy, accountLog);
+    await theNamespaceVerbsMoveTheState(reader, identity, alice.id, afterMove, accountLog);
 
     noStateThisRunSawEverCameBack(accountLog);
     noStateThisRunSawEverCameBack(identityLog);

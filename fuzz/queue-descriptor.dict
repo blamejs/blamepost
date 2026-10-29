@@ -1,0 +1,66 @@
+# libFuzzer dictionary for the outbound queue descriptor reader.
+#
+# The keys are the ones `_writeDescriptor` in lib/mail/delivery.js writes
+# and `_readDescriptor` reads back, plus the keys of one history row. A
+# descriptor holding anything else was written by something that is not
+# this build, which is a shape the readers meet on a restored volume.
+
+id="\"id\""
+from="\"from\""
+recipient="\"recipient\""
+attempt="\"attempt\""
+next_attempt_at="\"nextAttemptAt\""
+reason="\"reason\""
+reason_code="\"reasonCode\""
+require_tls="\"requireTls\""
+held="\"held\""
+held_because="\"heldBecause\""
+queued_at="\"queuedAt\""
+attempts_recorded="\"attemptsRecorded\""
+history="\"history\""
+
+# A history row.
+row_at="\"at\""
+row_outcome="\"outcome\""
+row_mx_host="\"mxHost\""
+
+# The ids an entry is addressed by. One is the shape the spool mints,
+# which is what every path under the spool directory is built from; the
+# others are what an id that did not come from here looks like.
+minted_id="\"0123456789abcdef0123456789abcdef\""
+parent_dir="\"../\""
+absolute_path="\"/etc/\""
+backslash_path="\"..\\\\\""
+
+# The reverse path RFC 5321 6.1 puts on every delivery report, which
+# decides whether there is a sender to tell when the budget runs out.
+null_sender="\"<>\""
+empty_string="\"\""
+
+# What a receiver's own words look like when they arrive.
+deferred="\"deferred\""
+delivered="\"delivered\""
+failed="\"failed\""
+status_greylisted="\"451 4.7.1 greylisted\""
+status_no_such_user="\"550 5.1.1 no such user\""
+enhanced_transient="\"4.4.1\""
+enhanced_permanent="\"5.1.1\""
+
+# The code points a terminal acts on rather than prints. The C1 range at
+# U+0080 to U+009F is the one `b.guardText`'s balanced profile leaves
+# behind, and U+009B is the single byte form of CSI.
+escape="\\u001b"
+csi="\\u009b"
+carriage_return="\\r"
+nul="\\u0000"
+rlo="\\u202e"
+pdf="\\u202c"
+lone_high_surrogate="\\ud800"
+
+# The JSON shapes a descriptor is not supposed to be.
+json_null="null"
+json_true="true"
+json_false="false"
+empty_object="{}"
+empty_array="[]"
+array_of_null="[null]"

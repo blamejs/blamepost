@@ -1,0 +1,21 @@
+From: MAILER-DAEMON@relay.example.net
+To: postmaster@example.com
+Subject: Delivery Status Notification
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=delivery-status; boundary="rpt-7"
+
+--rpt-7
+Content-Type: text/plain; charset=utf-8
+
+The list was expanded.
+
+--rpt-7
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns; relay.example.net
+
+Final-Recipient: utf-8; josé@example.org
+Action: expanded
+Status: 2.0.0
+
+--rpt-7--

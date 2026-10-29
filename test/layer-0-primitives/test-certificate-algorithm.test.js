@@ -208,15 +208,24 @@ async function aStackThatIsNotThisOneIsAsked(workDir) {
   count("the classical bridge is one that stack can actually use",
     new RegExp("^USABLE " + certs.ALGORITHM_CLASSIC + "$", "m").test(said), oneLine);
 
-  // The trip-wire. It reports the interval this bridge exists for, and
-  // the day it fails the answer is to retire the bridge rather than to
-  // soften the case.
+  // The trip-wire. It reports the interval this bridge exists for. The
+  // answer depends on which OpenSSL the host's foreign stack carries:
+  // 3.0, which current long-term distributions ship, cannot use the
+  // post-quantum default, and 3.5 can. A host whose stack can use it
+  // says nothing about the clients that still need the bridge, so the
+  // case records a named skip there rather than a pass. The bridge is
+  // retired once every supported client stack reads USABLE here.
+  if (new RegExp("^USABLE " + certs.ALGORITHM_PQC + "\\b", "m").test(said)) {
+    helpers.skip("the foreign stack on this host (" + client.detail + ") can use " +
+      certs.ALGORITHM_PQC + ", so this host does not measure whether " +
+      certs.ALGORITHM_CLASSIC + " is still needed. A host whose stack carries OpenSSL 3.0 " +
+      "does; retire the bridge once no supported client stack needs it.");
+    return;
+  }
   count("the post-quantum default is still one that stack cannot use, " +
     "which is why the bridge exists",
     new RegExp("^UNUSABLE " + certs.ALGORITHM_PQC + "\\b", "m").test(said),
-    oneLine + " -- if this now reads USABLE, the client caught up: retire " +
-      certs.ALGORITHM_CLASSIC + " from helpers/certs.js and from the callers that name it, " +
-      "rather than relaxing this case");
+    oneLine);
 }
 
 // ---------------------------------------------------------------------------

@@ -145,14 +145,17 @@ Wire.prototype._take = function () {
 };
 
 // Wait for the listener to say something matching `pattern`, then take
-// everything said so far off the buffer and return it.
-Wire.prototype.read = function (pattern, what) {
+// everything said so far off the buffer and return it. `opts.timeoutMs`
+// replaces the default wait for an answer that takes longer to produce,
+// such as the reply to a message near the size ceiling.
+Wire.prototype.read = function (pattern, what, opts) {
   var self = this;
+  var timeoutMs = opts && typeof opts.timeoutMs === "number" ? opts.timeoutMs : WIRE_TIMEOUT_MS;
   return helpers.waitUntil(function () {
     if (!pattern.test(self.buf)) return false;
     return self._take();
   }, {
-    timeoutMs: WIRE_TIMEOUT_MS,
+    timeoutMs: timeoutMs,
     label:     self.label + ": " + what,
   }).then(function (hit) { return hit.text; });
 };
@@ -241,6 +244,63 @@ Wire.prototype.tag = function () {
   return "t" + this._tag;
 };
 
+// One IMAP command and everything the listener said up to the tagged
+// completion of that command. The tag is the session's own, so a reply
+// to an earlier command on the same session cannot satisfy the wait.
+//
+// The verdict is read off the same text rather than asserted here: a
+// case about a refusal and a case about a success both need the whole
+// response, and a helper that threw on NO would leave every refusal case
+// writing its own reader.
+Wire.prototype.imapAsk = async function (command, what) {
+  var tag = this.tag();
+  this.send(tag + " " + command);
+  var text = await this.read(new RegExp("^" + tag + " (OK|NO|BAD)[^\\r\\n]*\\r\\n", "m"),
+    what === undefined ? command : what);
+  return { tag: tag, text: text, verdict: new RegExp("^" + tag + " (OK|NO|BAD)", "m").exec(text)[1] };
+};
+
+// The same, with the command's last argument sent as a synchronizing
+// literal. RFC 9051 section 4.3 makes that the form a client sends a
+// mailbox name a quoted string cannot carry, which on a name outside
+// ASCII is every real client.
+Wire.prototype.imapAskLiteral = async function (command, payload, what) {
+  var tag = this.tag();
+  await this.sendLiteral(tag + " " + command, payload,
+    what === undefined ? command : what);
+  var text = await this.read(new RegExp("^" + tag + " (OK|NO|BAD)[^\\r\\n]*\\r\\n", "m"),
+    what === undefined ? command : what);
+  return { tag: tag, text: text, verdict: new RegExp("^" + tag + " (OK|NO|BAD)", "m").exec(text)[1] };
+};
+
+// The mailbox names one LIST reply carries, read off the untagged lines
+// rather than out of the store, because the question every caller has is
+// what the client was told. The name arrives quoted or as a bare atom,
+// and a quoted one has its escapes undone so the value compares equal to
+// the name that was sent.
+function imapListed(text) {
+  var names = [];
+  var line = /^\* LIST \(([^)]*)\) "([^"]*)" (?:"((?:[^"\\]|\\.)*)"|(\S+))\r?$/gm;
+  var found = line.exec(text);
+  while (found !== null) {
+    names.push({
+      attributes: found[1],
+      separator:  found[2],
+      name:       found[3] === undefined ? found[4] : found[3].replace(/\\(.)/g, "$1"),
+    });
+    found = line.exec(text);
+  }
+  return names;
+}
+
+// One entry of that listing by name, or null when the reply did not name
+// it. Null rather than undefined so a caller can assert absence without
+// distinguishing the two.
+function imapListedNamed(text, name) {
+  var found = imapListed(text).filter(function (entry) { return entry.name === name; });
+  return found.length > 0 ? found[0] : null;
+}
+
 // A literal announces an OCTET count and is followed by exactly that
 // many octets and a CRLF. Both literal forms need the same two answers:
 // how many octets the payload is, and the payload with its terminator
@@ -266,9 +326,12 @@ function _literalBody(payload) {
 // advertising LITERAL+.
 //
 // The IMAP listener this project composes does NOT, under the strict
-// profile it ships: the guard refuses `{N+}` outright and then reads
-// the payload that follows as a series of commands, so every header
-// line comes back as its own BAD. Use `sendLiteral` there.
+// profile it ships: the guard refuses `{N+}` outright and the reader
+// resumes at the next line, so the payload that is already in flight is
+// read as a series of commands rather than drained. A line of it that
+// is not a command draws its own BAD, and a line of it that IS one is
+// answered, subject to the state the session is actually in. Use
+// `sendLiteral` there.
 Wire.prototype.sendNonSyncLiteral = function (command, payload, note) {
   var body = _literalBody(payload);
   this.send(command + " {" + body.length + "+}");
@@ -302,6 +365,97 @@ Wire.prototype.sendLiteral = async function (command, payload, note) {
   }
   this.sendRaw(body.payload, note);
 };
+
+// ---------------------------------------------------------------------------
+// Reading a response as octets
+// ---------------------------------------------------------------------------
+
+// The octets of an IMAP literal in a response. A latin1 view of the
+// buffer is a one to one mapping from octets to characters, so an index
+// into the view is an offset into the buffer and the announced count can
+// be applied to the buffer directly.
+//
+// Both halves are returned because the pair is the claim: a literal that
+// announces one count and is followed by a different number of octets
+// desynchronizes the client's parser, whatever the payload says.
+//
+// It lives here rather than beside one case because more than one file
+// reads a FETCH response as octets, and two copies of this are two ideas
+// about where a literal ends.
+function imapLiteral(bytes) {
+  if (!Buffer.isBuffer(bytes)) {
+    throw new TypeError("helpers/wire.imapLiteral: takes the octets a binary session read. " +
+      "Open the session with { binary: true } and read it with readBytes.");
+  }
+  var view  = bytes.toString("latin1");
+  var match = /\{(\d+)\}\r\n/.exec(view);
+  if (!match) {
+    throw new Error("no literal in the FETCH response: " + visible(view.slice(0, 300)));
+  }
+  var announced = parseInt(match[1], 10);
+  var from      = match.index + match[0].length;
+  // Everything from the literal to the close of the FETCH response,
+  // which is what the announced count is a claim about.
+  var closed  = view.lastIndexOf(")\r\n", view.length);
+  var present = closed === -1 ? bytes.length - from : closed - from;
+  return {
+    announced: announced,
+    present:   present,
+    payload:   bytes.subarray(from, from + announced),
+  };
+}
+
+// The message body of a POP3 multi-line response: everything between the
+// `+OK` line and the terminating dot, with RFC 1939 section 3 dot
+// stuffing undone.
+function pop3Body(bytes) {
+  if (!Buffer.isBuffer(bytes)) {
+    throw new TypeError("helpers/wire.pop3Body: takes the octets a binary session read. " +
+      "Open the session with { binary: true } and read it with readBytes.");
+  }
+  var view  = bytes.toString("latin1");
+  var open  = view.indexOf("\r\n");
+  if (open === -1) throw new Error("no +OK line: " + visible(view.slice(0, 300)));
+  var end = view.indexOf("\r\n.\r\n", open);
+  if (end === -1) throw new Error("no terminating dot: " + visible(view.slice(0, 300)));
+  var body = bytes.subarray(open + 2, end + 2);
+  // Undoing the stuffing on the octets rather than on a decoded copy,
+  // for the same reason the socket is in binary mode.
+  var out = [];
+  var at  = 0;
+  var text = body.toString("latin1");
+  for (;;) {
+    var dot = text.indexOf("\r\n..", at);
+    if (dot === -1) { out.push(body.subarray(at)); break; }
+    out.push(body.subarray(at, dot + 3));
+    at = dot + 4;
+  }
+  return Buffer.concat(out);
+}
+
+// The message numbers and unique ids a POP3 UIDL listing carries, in the
+// order the listener wrote them. Read as a pair rather than as two
+// lists, because the claim a caller makes is about which id sits at
+// which number.
+function pop3Uidl(text) {
+  var out = [];
+  var lines = String(text).split("\r\n");
+  for (var i = 0; i < lines.length; i += 1) {
+    var m = /^(\d+) (\S+)$/.exec(lines[i]);
+    if (m) out.push({ msgNum: parseInt(m[1], 10), uid: m[2] });
+  }
+  return out;
+}
+
+// The two counts on a POP3 `STAT` line, RFC 1939 section 5. A reply that
+// carried no counts answers -1 for both, so a caller comparing against a
+// real number reads a refusal as a mismatch rather than as a zero.
+function pop3Stat(text) {
+  var found = /^\+OK (\d+) (\d+)/m.exec(text);
+  return found === null
+    ? { messages: -1, bytes: -1 }
+    : { messages: parseInt(found[1], 10), bytes: parseInt(found[2], 10) };
+}
 
 // ---------------------------------------------------------------------------
 // The session ladders
@@ -510,6 +664,12 @@ module.exports = {
   reservePort:     reservePort,
   visible:         visible,
   saslPlain:       saslPlain,
+  imapLiteral:     imapLiteral,
+  imapListed:      imapListed,
+  imapListedNamed: imapListedNamed,
+  pop3Body:        pop3Body,
+  pop3Uidl:        pop3Uidl,
+  pop3Stat:        pop3Stat,
   lastManageSieveReply: lastManageSieveReply,
   LOOPBACK:        LOOPBACK,
   WIRE_TIMEOUT_MS: WIRE_TIMEOUT_MS,

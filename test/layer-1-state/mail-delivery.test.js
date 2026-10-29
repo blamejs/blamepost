@@ -231,17 +231,27 @@ async function reportGenerationIsBounded(dataDir) {
 }
 
 async function aPermanentPeerRefusalRunsTheReportPath(dataDir) {
-  var delivery = handleOn(dataDir, REFUSING_MX);
+  // The recipient's domain refuses mail outright and the sender's is
+  // absent from the zone, which answers as a name that does not exist.
+  // So the message is permanently refused and the report about it can
+  // still be handed to the outbound path, where it waits.
+  //
+  // A single resolver refusing both domains would refuse the report too,
+  // and a counter of nought read against that cannot tell a report that
+  // went from a report nobody will ever receive.
+  var delivery = handleOn(dataDir, zone.resolverOver({ "example.net": { mx: [] } }));
 
   var outcome = await delivery.send({
     from:   "alice@example.com",
     to:     ["bob@example.net"],
     rfc822: Buffer.from(MESSAGE, "utf8"),
   });
-  check("a domain publishing the null MX is a permanent refusal",
+  check("a domain publishing no mail exchanger is a permanent refusal",
     outcome.failed.length === 1 && outcome.deferred.length === 0);
   check("the composer's permanent-failure hook completed rather than throwing",
     outcome.failed[0].dsnSent === true);
+  check("the report it handed over is waiting on the outbound path",
+    delivery.queue.count() === 1);
   check("nothing is counted as a report the sender did not get",
     delivery.describe().reportsUnsent === 0);
 
@@ -285,6 +295,125 @@ async function aReportAboutAReportIsNotGenerated(dataDir) {
     delivery.describe().reportsUnsent === 0);
   check("the entry leaves the spool once there is nothing left to try",
     spoolFiles(dataDir).length === 0);
+}
+
+// ---------------------------------------------------------------------------
+// An envelope with no message
+// ---------------------------------------------------------------------------
+
+// A send that carries no message is a caller fault, and it has to be
+// refused where the caller can still do something about it.
+//
+// Taken instead, it becomes an envelope of nought bytes: the composer
+// offers a receiver a DATA with nothing in it, which is a message with
+// no headers and no body, and a recipient that defers puts a
+// nought-byte body on the volume where it spends the whole retry budget
+// over five days. Neither the sender nor the operator has anything to
+// read afterwards, because there is nothing to read.
+async function anEnvelopeWithNoMessageIsRefused(dataDir) {
+  var delivery = handleOn(dataDir, UNREACHABLE_MX);
+
+  var absent = null;
+  try {
+    await delivery.send({ from: "alice@example.com", to: ["bob@example.net"] });
+  } catch (err) { absent = err; }
+  check("an envelope carrying no message at all is refused",
+    absent !== null && absent instanceof TypeError);
+  check("and the refusal names the option the caller left out",
+    absent !== null && /rfc822/.test(String(absent.message)));
+
+  var empty = null;
+  try {
+    await delivery.send({
+      from:   "alice@example.com",
+      to:     ["bob@example.net"],
+      rfc822: Buffer.alloc(0),
+    });
+  } catch (err) { empty = err; }
+  check("a message of nought bytes is refused the same way",
+    empty !== null && empty instanceof TypeError);
+
+  check("and neither of them reached the volume",
+    spoolFiles(dataDir).length === 0);
+}
+
+// ---------------------------------------------------------------------------
+// An envelope's place in the retry budget
+// ---------------------------------------------------------------------------
+
+// `attempt` says how many attempts have already been made on a message,
+// and two decisions are taken from it: whether the budget is spent, and
+// which wait stands before the next attempt.
+//
+// Both are arithmetic, and neither one refuses a value that is not a
+// number. A count written as text is added to rather than summed, so
+// `"5"` becomes `"51"`, which compares above the budget and ends the
+// message on its first try with a report to its sender saying it failed.
+// A count that is not whole, or is below nought, indexes the schedule
+// outside itself and produces a next attempt time that is not a time, so
+// the entry comes due on every sweep with no wait between attempts and
+// the peer is asked again as fast as the timer runs.
+//
+// A count that really is one still has to work, or the guard has traded
+// one broken budget for another.
+async function aRetryBudgetPositionThatIsNotACountIsRefused(dataDir) {
+  var delivery = handleOn(dataDir, UNREACHABLE_MX);
+
+  var asText = null;
+  try {
+    await delivery.send({
+      from:    SENDER,
+      to:      [RECIPIENT],
+      rfc822:  Buffer.from(MESSAGE, "utf8"),
+      attempt: "5",
+    });
+  } catch (err) { asText = err; }
+  check("an attempt count written as text is refused",
+    asText !== null && asText instanceof TypeError);
+  check("and the refusal names the option the caller got wrong",
+    asText !== null && /attempt/.test(String(asText.message)));
+
+  var fraction = null;
+  try {
+    await delivery.send({
+      from:    SENDER,
+      to:      [RECIPIENT],
+      rfc822:  Buffer.from(MESSAGE, "utf8"),
+      attempt: 1.5,
+    });
+  } catch (err) { fraction = err; }
+  check("a count that is not whole is refused, because there is no half attempt",
+    fraction !== null && fraction instanceof TypeError);
+
+  var below = null;
+  try {
+    await delivery.send({
+      from:    SENDER,
+      to:      [RECIPIENT],
+      rfc822:  Buffer.from(MESSAGE, "utf8"),
+      attempt: -2,
+    });
+  } catch (err) { below = err; }
+  check("a count below nought is refused", below !== null && below instanceof TypeError);
+
+  check("none of them reached the volume", spoolFiles(dataDir).length === 0);
+
+  var outcome = await delivery.send({
+    from:    SENDER,
+    to:      [RECIPIENT],
+    rfc822:  Buffer.from(MESSAGE, "utf8"),
+    attempt: 2,
+  });
+  count("a message that really has been tried twice is still taken",
+    outcome.deferred.length === 1 && outcome.failed.length === 0,
+    JSON.stringify({ failed: outcome.failed, deferred: outcome.deferred.length }));
+  count("and it takes the next place in the budget rather than the first",
+    outcome.deferred.length === 1 && outcome.deferred[0].attempt === 3,
+    String(outcome.deferred.length === 1 ? outcome.deferred[0].attempt : "not deferred"));
+  count("and it waits the rung that place stands on",
+    outcome.deferred.length === 1 &&
+    outcome.deferred[0].retryAfterMs === b.constants.TIME.minutes(15),
+    String(outcome.deferred.length === 1 ? outcome.deferred[0].retryAfterMs : "not deferred"));
 }
 
 // ---------------------------------------------------------------------------
@@ -724,6 +853,10 @@ async function run() {
       function () { return aPermanentPeerRefusalRunsTheReportPath(freshDir("delivery-perm")); });
     await helpers.withTestTimeout("delivery: a report about a report is not generated",
       function () { return aReportAboutAReportIsNotGenerated(freshDir("delivery-loop")); });
+    await helpers.withTestTimeout("delivery: an envelope with no message is refused",
+      function () { return anEnvelopeWithNoMessageIsRefused(freshDir("delivery-nobody")); });
+    await helpers.withTestTimeout("delivery: a retry budget position that is not a count is refused",
+      function () { return aRetryBudgetPositionThatIsNotACountIsRefused(freshDir("delivery-budget-shape")); });
     await helpers.withTestTimeout("delivery: a faulted attempt keeps the message",
       function () { return aFaultedAttemptKeepsTheMessage(freshDir("delivery-fault")); });
     await helpers.withTestTimeout("delivery: a temporary refusal keeps the message",

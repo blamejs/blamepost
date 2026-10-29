@@ -29,7 +29,7 @@
  * The inputs are built rather than found. An empty set that has to be waited
  * for is a case that passes for the wrong reason on a slow machine, so every
  * vector here constructs the emptiness it is about: a release-notes directory
- * with nothing hand-written in it, a lib tree with no source under it, a
+ * with nothing hand-written in it, a lib tree with no source the walk reaches, a
  * manifest that declares no package, a document that names no file, a probe
  * list that every filter has emptied.
  *
@@ -57,6 +57,8 @@ var spawnRun = require("../helpers/spawn");
 
 var examinedCounts = require("../../scripts/examined-counts.js");
 var vendorCurrency = require("../../scripts/check-vendor-currency.js");
+var nodeFloor      = require("../../scripts/check-node-floor.js");
+var checkServices  = require("../../scripts/check-services.js");
 
 var count = helpers.count;
 var tail  = spawnRun.lastLines;
@@ -89,12 +91,18 @@ var FIXTURE_ZERO_IS =
 // A throwaway repository root carrying the scripts a vector drives. Every one
 // of them resolves the tree it reads from its own location, so a copy beside a
 // constructed tree reads that tree and nothing else.
+//
+// A fixture carrying `source-primitives.js` also carries the reader it
+// requires, through a `lib/web` link the walk does not descend into (see
+// `helpers.carryDocumentationReader`). So the walk reads only the sources a
+// vector writes, and a `lib/` holding nothing but the link has no source.
 function _fixture(prefix, scripts) {
   var root = helpers.tempDir(prefix);
   nodeFs.mkdirSync(nodePath.join(root, "scripts"));
   scripts.concat(["examined-counts.js"]).forEach(function (name) {
     nodeFs.copyFileSync(nodePath.join(SCRIPTS_DIR, name), nodePath.join(root, "scripts", name));
   });
+  if (scripts.indexOf("source-primitives.js") !== -1) helpers.carryDocumentationReader(root);
   return root;
 }
 
@@ -411,13 +419,45 @@ async function aChangelogCheckPublishesWhatItReadAndWhatItSwept() {
   await _run(root, "generate-changelog-entry.js", ["--rebuild"]);
 
   var rv = await _run(root, "generate-changelog-entry.js", ["--check"]);
-  count("changelog: canary, a placeable tree still passes", rv.code === 0, tail(rv.out, 4));
-  count("changelog: and both the releases rendered and the strings swept are published",
-    /EXAMINED 2 rendered-releases/.test(rv.out) && /EXAMINED \d+ swept-prose-strings/.test(rv.out),
-    tail(rv.out, 4));
-  count("changelog: and neither is a zero the release battery would refuse",
+  count("changelog: canary, a placeable tree still passes", rv.code === 0, tail(rv.out, 5));
+  count("changelog: and the releases read, the strings swept and the document produced " +
+    "are all published",
+  /EXAMINED 2 rendered-releases/.test(rv.out) &&
+    /EXAMINED \d+ swept-prose-strings/.test(rv.out) &&
+    /EXAMINED \d+ rendered-artifact-lines/.test(rv.out),
+  tail(rv.out, 5));
+  count("changelog: and none of them is a zero the release battery would refuse",
     examinedCounts.emptyUnits(examinedCounts.publishedCounts(rv.out)).length === 0,
-    tail(rv.out, 4));
+    tail(rv.out, 5));
+}
+
+// The unit that answers where `rendered-releases` cannot. In the three
+// single-release modes that number is one because exactly one release is
+// loaded and a missing one throws before the publish, so it has no way to
+// refuse anything. A renderer that produced an empty entry, page or headline
+// would publish a healthy 1 beside an artifact with nothing in it, and the
+// workflow that redirects this stdout into a release body would publish the
+// empty file.
+//
+// Driven through the publisher rather than through a fixture tree, because the
+// notes schema refuses a document empty enough to render to nothing: the
+// failure this guards is a defect in the RENDERER, and the assertion is that
+// the number reaches the refusal when it comes back zero.
+function anEmptyRenderedArtifactIsRefusedEvenWithAReleaseLoaded() {
+  var out  = _sink();
+  var diag = _sink();
+  var code = examinedCounts.publish([
+    { unit: "rendered-releases",       n: 1 },
+    { unit: "swept-prose-strings",     n: 12 },
+    { unit: "rendered-artifact-lines", n: 0 },
+  ], { stream: out, diagnostics: diag, tag: "[fixture]" });
+
+  count("changelog: a release loaded and nothing rendered from it fails the run",
+    code === 1, String(code));
+  count("changelog: and the artifact is the unit named as empty",
+    /REFUSED: 0 rendered-artifact-lines/.test(diag.text()), diag.text().slice(0, 200));
+  count("changelog: while the release it did load is still published beside the refusal",
+    /EXAMINED 1 rendered-releases/.test(out.text()), out.text());
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +577,66 @@ function aCurrencyRunThatMeasuredNothingIsNotCurrent() {
 }
 
 // ---------------------------------------------------------------------------
+// The Node-floor sweep
+// ---------------------------------------------------------------------------
+
+// A unit that sums several discoveries cannot refuse the one that emptied.
+// This gate added its workflow pins, its named versions, its base-image
+// platform records, its badges and its floor statements into a single
+// `floor-references`, and on this tree that number is thirty-eight. A moved
+// `.github/workflows`, or a `node-version:` matcher that stopped matching,
+// takes two of those five to zero and leaves the total at twelve: healthy,
+// non-zero, refused by nothing, and the gate prints OK having compared no
+// workflow reference at all.
+//
+// Called directly, because which references land in which unit IS the rule.
+// Reading the numbers back off a run would confirm only what this tree happens
+// to hold today.
+function aFloorSweepThatWentBlindToOneDiscoveryIsRefused() {
+  var blind = {
+    workflowPins: 0, workflowMentions: 0,
+    baseRecords: 4, badges: 1, statements: 7, floorDocuments: 3,
+  };
+  var units = nodeFloor._examinedUnits(blind);
+
+  // What the summed unit would have published for the same run, which is the
+  // measurement that says the split was necessary rather than tidier.
+  var summed = units.slice(0, 3).reduce(function (n, u) { return n + u.n; }, 0);
+  count("node floor: the sum of the reference units would have been a healthy number",
+    summed === 12 && examinedCounts.emptyUnits([{ unit: "floor-references", n: summed }]).length === 0,
+    "summed to " + summed);
+
+  count("node floor: the workflow sweep going blind is refused by name",
+    JSON.stringify(examinedCounts.emptyUnits(units)) ===
+      JSON.stringify(["workflow-floor-references"]),
+    JSON.stringify(units));
+  count("node floor: and the discoveries that did read are not named with it",
+    units.filter(function (u) { return u.n > 0; }).length === 3, JSON.stringify(units));
+
+  // Each of the other discoveries empties on its own, or the split has moved
+  // the masking rather than removed it.
+  var noContainer = nodeFloor._examinedUnits(
+    { workflowPins: 13, workflowMentions: 13, baseRecords: 0, badges: 1, statements: 7, floorDocuments: 3 });
+  count("node floor: the container sweep empties on its own",
+    JSON.stringify(examinedCounts.emptyUnits(noContainer)) ===
+      JSON.stringify(["container-floor-references"]), JSON.stringify(noContainer));
+
+  var noProse = nodeFloor._examinedUnits(
+    { workflowPins: 13, workflowMentions: 13, baseRecords: 4, badges: 0, statements: 0, floorDocuments: 3 });
+  count("node floor: the prose sweep empties on its own",
+    JSON.stringify(examinedCounts.emptyUnits(noProse)) ===
+      JSON.stringify(["document-floor-references"]), JSON.stringify(noProse));
+
+  // Canary. A split that refused everything would fail the tree it exists to
+  // admit, and a badge is the one reference a repository can legitimately carry
+  // none of, which is why it shares a unit with the floor statements.
+  var healthy = nodeFloor._examinedUnits(
+    { workflowPins: 13, workflowMentions: 13, baseRecords: 4, badges: 0, statements: 7, floorDocuments: 3 });
+  count("node floor: canary, a tree with no badge but with floor statements still passes",
+    examinedCounts.emptyUnits(healthy).length === 0, JSON.stringify(healthy));
+}
+
+// ---------------------------------------------------------------------------
 // The prepack guard
 // ---------------------------------------------------------------------------
 
@@ -626,11 +726,30 @@ async function aProbeListEmptiedByItsOwnFiltersIsRefused() {
 // endpoints answered as blamepost and exited 0, the count contradicting the
 // verdict printed beside it.
 async function aProbeListOfAbsentOptionalListenersIsRefused() {
-  var rv = await _services(["pop3", "imaps", "pop3s", "https"], {
+  // The optional rows are read from the script rather than written here.
+  // A list copied into a test is a second answer to a question the script
+  // already answers, and the two come apart: the day a row moved from
+  // optional to required, a hand written list drove a required endpoint
+  // down instead, which is a different refusal from the empty set this
+  // case exists to pin, and the case would have gone on passing for the
+  // wrong reason if the codes had happened to match.
+  var optional = checkServices.BASE_SERVICES
+    .filter(function (service) { return !service.required; })
+    .map(function (service) { return service.name; });
+  count("services: the table still declares an optional row to drive the empty set with",
+    optional.length > 0, JSON.stringify(optional));
+
+  // The process check is off for this case. It reads the host's socket
+  // table, which on a host with nothing listening is empty and is refused
+  // as a missing tool before the probe set is reached, so the verdict
+  // this case pins would depend on what else the host runs.
+  var rv = await _services(optional, {
     BLAMEPOST_SERVICE_HOST:  "127.0.0.1",
-    BLAMEPOST_SERVICE_PORTS: "pop3=" + CLOSED_PORT + ",imaps=" + CLOSED_PORT +
-                             ",pop3s=" + CLOSED_PORT + ",https=" + CLOSED_PORT,
+    BLAMEPOST_SERVICE_PORTS: optional.map(function (name) {
+      return name + "=" + CLOSED_PORT;
+    }).join(","),
     BLAMEPOST_SERVICE_PROBE_TIMEOUT_MS: "1500",
+    BLAMEPOST_SERVICE_PROCESS_CHECK:    "off",
   });
   count("services: a run that identified nothing fails the gate", rv.code === 2, tail(rv.out, 4));
   count("services: and says it identified nothing rather than that nothing was down",
@@ -646,6 +765,9 @@ async function aRequiredListenerThatIsDownKeepsItsOwnVerdict() {
     BLAMEPOST_SERVICE_HOST:  "127.0.0.1",
     BLAMEPOST_SERVICE_PORTS: "mx=" + CLOSED_PORT,
     BLAMEPOST_SERVICE_PROBE_TIMEOUT_MS: "1500",
+    // A runner with no listening-socket tool would refuse the run before
+    // the probe, which is the other case's verdict rather than this one.
+    BLAMEPOST_SERVICE_PROCESS_CHECK:    "off",
   });
   count("services: canary, a required listener that is down still exits 1, not 2",
     rv.code === 1, tail(rv.out, 4));
@@ -704,18 +826,98 @@ async function aManifestWithOnePackageStillBuildsItsDocument() {
 }
 
 // ---------------------------------------------------------------------------
+// The vendor-manifest refresh
+// ---------------------------------------------------------------------------
+
+function _manifestFixture(packages) {
+  var root = _fixture("emptyset-manifest", ["refresh-vendor-manifest.js"]);
+  _writeJson(root, nodePath.join("lib", "vendor", "MANIFEST.json"), { packages: packages });
+  return root;
+}
+
+// Not a gate, and it writes the record two of them read: check-vendor-integrity
+// verifies the tree against these hashes and check-vendor-currency compares
+// these versions against upstream. A `packages` map that arrived empty walks
+// nothing, hashes nothing, writes itself back and used to exit 0 saying "wrote
+// 0 packages / 0 hashes". Both gates then answered over an empty record and
+// reported clean, and each refuses its own zero only because this never handed
+// them one.
+async function aManifestRefreshOverAnEmptyPackageMapIsRefused() {
+  var root = _manifestFixture({});
+  var rv = await _run(root, "refresh-vendor-manifest.js", []);
+
+  count("manifest: a refresh that walked no package fails the run",
+    rv.code === 1, "exit " + rv.code + ": " + tail(rv.out, 5));
+  count("manifest: and both units it answers for are named",
+    /REFUSED: 0 manifest-packages/.test(rv.out) && /REFUSED: 0 hashed-slots/.test(rv.out),
+    tail(rv.out, 5));
+
+  helpers.removeTempDir(root);
+}
+
+// The unit that catches the other direction. A package whose file list emptied
+// leaves the package count healthy and produces none of the hashes the refresh
+// exists to write, and the record it hands the integrity gate then verifies
+// nothing.
+async function aManifestRefreshThatHashedNoSlotIsRefusedToo() {
+  var root = _manifestFixture({
+    blamejs: { version: "0.18.60", npm: "@blamejs/core", license: "Apache-2.0", files: {} },
+  });
+  var rv = await _run(root, "refresh-vendor-manifest.js", []);
+
+  count("manifest: a package carrying no file to hash fails the run too",
+    rv.code === 1, "exit " + rv.code + ": " + tail(rv.out, 5));
+  count("manifest: and the package count is published while the hash count is refused",
+    /EXAMINED 1 manifest-packages/.test(rv.out) && /REFUSED: 0 hashed-slots/.test(rv.out),
+    tail(rv.out, 5));
+
+  helpers.removeTempDir(root);
+}
+
+// Canary. A refresh that refused everything would fail the manifest it exists
+// to maintain, and the counts behind that verdict have to be published.
+async function aManifestRefreshThatHashedItsTreeStillPasses() {
+  var root = _manifestFixture({
+    blamejs: { version: "0.18.60", npm: "@blamejs/core", license: "Apache-2.0",
+      files: { server: "lib/vendor/blamejs/" } },
+  });
+  _write(root, nodePath.join("lib", "vendor", "blamejs", "index.js"),
+    "\"use strict\";\nmodule.exports = {};\n");
+
+  var rv = await _run(root, "refresh-vendor-manifest.js", []);
+  count("manifest: canary, a package with a tree under it still refreshes",
+    rv.code === 0, "exit " + rv.code + ": " + tail(rv.out, 5));
+  count("manifest: canary, and both counts are published",
+    /EXAMINED 1 manifest-packages/.test(rv.out) && /EXAMINED 1 hashed-slots/.test(rv.out),
+    tail(rv.out, 5));
+  count("manifest: canary, and neither is a zero a caller would refuse",
+    examinedCounts.emptyUnits(examinedCounts.publishedCounts(rv.out)).length === 0,
+    tail(rv.out, 5));
+
+  helpers.removeTempDir(root);
+}
+
+// ---------------------------------------------------------------------------
 // The swallow gate
 // ---------------------------------------------------------------------------
 
-// An lcov report and a lib tree with no source under it. "Every lib swallow
-// re-throws, is execution-covered, or is explicitly marked" is true of that run
-// in the same words, and three chain gates publishing the same walk do not
-// answer for this one: the coverage script that drives it is not in the chain.
+// An lcov report and a lib tree with no source the walk reaches. "Every lib
+// swallow re-throws, is execution-covered, or is explicitly marked" is true of
+// that run in the same words, and three chain gates publishing the same walk do
+// not answer for this one: it runs as its own step after the instrumented
+// suite, where nothing reads its stdout and the exit code is the whole of what
+// it says.
+//
+// The walk lives in the reader under `lib/`, so the fixture carries the reader
+// through a link the walk skips (see `_fixture`). The first check below
+// confirms the reader is reachable, so the refusal is the gate reading an empty
+// `lib/` and not the script failing to load.
 async function anEmptyLibWalkIsRefusedByTheSwallowGate() {
   var root = _fixture("emptyset-swallow", ["check-swallow-coverage.js", "source-primitives.js"]);
-  nodeFs.mkdirSync(nodePath.join(root, "lib"));
   _write(root, nodePath.join("coverage", "lcov.info"),
     "TN:\nSF:lib/moved-away.js\nDA:1,1\nLF:1\nLH:1\nend_of_record\n");
+  count("swallows: the fixture carries the reader the walk is loaded from",
+    nodeFs.existsSync(nodePath.join(root, helpers.DOCUMENTATION_READER_REL)), root);
 
   var rv = await _run(root, "check-swallow-coverage.js", []);
   count("swallows: a walk that read no source fails the gate", rv.code === 1, tail(rv.out, 4));
@@ -779,6 +981,293 @@ async function aCoveredSwallowStillPasses() {
 }
 
 // ---------------------------------------------------------------------------
+// The operator-prose gate
+// ---------------------------------------------------------------------------
+
+// A stand-in for the machine-local prose checker: the envelope shape the gate
+// reads, and nothing else. It is a stand-in rather than the real tool because
+// the real one is not in this repository and may not be on the machine running
+// these cases, and because the vectors below are about what the GATE does with
+// an answer rather than about which answer the checker gives.
+//
+// Two environment switches spell the two ways an answer stops meaning what the
+// gate takes it to mean. STAND_IN_BLIND_TO_NESTED skips every RELATIVE path with a
+// directory in it, which is a checker resolving nested reads against a base
+// that no longer exists; the absolute path the gate's own canary fixture
+// arrives on is still read, which is the whole reason a canary cannot see this.
+// STAND_IN_OMIT_FILES_READ drops the read count from the envelope, which is an
+// externally-versioned tool that renamed the field.
+var PROSE_STAND_IN_SOURCE = [
+  '"use strict";',
+  'var fs   = require("node:fs");',
+  'var path = require("node:path");',
+  'var argv  = process.argv.slice(2);',
+  'var json  = argv.indexOf("--json") !== -1;',
+  'var files = argv.filter(function (a) { return a.charAt(0) !== "-"; });',
+  'var blind = process.env.STAND_IN_BLIND_TO_NESTED === "1";',
+  'var findings = [];',
+  'var read = 0;',
+  'files.forEach(function (f) {',
+  '  if (blind && !path.isAbsolute(f) && /[\\\\/]/.test(f)) return;',
+  '  var text;',
+  '  try { text = fs.readFileSync(f, "utf8"); } catch (_e) { return; }',
+  '  read += 1;',
+  '  text.split(/\\r?\\n/).forEach(function (line, i) {',
+  '    var at = line.indexOf("\\u2014");',
+  '    if (at === -1) return;',
+  '    findings.push({ check: "notation", file: f, line: i + 1, match: line.charAt(at) });',
+  '  });',
+  '});',
+  'if (json) {',
+  '  var envelope = { ok: true, findings: findings };',
+  '  if (process.env.STAND_IN_OMIT_FILES_READ !== "1") envelope.filesRead = read;',
+  '  process.stdout.write(JSON.stringify(envelope) + "\\n");',
+  '} else {',
+  '  findings.forEach(function (f) {',
+  '    process.stdout.write(f.file + ":" + f.line + "  [stand-in/notation]\\n");',
+  '  });',
+  '  process.stdout.write(findings.length + " finding(s) in " + read + " file(s).\\n");',
+  '}',
+  'process.exit(findings.length > 0 ? 1 : 0);',
+  "",
+].join("\n");
+
+// A tree the gate walks: two documents, one at the top and one a directory
+// down, and the stand-in checker beside them. The nested one is what a blind
+// checker drops, so the walk still finds two and the checker still opens one.
+function _proseFixture() {
+  var root = _fixture("emptyset-prose", ["check-operator-prose.js"]);
+  _write(root, "README.md",
+    "# Fixture\n\nA document at the top of the tree.\n");
+  _write(root, nodePath.join("docs", "guide.md"),
+    "# Guide\n\nA document one directory down.\n");
+  _write(root, "stand-in-checker.js", PROSE_STAND_IN_SOURCE);
+  return root;
+}
+
+function _runProse(root, env) {
+  return spawnRun.runNodeScript(
+    [nodePath.join(root, "scripts", "check-operator-prose.js")], {
+      cwd: root,
+      env: Object.assign({}, process.env, {
+        BLAMEPOST_PROSE_CHECKER: nodePath.join(root, "stand-in-checker.js"),
+        // The reviewed-exception table in the gate names documents in the real
+        // repository, and this fixture is not it. `all` is the gate's own mode
+        // for a run the table was never written for, so the reconciliation is
+        // skipped and these vectors are left asking only about the count.
+        BLAMEPOST_PROSE_CHECKS:  "all",
+      }, env || {}),
+      ceilingMs: RUN_CEILING_MS,
+    });
+}
+
+// The live defect. The walk discovers both documents, the checker opens one,
+// finds nothing wrong in it, and exits 0. Every signal on that run is
+// byte-identical to a clean tree: the exit code, the empty finding list, and
+// the passing sentence. Measured on the gate before the fix: exit 0, "OK, no
+// findings in 2 operator-facing document(s)", and `EXAMINED 2
+// operator-documents`, which was the size of the list the gate HANDED OVER
+// rather than the size of the set the checker READ.
+async function aProseRunThatOpenedFewerDocumentsThanItWasHandedIsRefused() {
+  var root = _proseFixture();
+  var rv = await _runProse(root, { STAND_IN_BLIND_TO_NESTED: "1" });
+
+  count("prose: a checker that opened fewer documents than it was handed fails the gate",
+    rv.code === 4, "exit " + rv.code + ": " + tail(rv.out, 6));
+  count("prose: and both numbers are reported, so the gap is the finding",
+    /handed 2 document\(s\) and reports opening 1/.test(rv.out), tail(rv.out, 12));
+  count("prose: and it is classified as a tool failure rather than as a prose defect",
+    /not a verdict on the prose/.test(rv.out), tail(rv.out, 12));
+  count("prose: and the passing sentence is not printed above its own refusal",
+    rv.out.indexOf("OK, no findings") === -1, tail(rv.out, 12));
+  count("prose: and no count is published for a set it answered for part of",
+    examinedCounts.publishedCounts(rv.out).length === 0, tail(rv.out, 6));
+
+  // The canary still passes on that same run, which is the point of counting
+  // rather than trusting one. The gate's control document is written into the
+  // OS temp directory and arrives as an absolute path, so a checker blind to
+  // this tree still flags it and still reports its verdict as a real one.
+  count("prose: the canary reported OK on the very run that read half the tree",
+    /canary: {2}OK/.test(rv.out), tail(rv.out, 20));
+
+  helpers.removeTempDir(root);
+}
+
+// The other way the answer stops meaning what the gate takes it to mean. The
+// checker is externally versioned, so a renamed or dropped field is a TOOLING
+// incompatibility; defaulting the number to the handed count instead would be
+// the instrument answering its own question.
+async function aProseCheckerThatReportsNoReadCountIsAToolFailure() {
+  var root = _proseFixture();
+  var rv = await _runProse(root, { STAND_IN_OMIT_FILES_READ: "1" });
+
+  count("prose: an envelope carrying no read count fails the gate",
+    rv.code === 4, "exit " + rv.code + ": " + tail(rv.out, 6));
+  count("prose: and says which field it could not read",
+    /filesRead/.test(rv.out), tail(rv.out, 10));
+  count("prose: and does not fall back to the count of what it handed over",
+    rv.out.indexOf("EXAMINED 2 operator-documents") === -1, tail(rv.out, 10));
+
+  helpers.removeTempDir(root);
+}
+
+// Canary. A gate that refused every run would satisfy both vectors above and
+// would also refuse the tree it exists to admit, and the two numbers behind
+// that verdict have to be published rather than asserted.
+async function aProseRunThatOpenedEveryDocumentIsAcceptedAndCounted() {
+  var root = _proseFixture();
+  var rv = await _runProse(root, {});
+
+  count("prose: canary, a checker that opened every document still passes",
+    rv.code === 0, "exit " + rv.code + ": " + tail(rv.out, 8));
+  count("prose: canary, and both the discovered set and the read set are published",
+    /EXAMINED 2 operator-documents/.test(rv.out) &&
+    /EXAMINED 2 checker-read-documents/.test(rv.out), tail(rv.out, 6));
+  count("prose: canary, and neither is a zero the release battery would refuse",
+    examinedCounts.emptyUnits(examinedCounts.publishedCounts(rv.out)).length === 0,
+    tail(rv.out, 6));
+
+  helpers.removeTempDir(root);
+}
+
+// ---------------------------------------------------------------------------
+// The unified coverage runner
+// ---------------------------------------------------------------------------
+
+// The runner spawns two layers and merges the raw V8 coverage each one leaves
+// behind. A tree of its own, because the real one runs the whole smoke suite.
+function _coverageFixture(layers) {
+  var root = _fixture("emptyset-coverage", ["coverage-unified.js"]);
+  nodeFs.mkdirSync(nodePath.join(root, "node_modules", "c8", "bin"), { recursive: true });
+  // A c8 stand-in. The report is not what these vectors are about; what matters
+  // is that the reporter ran over the merged directory and said so.
+  _write(root, nodePath.join("node_modules", "c8", "bin", "c8.js"),
+    '"use strict";\nconsole.log("c8 stand-in: report written");\nprocess.exit(0);\n');
+  Object.keys(layers).forEach(function (rel) { _write(root, rel, layers[rel]); });
+  return root;
+}
+
+// A layer entrypoint that writes `files` raw coverage files into the directory
+// NODE_V8_COVERAGE names, then exits with `code`.
+function _coverageLayerSource(files, code) {
+  return [
+    '"use strict";',
+    'var fs = require("node:fs");',
+    'var path = require("node:path");',
+    'var dir = process.env.NODE_V8_COVERAGE;',
+    'for (var i = 0; i < ' + files + '; i += 1) {',
+    '  fs.writeFileSync(path.join(dir, "coverage-" + process.pid + "-" + i + ".json"),',
+    '    JSON.stringify({ result: [] }));',
+    '}',
+    'process.exit(' + code + ');',
+    "",
+  ].join("\n");
+}
+
+async function _runCoverage(root) {
+  var rv = await spawnRun.runNodeScript(
+    [nodePath.join(root, "scripts", "coverage-unified.js")], {
+      cwd:       root,
+      ceilingMs: RUN_CEILING_MS,
+    });
+  rv.counts = {};
+  examinedCounts.publishedCounts(rv.out).forEach(function (c) { rv.counts[c.unit] = c.n; });
+  return rv;
+}
+
+// The live defect. The integration layer is best-effort, its return value was
+// discarded, and the runner published no count of any kind. So a merged report
+// built from one layer of two was byte-identical, in everything a caller reads,
+// to one built from both, and `check-swallow-coverage` then ran its floor
+// against the narrower set and reported it clean.
+//
+// The file counts are compared between the two runs rather than pinned to a
+// literal. Each layer runs under NODE_V8_COVERAGE, so the node process running
+// it writes a coverage file of its own beside whatever the layer produced, and
+// a fixed number here would be pinning that implementation detail rather than
+// the property: a layer that did not contribute leaves its files out of the
+// merge.
+async function aCoverageRunThatMergedOneLayerOfTwoSaysSo() {
+  var bothRoot = _coverageFixture({
+    "test/smoke.js":               _coverageLayerSource(3, 0),
+    "scripts/test-integration.js": _coverageLayerSource(2, 0),
+  });
+  var both = await _runCoverage(bothRoot);
+
+  var oneRoot = _coverageFixture({
+    "test/smoke.js":               _coverageLayerSource(3, 0),
+    "scripts/test-integration.js": _coverageLayerSource(2, 1),
+  });
+  var one = await _runCoverage(oneRoot);
+
+  count("coverage: a layer that failed is named rather than left to a stderr line",
+    /did not contribute/.test(one.out) && one.out.indexOf("integration") !== -1,
+    tail(one.out, 10));
+  count("coverage: the merged layer count is published and is not the declared one",
+    one.counts["declared-coverage-layers"] === 2 && one.counts["merged-coverage-layers"] === 1,
+    JSON.stringify(one.counts));
+  count("coverage: and the failed layer's raw coverage is out of the merged set",
+    one.counts["merged-coverage-files"] > 0 &&
+    one.counts["merged-coverage-files"] < both.counts["merged-coverage-files"],
+    "one layer: " + one.counts["merged-coverage-files"] +
+      ", both layers: " + both.counts["merged-coverage-files"]);
+  count("coverage: while the run still exits clean, because that layer is best-effort",
+    one.code === 0, "exit " + one.code + ": " + tail(one.out, 8));
+
+  helpers.removeTempDir(oneRoot);
+  helpers.removeTempDir(bothRoot);
+}
+
+// The unit that catches the other direction, driven through the publisher. Both
+// layers can run and exit clean while nothing reaches the merge directory,
+// which leaves the layer counts healthy and the merged report built over
+// nothing: NODE_V8_COVERAGE stops being honored, or the fold into the shared
+// directory stops moving anything. That state cannot be constructed from a
+// fixture layer, because the node process running one writes a coverage file of
+// its own whatever the layer does, so what is asserted here is that the number
+// reaches the refusal when it comes back zero.
+function aCoverageRunThatMergedNoFileIsRefused() {
+  var out  = _sink();
+  var diag = _sink();
+  var code = examinedCounts.publish([
+    { unit: "declared-coverage-layers", n: 2 },
+    { unit: "merged-coverage-layers",   n: 2 },
+    { unit: "merged-coverage-files",    n: 0 },
+  ], { stream: out, diagnostics: diag, tag: "[fixture]" });
+
+  count("coverage: two layers that contributed no coverage file fail the run",
+    code === 1, String(code));
+  count("coverage: and the file count is the unit named as empty",
+    /REFUSED: 0 merged-coverage-files/.test(diag.text()), diag.text().slice(0, 200));
+  count("coverage: while the layers that did run are published beside it",
+    /EXAMINED 2 merged-coverage-layers/.test(out.text()), out.text());
+}
+
+// Canary. A runner that refused everything would fail the run it exists to
+// admit, and the numbers behind that verdict have to be published.
+async function aCoverageRunThatMergedBothLayersIsAcceptedAndCounted() {
+  var root = _coverageFixture({
+    "test/smoke.js":               _coverageLayerSource(3, 0),
+    "scripts/test-integration.js": _coverageLayerSource(2, 0),
+  });
+  var rv = await _runCoverage(root);
+
+  count("coverage: canary, both layers merging still passes",
+    rv.code === 0, "exit " + rv.code + ": " + tail(rv.out, 8));
+  count("coverage: canary, and all three counts are published",
+    rv.counts["declared-coverage-layers"] === 2 &&
+    rv.counts["merged-coverage-layers"] === 2 &&
+    rv.counts["merged-coverage-files"] >= 5, JSON.stringify(rv.counts));
+  count("coverage: canary, and no layer is reported as having sat out",
+    rv.out.indexOf("did not contribute") === -1, tail(rv.out, 8));
+  count("coverage: canary, and no zero the release battery would refuse is emitted",
+    examinedCounts.emptyUnits(examinedCounts.publishedCounts(rv.out)).length === 0,
+    tail(rv.out, 8));
+
+  helpers.removeTempDir(root);
+}
+
+// ---------------------------------------------------------------------------
 
 async function run() {
   theCountsThePublisherWritesAreTheCountsTheReaderReads();
@@ -793,6 +1282,7 @@ async function run() {
 
   await aReleaseTheChangelogCannotPlaceIsNamedRatherThanDropped();
   await aChangelogCheckPublishesWhatItReadAndWhatItSwept();
+  anEmptyRenderedArtifactIsRefusedEvenWithAReleaseLoaded();
 
   await anEntryWithNoBodyUnderItsHeaderIsRefused();
   await anEntryWithABodyIsAcceptedAndCounted();
@@ -801,6 +1291,7 @@ async function run() {
   await aTreeWithNoDeprecationStillWritesItsDocument();
 
   aCurrencyRunThatMeasuredNothingIsNotCurrent();
+  aFloorSweepThatWentBlindToOneDiscoveryIsRefused();
 
   await aTarballWhoseDocumentsNamedNothingIsRefused();
   await aTarballWhoseLinksResolveIsAcceptedAndCounted();
@@ -812,9 +1303,21 @@ async function run() {
   await aZeroComponentSbomIsRefusedRatherThanEmitted();
   await aManifestWithOnePackageStillBuildsItsDocument();
 
+  await aManifestRefreshThatHashedItsTreeStillPasses();
+  await aManifestRefreshOverAnEmptyPackageMapIsRefused();
+  await aManifestRefreshThatHashedNoSlotIsRefusedToo();
+
   await anEmptyLibWalkIsRefusedByTheSwallowGate();
   await aLibTreeWithNoSwallowInItIsRefusedToo();
   await aCoveredSwallowStillPasses();
+
+  await aProseRunThatOpenedEveryDocumentIsAcceptedAndCounted();
+  await aProseRunThatOpenedFewerDocumentsThanItWasHandedIsRefused();
+  await aProseCheckerThatReportsNoReadCountIsAToolFailure();
+
+  await aCoverageRunThatMergedBothLayersIsAcceptedAndCounted();
+  await aCoverageRunThatMergedOneLayerOfTwoSaysSo();
+  aCoverageRunThatMergedNoFileIsRefused();
 
   return helpers.getChecks();
 }

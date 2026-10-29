@@ -76,7 +76,7 @@ var NO_ANSWER_STATUS = "4.4.4";
 // time generally needs to be at least 4 to 5 days. Postfix ships five
 // days under `maximal_queue_lifetime`, so a receiver measures its own
 // maintenance window against days. A sender that abandons sooner turns a
-// planned outage on the far side into a permanent bounce, and an
+// scheduled outage on the far side into a permanent bounce, and an
 // operator migrating from an established MTA loses the mail that would
 // have been delivered on the other side of it.
 var RFC_5321_GIVE_UP_FLOOR_MS = helpers.b.constants.TIME.days(4);
@@ -177,8 +177,15 @@ async function aOneAttemptBudgetEndsTheMessageAndTellsTheSender(dataDir) {
     outcome.failed.length === 1 && outcome.deferred.length === 0);
   check("and what the attempt actually met is kept rather than overwritten",
     outcome.failed[0].reason.length > 0);
-  check("the sender was told rather than counted as somebody nobody could tell",
-    outcome.failed[0].dsnSent === true && delivery.describe().reportsUnsent === 0);
+  check("the report the sender is owed was composed and handed to the outbound path",
+    outcome.failed[0].dsnSent === true);
+  // A budget of one attempt applies to the report as well, because a
+  // report is a message and goes out the same way. Its first attempt is
+  // therefore also its last, so on this setting nothing this server
+  // reports on can ever be retried, and the counter says so rather than
+  // reading as a report that arrived.
+  check("and a budget this short leaves it nowhere to go, which is counted rather than assumed",
+    delivery.describe().reportsUnsent === 1);
   check("nothing is left waiting without a deadline against it",
     (await delivery.queue.held()).messages === 0);
   // The message it was about is gone, which is the whole trade: it can
@@ -222,13 +229,24 @@ async function aSpooledEntryAtTheEndOfItsBudgetEnds(dataDir) {
 // failure however large the budget is, and the entry has to leave on the
 // first attempt rather than spending a budget that cannot change it.
 async function aPeerPermanentRefusalStillEndsTheEntry(dataDir) {
-  var delivery = handleOn(dataDir, REFUSING_MX, {
-    retry: { maxAttempts: 1, backoffMs: [1000] },
+  // The recipient's domain publishes no mail exchanger and the sender's
+  // is absent from the zone, so the message is refused outright while
+  // the report about it is an ordinary transient that reaches the queue.
+  // A resolver refusing both would refuse the report as well, and the
+  // counter below would then read every report this server writes as one
+  // nobody will ever receive.
+  var delivery = handleOn(dataDir, zone.resolverOver({ "example.net": { mx: [] } }), {
+    retry: { maxAttempts: 5, backoffMs: [1000] },
   });
 
   var outcome = await sendOne(delivery);
-  check("a domain publishing the null MX is a permanent refusal",
+  check("a domain publishing no mail exchanger is a permanent refusal",
     outcome.failed.length === 1 && outcome.deferred.length === 0);
+  var waiting = await delivery.queue.list();
+  count("the refused message ends on the first attempt rather than spending a budget of five, " +
+    "so the only thing waiting is the report about it",
+  waiting.length === 1 && waiting[0].recipient === "alice@example.com",
+  JSON.stringify(waiting.map(function (row) { return row.recipient; })));
   check("the sender was told about it",
     outcome.failed[0].dsnSent === true);
   check("and nothing is counted as a report this server could not send",

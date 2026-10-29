@@ -1,0 +1,1 @@
+{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"],"methodCalls":[["Email/set",{"accountId":"a1","destroy":["m1","m2"]},"c0"]]}

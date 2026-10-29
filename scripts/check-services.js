@@ -38,12 +38,54 @@
  *     on 25 is a real misconfiguration and it is one this row can see.
  *   - The browser surface answers its health path with the running build's
  *     version, which is compared against package.json. A stranger cannot
- *     produce it, and a stale copy of this server produces the wrong one,
- *     which is the case a name check alone would miss.
+ *     produce it, and a copy of this server built at another version produces
+ *     the wrong one, which is the case a name check alone would miss.
  *
  * An implicit-TLS port is therefore a handshake AND the greeting behind it. A
  * handshake alone proves that something completed TLS, which every reverse
  * proxy, load balancer and terminator on the machine also does.
+ *
+ * ## Neither of those signals says which PROCESS answered
+ *
+ * A greeting says which software. A version says which build. Between two
+ * processes running the SAME build there is nothing on the wire to tell
+ * apart, and that pair is the ordinary state of a developer machine rather
+ * than an exotic one. Measured here: a blamepost started a week earlier held
+ * 25, 143, 465, 587 and 4190; the tree under test had not been version-bumped
+ * since. This gate probed the five mail rows and reported that five endpoints
+ * answered as blamepost 0.1.0. All five were the older process, and the one
+ * row carrying a build signal was the only row it did not hold.
+ *
+ * So every REQUIRED row is attributed to the process holding its port, read
+ * out of the operating system's own listening-socket table by
+ * scripts/listening-owners.js, and every required row has to resolve to ONE
+ * process:
+ *
+ *   - The reference is BLAMEPOST_SERVICE_PID when the caller that started the
+ *     server names it. Otherwise it is the process holding the browser
+ *     surface's port, which is the row that proved the build. Otherwise it is
+ *     the single process the required rows share, and required rows split
+ *     across two processes are refused rather than resolved by picking.
+ *   - A required row on a port a different process holds is refused, naming
+ *     both process ids and both ports.
+ *   - A required row on a port this machine's socket table does not carry is
+ *     refused as unattributed. That is what a server on another host looks
+ *     like, and it is also what a port forwarded here on behalf of a process
+ *     somewhere else looks like from outside.
+ *
+ * A published container port is the case this reads least well: the table
+ * names the forwarder that holds the port on this host, so every row resolves
+ * to the same forwarder and the coherence question is answered about it
+ * rather than about the server behind it. The build comparison on the browser
+ * surface is what still carries there, and BLAMEPOST_SERVICE_PID does not
+ * apply from outside a container at all.
+ *
+ * `BLAMEPOST_SERVICE_PROCESS_CHECK=off` is the written declaration that turns
+ * the attribution off, spelled exactly, for a run against a host whose
+ * processes this machine cannot see. It prints a banner saying which rows
+ * went unattributed, so the transcript carries the record of what was not
+ * checked. Absence of the socket table is NOT that declaration: a tool that
+ * is missing refuses the run.
  *
  * ## Where the ports come from
  *
@@ -76,14 +118,26 @@
  *                                       that moved a mail port or for a test
  *                                       pointing this gate at a fixture.
  *   BLAMEPOST_SERVICE_PROBE_TIMEOUT_MS  per-probe timeout. Default 4000.
+ *   BLAMEPOST_SERVICE_PID               the process id of the server under
+ *                                       test, when the caller that started it
+ *                                       knows one. Every required row must
+ *                                       resolve to it.
+ *   BLAMEPOST_SERVICE_PROCESS_CHECK     "off" is the written declaration that
+ *                                       this run cannot see the processes
+ *                                       holding the ports it probes. It
+ *                                       prints a banner and leaves the rows
+ *                                       unattributed.
  *
  * Exit codes:
- *   0  every required listener answered and was identified as this server
- *   1  one or more required listeners are down or unidentified (table printed)
+ *   0  every required listener answered, was identified as this server, and
+ *      resolved to one process
+ *   1  one or more required listeners are down, unidentified, or held by a
+ *      process that is not the one under test (table printed)
  *   2  the gate itself could not run, or ran and identified nothing: an unknown
  *      service name, an unreadable override, a filter combination that left no
- *      endpoint to probe, or a probe list of optional listeners that were all
- *      absent. None of those is a stack that is up, and a run that contacted no
+ *      endpoint to probe, a probe list of optional listeners that were all
+ *      absent, or no way on this machine to say which process holds a port.
+ *      None of those is a stack that is up, and a run that contacted no
  *      listener must not clear the suite behind it to start.
  *
  * Usage:
@@ -101,7 +155,8 @@ var tls  = require("node:tls");
 
 var pkg = require("../package.json");
 
-var examinedCounts = require("./examined-counts.js");
+var examinedCounts  = require("./examined-counts.js");
+var listeningOwners = require("./listening-owners.js");
 
 // ---------------------------------------------------------------------------
 // What only this server says
@@ -160,6 +215,15 @@ var BASE_SERVICES = [
   { name: "http",        port: 8080, kind: "http",        label: "GET /healthz",           group: "plain", required: true,
     httpPath: "/healthz", portEnv: "BLAMEPOST_HTTP_PORT" },
 
+  // Required, and it sat with the optional rows until this was measured.
+  // `serve` refuses to start without a certificate and key, so a running
+  // server always has this port bound, and the browser surface takes a
+  // password here and nowhere else. Left optional, a TLS bind that failed
+  // drew no finding, which is a gate answering about the one port an
+  // operator signs in on by not looking at it.
+  { name: "https",       port: 8443, kind: "https",       label: "TLS + GET /healthz",     group: "tls",   required: true,
+    httpPath: "/healthz", portEnv: "BLAMEPOST_HTTPS_PORT" },
+
   // Not bound by this server. Present so an operator who put a terminator in
   // front of a mailbox listener can see what is behind it, and absent is the
   // shipped configuration rather than a fault.
@@ -168,8 +232,6 @@ var BASE_SERVICES = [
   // Off by default. Their absence is the shipped configuration, not a fault.
   { name: "pop3",        port:  110, kind: "pop3",        label: "POP3 +OK greeting",      group: "plain", required: false },
   { name: "pop3s",       port:  995, kind: "pop3s",       label: "implicit TLS + POP3",    group: "tls",   required: false },
-  { name: "https",       port: 8443, kind: "https",       label: "TLS + GET /healthz",     group: "tls",   required: false,
-    httpPath: "/healthz", portEnv: "BLAMEPOST_HTTPS_PORT" },
 ];
 
 function _hosts() {
@@ -556,6 +618,191 @@ function _padEnd(s, w) {
   return s.length >= w ? s : s + new Array(w - s.length + 1).join(" ");
 }
 
+// ---------------------------------------------------------------------------
+// Which process answered
+// ---------------------------------------------------------------------------
+
+// The declaration that turns the attribution off, spelled exactly. Anything
+// else in the variable, including an empty string and including a spelling
+// somebody expected to work, leaves the check on: a switch that a typo turns
+// off is a switch that is off on the machine that most needed it.
+var PROCESS_CHECK_OFF = "off";
+
+function _processCheckDeclaredOff() {
+  return String(process.env.BLAMEPOST_SERVICE_PROCESS_CHECK || "").trim() === PROCESS_CHECK_OFF;
+}
+
+// The process the caller that started the server says it started. Bad input
+// stops the gate rather than being ignored, for the reason the port override
+// does: a value nobody could read would silently leave the reference to be
+// derived, and the run would report on whatever coherence it found.
+function _pinnedPid() {
+  var raw = process.env.BLAMEPOST_SERVICE_PID;
+  if (typeof raw !== "string" || raw.trim().length === 0) return null;
+  var pid = Number(raw.trim());
+  if (!Number.isInteger(pid) || pid < 1) {
+    var err = new Error("BLAMEPOST_SERVICE_PID must be the process id of the server under test, " +
+      "got " + JSON.stringify(raw));
+    err.gateInput = true;
+    throw err;
+  }
+  return pid;
+}
+
+function _ownersOf(byPort, port) {
+  return Object.prototype.hasOwnProperty.call(byPort, port) ? byPort[port] : [];
+}
+
+// Whether this machine's socket table can answer for the row at all.
+//
+// A port number is not a global name. Probing another host's 8080 while
+// something unrelated holds 8080 here would attribute the row to a local
+// process that never saw the connection, and the answer would be confident
+// and wrong in whichever direction the local port happened to fall. So a row
+// aimed anywhere but this machine is not attributed, which the caller reports
+// as a row it could not tie to a process.
+function _isThisMachine(host) {
+  var name = String(host).trim().toLowerCase();
+  if (name === "localhost" || name === "::1" || name === "0.0.0.0" || name === "::") return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(name);
+}
+
+// The one process every required row has to resolve to.
+//
+// Three sources, in falling order of how much they know. A pin is the caller
+// stating it. The browser surface is the row that read a build, so the
+// process holding it is the process whose build was compared. Failing both,
+// the required rows have to agree among themselves, and rows split across two
+// processes are an answer rather than a tie to break: that split IS the stale
+// listener holding half the stack.
+function _referenceFor(entries, byPort, pinned) {
+  if (pinned !== null) return { pid: pinned, from: "BLAMEPOST_SERVICE_PID" };
+
+  var http = entries.filter(function (e) {
+    return e.svc.required && (e.svc.kind === "http" || e.svc.kind === "https") &&
+           e.result.ok && _isThisMachine(e.svc.host);
+  });
+  for (var i = 0; i < http.length; i += 1) {
+    var held = _ownersOf(byPort, http[i].svc.port);
+    if (held.length === 1) {
+      return { pid: held[0], from: "the browser surface on " + http[i].svc.port };
+    }
+  }
+
+  var seen = [];
+  var ports = [];
+  entries.forEach(function (e) {
+    if (!e.svc.required || !e.result.ok || !_isThisMachine(e.svc.host)) return;
+    _ownersOf(byPort, e.svc.port).forEach(function (pid) {
+      if (seen.indexOf(pid) === -1) { seen.push(pid); ports.push(e.svc.port); }
+    });
+  });
+  if (seen.length === 1) return { pid: seen[0], from: "the only process holding a required port" };
+  if (seen.length === 0) {
+    return {
+      pid:  null,
+      from: null,
+      reason: "no required row's port appears in this machine's listening-socket table, so " +
+              "nothing here says which process answered. That is what a server on another host " +
+              "looks like from here.",
+    };
+  }
+  return {
+    pid:  null,
+    from: null,
+    reason: "the required rows are held by " + seen.length + " different processes (" +
+            seen.map(function (pid, k) { return "pid " + pid + " on " + ports[k]; }).join(", ") +
+            ") and no browser-surface row and no BLAMEPOST_SERVICE_PID says which of them is " +
+            "the server under test. A stack split across two processes is the finding.",
+  };
+}
+
+// Fold the attribution into the probe results. A row the reference process
+// does not hold stops being an OK row, because a row that answered correctly
+// on somebody else's port is exactly the reading this gate exists to refuse.
+async function attributeToOneProcess(entries) {
+  if (_processCheckDeclaredOff()) {
+    return { checked: false, declaredOff: true, reference: null, attributed: 0, reason: null };
+  }
+
+  var pinned = _pinnedPid();
+  var table  = await listeningOwners.owners();
+  if (!table.ok) {
+    return {
+      checked: false, declaredOff: false, reference: null, attributed: 0, reason: table.reason,
+    };
+  }
+
+  var reference = _referenceFor(entries, table.byPort, pinned);
+  var attributed = 0;
+
+  entries.forEach(function (entry) {
+    if (!entry.result.ok) return;
+
+    if (!_isThisMachine(entry.svc.host)) {
+      entry.result = {
+        ok: false,
+        reason: "answered on " + entry.svc.host + ", which is not this machine, so nothing " +
+                "here says which process it was. A port number is not a global name and the " +
+                "local process holding " + entry.svc.port + " is a different socket entirely. " +
+                "Run this gate on the host the server runs on, or set " +
+                "BLAMEPOST_SERVICE_PROCESS_CHECK=off and have that said in the transcript.",
+      };
+      return;
+    }
+
+    var held = _ownersOf(table.byPort, entry.svc.port);
+
+    if (reference.pid === null) {
+      entry.result = { ok: false, reason: "unattributed: " + reference.reason };
+      return;
+    }
+    if (held.length === 0) {
+      entry.result = {
+        ok: false,
+        reason: "answered, and no process on this machine is listening on " + entry.svc.port +
+                " according to " + table.source + ". Something reachable from here holds it on " +
+                "another host, so this run cannot say it is the server under test (pid " +
+                reference.pid + ").",
+      };
+      return;
+    }
+    if (held.length > 1) {
+      entry.result = {
+        ok: false,
+        reason: "port " + entry.svc.port + " is held by more than one process (" +
+                held.join(", ") + "), so which of them answered is not decided here.",
+      };
+      return;
+    }
+    if (held[0] !== reference.pid) {
+      entry.result = {
+        ok: false,
+        reason: "this is a DIFFERENT PROCESS. Port " + entry.svc.port + " is held by pid " +
+                held[0] + " and the server under test is pid " + reference.pid + " (" +
+                reference.from + "). It speaks the protocol and reports the name because it is " +
+                "another copy of this software, which is what a server left running from an " +
+                "earlier session looks like.",
+      };
+      return;
+    }
+    attributed += 1;
+    entry.result = Object.assign({}, entry.result, {
+      detail: "pid " + held[0] + (entry.result.detail ? "  " + entry.result.detail : ""),
+    });
+  });
+
+  return {
+    checked:     true,
+    declaredOff: false,
+    reference:   reference.pid,
+    from:        reference.from,
+    source:      table.source,
+    attributed:  attributed,
+    reason:      reference.pid === null ? reference.reason : null,
+  };
+}
+
 async function main() {
   var args = process.argv.slice(2);
   var skipTls      = args.indexOf("--plain")    !== -1;
@@ -624,6 +871,30 @@ async function main() {
     });
   }));
 
+  // What answered is decided above, from the wire. WHO answered is decided
+  // here, from this machine's socket table, and a row the two disagree about
+  // stops being an OK row before the report is written.
+  var attribution;
+  try { attribution = await attributeToOneProcess(results); }
+  catch (err) {
+    if (!err.gateInput) throw err;
+    console.error("[check-services] " + err.message);
+    process.exit(2);
+    return;
+  }
+
+  if (attribution.declaredOff) {
+    console.log("[check-services] BLAMEPOST_SERVICE_PROCESS_CHECK=off: no row below is " +
+                "attributed to a process. A greeting says which software answered and a " +
+                "version says which build, and neither of them separates two processes " +
+                "running the same build. This run does not answer whether these listeners " +
+                "belong to the server under test.");
+  } else if (attribution.checked && attribution.reference !== null) {
+    console.log("[check-services] the server under test is pid " + attribution.reference +
+                " (" + attribution.from + "), read from " + attribution.source +
+                ". Every required row has to be held by it.");
+  }
+
   var down = 0;
   var optionalDown = 0;
   var identified = 0;
@@ -668,7 +939,17 @@ async function main() {
   // answered as this server is the same finding whether a required row failed
   // or no required row was probed at all.
   var verdict;
-  if (down === 0 && identified === 0) {
+  if (!attribution.checked && !attribution.declaredOff) {
+    console.error("[check-services] " + attribution.reason);
+    console.error("[check-services] every row above answered a protocol, and none of them is " +
+                  "attributed to a process. A greeting is what a copy of this server left " +
+                  "running from an earlier session also sends, so a run that cannot name the " +
+                  "process behind a port cannot say the stack under test is up.");
+    console.error("[check-services] install the system's listening-socket tool, or set " +
+                  "BLAMEPOST_SERVICE_PROCESS_CHECK=off to probe without it and have that said " +
+                  "in the transcript.");
+    verdict = 2;
+  } else if (down === 0 && identified === 0) {
     console.error("[check-services] no endpoint answered AS blamepost " + EXPECTED_VERSION +
                   ", and no required endpoint was probed to say so" +
                   (optionalDown > 0 ? " (" + optionalDown + " optional listener(s) absent)" : "") + ".");
@@ -680,6 +961,9 @@ async function main() {
   } else if (down === 0) {
     console.log("[check-services] " + identified + " endpoint(s) answered AS blamepost " +
                 EXPECTED_VERSION +
+                (attribution.checked && attribution.reference !== null
+                  ? ", " + attribution.attributed + " of them held by pid " + attribution.reference
+                  : ", none of them attributed to a process") +
                 (optionalDown > 0 ? " (" + optionalDown + " optional listener(s) absent)" : ""));
     verdict = 0;
   } else {
@@ -691,15 +975,25 @@ async function main() {
     console.error("[check-services] a port answered by something else is usually another stack:");
     console.error("  check what already holds it, and move this server's ports with " +
                   "BLAMEPOST_HTTP_PORT / BLAMEPOST_HTTPS_PORT (this gate follows them).");
+    console.error("[check-services] a port answered by THIS software at another process id is " +
+                  "a server left running from an earlier session:");
+    console.error("  find what holds the port and stop it, or move this run's ports with " +
+                  "BLAMEPOST_SERVICE_PORTS.");
     verdict = 1;
   }
 
   // Last, after every line of the report, because the counts are read from
-  // the end of what a gate printed. Two units, because they empty for
-  // different reasons and only one of them is about the wire: a probe list
-  // its own filters emptied never reached a socket, and a list that reached
-  // every socket while nothing answered as this server reached the wire and
-  // proved nothing about who was on it.
+  // the end of what a gate printed. Three units, because they empty for three
+  // different reasons and each is a different part of the question:
+  //
+  //   - `probed-endpoints` empties when the filters left no row, which never
+  //     reached a socket at all.
+  //   - `identified-endpoints` empties when every socket was reached and
+  //     nothing on the other end said what this server says.
+  //   - `attributed-endpoints` empties when the rows said what this server
+  //     says and none of them could be tied to the process under test, which
+  //     is the reading a copy of this server left running from an earlier
+  //     session produces and the one the first two units cannot see.
   //
   // The verdict is not overwritten by the publish. A required listener that
   // is down is exit 1 and a run that identified nothing is exit 2, and those
@@ -709,6 +1003,17 @@ async function main() {
   var published = examinedCounts.publish([
     { unit: "probed-endpoints",     n: targets.length },
     { unit: "identified-endpoints", n: identified },
+    {
+      unit:   "attributed-endpoints",
+      n:      attribution.attributed,
+      zeroIs: attribution.declaredOff
+        ? "BLAMEPOST_SERVICE_PROCESS_CHECK=off was set for this run, which is the written " +
+          "statement that the processes holding these ports are not visible from here, so no " +
+          "row was attributed to one and zero is the whole of what that declaration produces. " +
+          "identified-endpoints beside it is refused at zero and is what proves this run " +
+          "reached the wire at all."
+        : undefined,
+    },
   ], { tag: "[check-services]" });
 
   process.exit(verdict !== 0 ? verdict : published);

@@ -135,6 +135,7 @@ var nodePath   = require("node:path");
 
 var helpers = require("../helpers");
 var foreign = require("../helpers/foreign-client");
+var clients = require("./clients");
 
 var count = helpers.count;
 
@@ -281,14 +282,13 @@ function readConfig() {
 // version banner. A curl without IMAP is on the path, answers
 // `--version`, and cannot open a mailbox, so the capability is read out
 // of what it says about itself rather than assumed from the name.
-var CURL = {
-  name:            "curl",
-  envVar:          "BLAMEPOST_CURL_BIN",
-  candidates:      ["curl"],
-  probeArgs:       ["--version"],
-  requireInOutput: /^Protocols:.*\bimaps?\b/m,
-  timeoutMs:       CLIENT_TIMEOUT_MS,
-};
+//
+// Claimed from the suite's table rather than written out here, because
+// scripts/test-integration.js reads that table to say how many of the
+// clients this file needs it actually located. A specification kept
+// here as well would let the runner report on a different program than
+// the one this file went on to drive.
+var CURL = clients.spec("curl-imap");
 
 // The IMAP URL this run addresses, RFC 5092. `;UID=` names the message
 // and `;PARTIAL=<start>.<count>` names a window of it in octets, which
@@ -606,30 +606,30 @@ async function aWalkByTheCountsGivenRebuildsTheMessage(cfg, client, uid, workDir
       into:   nodePath.join(workDir, "walk-" + at + ".bin"),
     };
   }
-  var planned = [];
-  for (var at = 0; at < MESSAGE.length && planned.length < WALK_CEILING; at += WALK_WINDOW) {
-    planned.push(window(at));
+  var windows = [];
+  for (var at = 0; at < MESSAGE.length && windows.length < WALK_CEILING; at += WALK_WINDOW) {
+    windows.push(window(at));
   }
   // The window a walk asks for after it has consumed the message. It is
-  // planned explicitly rather than left to the stride, which lands on it
+  // added explicitly rather than left to the stride, which lands on it
   // only when the window size happens to divide the message: with a
   // stride that does not, the loop above stops one window short and the
   // case that proves the walk terminates would be reading the tail of
   // the message instead.
-  planned.push(window(MESSAGE.length));
-  count("the walk is bounded rather than planned forever",
-    planned.length < WALK_CEILING,
-    planned.length + " windows of " + WALK_WINDOW + " octets over " + MESSAGE.length);
+  windows.push(window(MESSAGE.length));
+  count("the walk asks for a bounded number of windows rather than walking forever",
+    windows.length < WALK_CEILING,
+    windows.length + " windows of " + WALK_WINDOW + " octets over " + MESSAGE.length);
 
-  var got = await fetchWindows(cfg, client, planned);
+  var got = await fetchWindows(cfg, client, windows);
   count("every window of the walk is answered in one session",
     got.rv.code === 0, said(got.rv));
 
   var pieces = [];
   var walked = 0;
   var offGrid = null;
-  for (var i = 0; i < planned.length; i += 1) {
-    if (planned[i].at !== walked) { offGrid = { step: i, expected: walked, asked: planned[i].at }; break; }
+  for (var i = 0; i < windows.length; i += 1) {
+    if (windows[i].at !== walked) { offGrid = { step: i, expected: walked, asked: windows[i].at }; break; }
     if (got.bytes[i].length === 0) break;
     pieces.push(got.bytes[i]);
     walked += got.bytes[i].length;
@@ -644,7 +644,7 @@ async function aWalkByTheCountsGivenRebuildsTheMessage(cfg, client, uid, workDir
     walked === MESSAGE.length, "walked to " + walked + ", message is " + MESSAGE.length);
   count("the window past the end of the message is empty",
     got.bytes[got.bytes.length - 1].length === 0,
-    "last window at " + planned[planned.length - 1].at + " returned " +
+    "last window at " + windows[windows.length - 1].at + " returned " +
       got.bytes[got.bytes.length - 1].length + " octets");
 
   var rebuilt = Buffer.concat(pieces);

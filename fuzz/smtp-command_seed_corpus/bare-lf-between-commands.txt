@@ -1,0 +1,2 @@
+EHLO peer.example.net
+MAIL FROM:<alice@example.com>

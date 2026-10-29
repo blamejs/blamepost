@@ -173,8 +173,28 @@ function theTerminatorConfigurationConsumesTheVariable(repoRoot) {
     "never sets the variable still resolves to one port",
     upstream !== null && parseInt(upstream[1], 10) === DEFAULT_PORT,
     upstream && upstream[1]);
-  count("the terminator health path is the endpoint the container probe also asks",
-    /health_uri\s+\/healthz/.test(text));
+  // The claim the file makes about itself, held against the file it
+  // makes the claim about rather than against a path written here. A
+  // literal pinned in this test agrees with the Caddyfile and says
+  // nothing about the image, so the two could be moved apart one at a
+  // time with this check still green, which is the state the comment in
+  // the Caddyfile was already in: it named the readiness endpoint while
+  // configuring the liveness one, and the assertion agreed with the
+  // configuration and not with the sentence.
+  var terminatorPath = /health_uri\s+(\/\S+)/.exec(text);
+  var dockerfile = nodeFs.readFileSync(nodePath.join(repoRoot, "Dockerfile"), "utf8");
+  var probePath = /HEALTHCHECK[\s\S]*?127\.0\.0\.1[^\n]*?(\/[a-z]+)'\)/.exec(dockerfile);
+  count("the terminator names a health path at all",
+    terminatorPath !== null, text.slice(0, 200));
+  count("the image's own probe names one too, so there is something to compare it against",
+    probePath !== null, dockerfile.slice(dockerfile.indexOf("HEALTHCHECK"), 400));
+  count("and the two are the same endpoint, which is what the terminator's configuration " +
+    "says of itself",
+    terminatorPath !== null && probePath !== null && terminatorPath[1] === probePath[1],
+    JSON.stringify({
+      terminator: terminatorPath && terminatorPath[1],
+      probe:      probePath && probePath[1],
+    }));
 }
 
 function theHardeningPostureIsDeclared(seen) {

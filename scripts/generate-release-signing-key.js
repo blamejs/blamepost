@@ -136,7 +136,7 @@ function _identify(doc) {
 }
 
 /**
- * _rotationPlan(pubPath, argv) decides what this run may do, BEFORE any
+ * _rotationDecision(pubPath, argv) decides what this run may do, BEFORE any
  * key material exists. Settling it first is the point: a run that mints a
  * keypair and then declines to write it has still produced private bytes
  * and put them in a process that was never supposed to hold any.
@@ -149,7 +149,7 @@ function _identify(doc) {
  * Pure apart from reading the path, and exported, so the refusals are
  * provable against a temporary directory without generating anything.
  */
-function _rotationPlan(pubPath, argv) {
+function _rotationDecision(pubPath, argv) {
   var wantsRotate = (argv || []).indexOf("--rotate") !== -1;
 
   if (!fs.existsSync(pubPath)) {
@@ -211,7 +211,7 @@ function _rotationPlan(pubPath, argv) {
  * @opts
  *   publicKey:   string,  // base64url raw public key
  *   fingerprint: string,  // SHA3-512 over the raw public key
- *   plan:        object,  // the decision from _rotationPlan
+ *   decision:    object,  // the result of _rotationDecision
  */
 function _publicKeyDocument(opts) {
   opts = opts || {};
@@ -222,11 +222,11 @@ function _publicKeyDocument(opts) {
     createdAt:            new Date().toISOString().slice(0, 10),
     rotation_note:        ROTATION_NOTE,
   };
-  var plan = opts.plan || {};
-  if (plan.action === "rotate" && plan.replacing) {
+  var decision = opts.decision || {};
+  if (decision.action === "rotate" && decision.replacing) {
     doc.replaces = {
-      fingerprint_sha3_512: plan.replacing.fingerprint,
-      createdAt:            plan.replacing.createdAt,
+      fingerprint_sha3_512: decision.replacing.fingerprint,
+      createdAt:            decision.replacing.createdAt,
       note: "Releases signed before this rotation verify only against the retired key. " +
         "Recover it with: git log -p keys/release-pqc-pub.json",
     };
@@ -246,9 +246,9 @@ function main() {
 
   // Settled before anything is generated. Nothing below this point runs on
   // a refusal, so a refused run leaves no key material anywhere.
-  var plan = _rotationPlan(pubPath, process.argv);
-  if (plan.action === "refuse") {
-    process.stderr.write("[generate-release-signing-key] refused: " + plan.reason + "\n");
+  var decision = _rotationDecision(pubPath, process.argv);
+  if (decision.action === "refuse") {
+    process.stderr.write("[generate-release-signing-key] refused: " + decision.reason + "\n");
     process.exit(1);
     return;
   }
@@ -259,7 +259,7 @@ function main() {
   } catch (e) {
     process.stderr.write("[generate-release-signing-key] node:crypto ML-DSA-65 keygen failed: " +
       ((e && e.message) || e) + "\n");
-    process.stderr.write("[generate-release-signing-key] ML-DSA requires the engine floor (Node >=24.19.0, OpenSSL 3.5).\n");
+    process.stderr.write("[generate-release-signing-key] ML-DSA requires the engine floor (Node >=24.22.1, OpenSSL 3.5).\n");
     process.exit(1);
     return;
   }
@@ -280,7 +280,7 @@ function main() {
   var pubJson = _publicKeyDocument({
     publicKey:   b64url(pubBytes),
     fingerprint: fingerprint,
-    plan:        plan,
+    decision:    decision,
   });
 
   fs.mkdirSync(path.dirname(pubPath), { recursive: true });
@@ -289,10 +289,10 @@ function main() {
   process.stderr.write("\n=== ML-DSA-65 release-signing keypair (node:crypto, FIPS 204) ===\n\n");
   process.stderr.write("Public key written to: " + pubPath + "\n");
   process.stderr.write("Fingerprint (SHA3-512): " + fingerprint + "\n");
-  if (plan.action === "rotate") {
-    process.stderr.write("Retired fingerprint:    " + plan.replacing.fingerprint + "\n");
+  if (decision.action === "rotate") {
+    process.stderr.write("Retired fingerprint:    " + decision.replacing.fingerprint + "\n");
     process.stderr.write("Retired key created:    " +
-      (plan.replacing.createdAt || "not recorded") + "\n");
+      (decision.replacing.createdAt || "not recorded") + "\n");
     process.stderr.write("\nEvery release signed before now verifies only against the retired\n");
     process.stderr.write("key. Recover it with: git log -p keys/release-pqc-pub.json\n");
   }
@@ -318,7 +318,7 @@ module.exports = {
   _identify:          _identify,
   _publicKeyDocument: _publicKeyDocument,
   _pubPathFrom:       _pubPathFrom,
-  _rotationPlan:      _rotationPlan,
+  _rotationDecision:  _rotationDecision,
 };
 
 if (require.main === module) {

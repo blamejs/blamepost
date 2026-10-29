@@ -1,0 +1,22 @@
+From: alice@example.com
+To: bob@example.net
+Subject: With an attachment
+Date: Sat, 23 Aug 2026 12:00:00 +0000
+Message-ID: <attached@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mix-boundary-1"
+
+--mix-boundary-1
+Content-Type: text/plain; charset=us-ascii
+
+See attached.
+
+--mix-boundary-1
+Content-Type: application/pdf; name="=?utf-8?Q?report=2Epdf?="
+Content-Disposition: attachment; filename*=UTF-8''report%2Epdf
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJcfsj6IKMSAwIG9iago8PC9UeXBlL0NhdGFsb2c+PgplbmRvYmoKdHJhaWxl
+cgo8PC9Sb290IDEgMCBSPj4KJSVFT0YK
+
+--mix-boundary-1--

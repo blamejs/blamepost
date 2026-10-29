@@ -86,6 +86,19 @@ var MESSAGE_CAP_BYTES = 65536;
 var RCPT_FAILURE_CAP       = 6;
 var FRAMEWORK_RCPT_DEFAULT = 50;
 
+// The trickle. One octet every four hundred milliseconds is two and a
+// half bytes a second, against a floor of a hundred, so the rate is
+// nowhere near a judgement call. The literal is announced large enough
+// that arriving in full would take a quarter of an hour at that rate,
+// which is what makes the size irrelevant to the verdict: the listener
+// has to answer on the rate long before the octets could run out.
+var TRICKLE_OCTETS      = 4000;
+var TRICKLE_INTERVAL_MS = 400;
+// The case's own ceiling, separate from the floor's measurement window.
+// It exists so a listener that holds the connection fails this case
+// rather than inheriting the hang it was written to catch.
+var TRICKLE_CEILING_MS  = 30000;
+
 // A list that expands wider than that ceiling, every address on it
 // live. The width is the point: a ceiling smaller than the recipient
 // count must not touch a message whose recipients all exist.
@@ -424,6 +437,65 @@ async function anOversizedLiteralIsRefusedOnItsAnnouncement(port, caPem, address
   session.close();
 }
 
+// A peer that never stops sending, and never really sends, is the case
+// an idle timer cannot reach: every arriving byte pushes the deadline
+// out again, so a connection trickling one octet at a time is held for
+// as long as the peer likes while the timer reports it as active. The
+// byte-rate floor is the bound that answers it, and it is the one that
+// applies to a literal rather than to a message body.
+//
+// The literal here is announced on `LOGIN`, which is the one command a
+// peer may carry a literal into before authenticating, so what this
+// measures is the exposure that does not require an account.
+async function aLiteralArrivingBelowTheFloorIsCut(port, caPem) {
+  var session = await Wire.connect(port, "imap-trickle");
+  await session.read(/^\* OK/m, "greeting");
+  session.send("a0 STARTTLS");
+  await session.read(/^a0 OK/m, "STARTTLS accepted");
+  await session.upgrade(caPem, HOSTNAME);
+
+  // Four thousand octets announced, and the continuation invited.
+  session.send("a1 LOGIN {4000}");
+  var invited = await session.read(/^(\+|a1 (NO|BAD)|\* BAD)/m, "literal announcement answered");
+  count("a literal a client may send before authenticating is invited",
+    /^\+/m.test(invited), visible(invited));
+  if (!/^\+/m.test(invited)) { session.close(); return; }
+
+  // One octet every 400ms is two and a half bytes a second, against a
+  // floor of a hundred. Nothing here waits a fixed budget: the trickle
+  // runs until the listener answers, and the assertion is on what it
+  // said.
+  var stopped = false;
+  var sent = 0;
+  var ticker = setInterval(function () {
+    if (stopped || sent >= TRICKLE_OCTETS) return;
+    try { session.sendRaw("x", "<one octet>"); sent += 1; }
+    catch (_e) { stopped = true; }
+  }, TRICKLE_INTERVAL_MS);
+
+  try {
+    await helpers.waitUntil(function () {
+      return /BYE/.test(session.buf) || session.socket.destroyed;
+    }, {
+      timeoutMs: TRICKLE_CEILING_MS,
+      label:     "listener bounds: a literal below the byte-rate floor is cut",
+    });
+  } finally {
+    stopped = true;
+    clearInterval(ticker);
+  }
+
+  count("a literal arriving below the byte-rate floor is cut rather than held, " +
+    "which is the bound an idle timer cannot give because every octet resets it",
+    /BYE/.test(session.buf), visible(session.buf.slice(-160)));
+  count("and the peer is told why rather than having the socket vanish",
+    /rate/i.test(session.buf), visible(session.buf.slice(-160)));
+  count("well before the announced literal could have arrived, so the bound is " +
+    "the rate rather than the size", sent < TRICKLE_OCTETS, String(sent));
+
+  session.close();
+}
+
 // ---- runner ----------------------------------------------------------------
 
 async function run() {
@@ -526,6 +598,7 @@ async function run() {
       sections.mx.port, leaf.ca, live);
     await anEndlessCommandLineIsRefusedWhileItIsStillBeingRead(ports.imap);
     await anOversizedLiteralIsRefusedOnItsAnnouncement(ports.imap, leaf.ca, alice.address);
+    await aLiteralArrivingBelowTheFloorIsCut(ports.imap, leaf.ca);
     await theOperatorsConnectionCeilingIsTheOneThatApplies(ports);
 
     await server.stop({ timeoutMs: SHUTDOWN_TIMEOUT_MS });

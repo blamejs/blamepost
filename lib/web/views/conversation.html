@@ -7,17 +7,17 @@
 <section class="pane">
   <header class="pane-head pane-head-thread">
     <div>
-      <p class="crumb"><a href="{{ backHref }}">Back to {{ folder.label }}</a></p>
+      <p class="crumb"><a href="/{{ backHref }}">Back to {{ folder.label }}</a></p>
       <h1 class="pane-title">{{ subject }}</h1>
       {% if isThread %}<p class="pane-sub">{{ threadCount }} messages in this conversation</p>{% endif %}
     </div>
   </header>
 
   <div class="threadbar" role="group" aria-label="Actions for this conversation">
-    <a class="btn btn-primary" href="{{ replyHref }}">Reply</a>
-    <a class="btn" href="{{ replyAllHref }}">Reply to all</a>
-    <a class="btn" href="{{ forwardHref }}">Forward</a>
-    <form method="post" action="{{ actionPath }}" class="inline-form">
+    <a class="btn btn-primary" href="/{{ replyHref }}">Reply</a>
+    <a class="btn" href="/{{ replyAllHref }}">Reply to all</a>
+    <a class="btn" href="/{{ forwardHref }}">Forward</a>
+    <form method="post" action="/{{ actionHref }}" class="inline-form">
       <input type="hidden" name="_csrf" value="{{ csrfToken }}">
       <input type="hidden" name="objectId" value="{{ objectId }}">
       <button type="submit" name="action" value="flag" class="btn">Flag</button>
@@ -51,9 +51,29 @@
         {{ m.blockedCount }} images are held back in this message. One that loads from
         another server tells the sender it was opened, and from where.
       </p>
-      <a class="btn" href="{{ m.imagesHref }}">Show them</a>
+      <a class="btn" href="/{{ m.imagesHref }}">Show them</a>
     </div>
     {% endif %}
+    {% if m.partCount %}
+    <div class="partbar">
+      <p class="parts-head">{{ m.partsLabel }}</p>
+      <ul class="part-list">
+        {% for p in m.parts %}
+        <li class="part-row">
+          <a class="part-link" href="/{{ p.href }}"><span class="part-name">{{ p.name }}</span></a>
+          <span class="part-type">{{ p.type }}</span>
+          <span class="part-size">{{ p.size }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      <p class="fineprint">
+        Each file is handed back as bytes to save rather than as a page. What the sender
+        called it is shown above; what the download is named may differ, because a name
+        written to disk is checked against a different rule than a name read here.
+      </p>
+    </div>
+    {% endif %}
+    {% if m.partsNote %}<p class="fineprint">{{ m.partsNote }}</p>{% endif %}
   </article>
   {% endfor %}
 

@@ -1,0 +1,1 @@
+v=TLSRPTv1; rua=https://reports.example.com/tlsrpt,mailto:tls-reports@example.com

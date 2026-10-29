@@ -66,8 +66,8 @@
   {% endif %}
 
   <nav class="pager" aria-label="More rows">
-    {% if newerHref %}<a class="btn btn-quiet" href="{{ newerHref }}">Newer</a>{% endif %}
-    {% if olderHref %}<a class="btn btn-quiet" href="{{ olderHref }}">Older</a>{% endif %}
+    {% if newerHref %}<a class="btn btn-quiet" href="/{{ newerHref }}">Newer</a>{% endif %}
+    {% if olderHref %}<a class="btn btn-quiet" href="/{{ olderHref }}">Older</a>{% endif %}
   </nav>
 </section>
 {% endblock %}

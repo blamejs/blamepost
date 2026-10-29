@@ -53,6 +53,12 @@ var LOOPBACK    = wire.LOOPBACK;
 var HOSTNAME = "mx.example.com";
 var DOMAIN   = "example.com";
 
+// The second domain this server hosts. Every rule about what an account
+// may send as is measured across two of them, because a rule tested on a
+// server hosting one domain is a rule nobody has asked whether the
+// domain is part of.
+var SECOND_DOMAIN = "example.org";
+
 var VAULT_PASSPHRASE = "a long enough vault passphrase for one test run";
 var ALICE_PASSWORD   = "quiet lantern bicycle 4291";
 var BOB_PASSWORD     = "amber cascade thimble 7734";
@@ -96,6 +102,31 @@ async function submissionSession(port, caPem, address, password, label) {
   await session.upgrade(caPem, HOSTNAME);
   session.send("EHLO client.example.net");
   await session.read(/^250 /m, "EHLO accepted over TLS");
+  session.send("AUTH PLAIN " + plainResponse(address, password));
+  await session.read(/^235 /m, "authenticated");
+  return session;
+}
+
+// The same session on the implicit-TLS port, RFC 8314 section 3.3: the
+// socket carries TLS from its first byte, the banner arrives on the
+// encrypted channel, and there is no STARTTLS to send. Written out
+// rather than taken from the shared ladders because those all raise a
+// cleartext socket, and the difference between the two is the whole
+// point of the cases below.
+//
+// The chain is verified against the run's own authority, as everywhere
+// else here. A session that skipped verification would authenticate
+// against a listener presenting anything at all.
+async function implicitTlsSubmissionSession(port, caPem, address, password, label) {
+  var session = await new Promise(function (resolve, reject) {
+    var socket = nodeTls.connect({
+      host: LOOPBACK, port: port, servername: HOSTNAME, ca: caPem,
+    }, function () { resolve(new Wire(socket, label)); });
+    socket.once("error", reject);
+  });
+  await session.read(/^220 /m, "banner on the encrypted channel");
+  session.send("EHLO client.example.net");
+  await session.read(/^250 /m, "EHLO accepted");
   session.send("AUTH PLAIN " + plainResponse(address, password));
   await session.read(/^235 /m, "authenticated");
   return session;
@@ -199,46 +230,198 @@ async function aliceCannotSendAsBob(ports, caPem, alice, bob) {
   sender.close();
 }
 
-// An alias is an address the account genuinely owns, and the binding
-// reads the actor's mailbox set rather than the routing table, so this
-// records which of the two the server actually honors. Whatever it
-// does, an operator needs to know before they hand out an alias and
-// expect mail to leave under it.
-async function sendingAsAnOwnedAlias(ports, caPem, alice, aliasAddress) {
-  var sender = await submissionSession(ports.submission, caPem,
-    alice, ALICE_PASSWORD, "submission-alias");
+// Everything above drives 587, where a session starts in the clear and
+// is raised with STARTTLS. The shipped configuration binds a SECOND
+// submission listener on 465, where the socket is encrypted from its
+// first byte, and `enabled: true` is its default rather than something
+// an operator turns on. RFC 8314 section 3 tells a mail client to
+// prefer that port, so for a large share of real clients it is the only
+// submission listener they ever touch.
+//
+// Both are built from one function, so they carry the same binding
+// today. They are still two separately constructed listeners, and a
+// change that left 587 strict while 465 went permissive is a change
+// every case above reports as passing, because every case above binds
+// the other port.
+//
+// The binding has two halves and they fail independently, which is why
+// three envelopes are asked here rather than one:
+//
+//   - The listener's own set holds the addresses the account was
+//     created with, so a spoof of another account is refused by that
+//     set alone.
+//   - An alias is not in that set. It is owned according to the store,
+//     and the only thing that says so is the sender policy this
+//     repository composes in. A listener that kept the binding and
+//     dropped the policy refuses the spoof and the alias alike, and the
+//     alias is the only envelope that tells those two apart.
+//   - An address that merely ROUTES to the account is refused, so the
+//     policy is answering with the sending set rather than with
+//     anything that reaches her.
+async function theImplicitTlsPortBindsTheSameIdentity(ports, caPem, alice, bob,
+  aliasAddress, routesButIsNotAnIdentity) {
+  var sender = await implicitTlsSubmissionSession(ports.submissions, caPem,
+    alice, ALICE_PASSWORD, "submissions-implicit");
+  count("the implicit-TLS submission listener authenticates an account, so the port RFC " +
+    "8314 tells a client to prefer is a door this server actually opens",
+    sender.socket.authorized === true, String(sender.socket.authorized));
+
+  sender.send("MAIL FROM:<" + bob + ">");
+  var spoof = await sender.read(/^\d{3} /m, "MAIL FROM answered");
+  count("an authenticated account cannot send as another account on the implicit-TLS " +
+    "port either, and the code is the same 553 5.7.1 an operator filters for",
+    /^553 5\.7\.1 /m.test(spoof), visible(spoof));
+  count("and the refusal names the binding rather than a parse failure",
+    /not owned by authenticated identity/.test(spoof), visible(spoof));
 
   sender.send("MAIL FROM:<" + aliasAddress + ">");
-  var reply = await sender.read(/^\d{3} /m, "MAIL FROM answered");
-  var accepted = /^250 /m.test(reply);
+  var alias = await sender.read(/^\d{3} /m, "alias MAIL FROM answered");
+  count("an alias the account owns is accepted on the implicit-TLS port, so the sender " +
+    "policy reaches this listener and not only the one that starts in the clear",
+    /^250 /m.test(alias), visible(alias));
 
-  // Both answers are defensible and only one is true, so the first
-  // assertion is that the server gave a clear one rather than which one
-  // it gave. What it actually does is recorded in ROADMAP.md, and the
-  // second assertion stops that changing without somebody noticing.
-  count("an alias the account owns draws a definite answer rather than a hang",
-    accepted || /^5\d\d /m.test(reply), visible(reply));
-  count("sending under an owned alias is refused, because the binding " +
-    "reads the account's own address and not the routing table",
-    !accepted, visible(reply));
+  sender.send("RSET");
+  await sender.read(/^250 /m, "RSET answered");
+  sender.send("MAIL FROM:<" + routesButIsNotAnIdentity + ">");
+  var routed = await sender.read(/^\d{3} /m, "catch-all MAIL FROM answered");
+  count("an address that routes to her mailbox and is not a sending identity is refused " +
+    "here too, so the policy answers with the sending set rather than with delivery",
+    /^553 5\.7\.1 /m.test(routed), visible(routed));
 
   sender.send("QUIT");
   sender.close();
 }
 
-// The account's own subaddress, which the two halves of this server
-// currently answer differently. RFC 5233 makes `alice+receipts@` a
-// sub-address of `alice@`, and the routing layer folds the tag away, so
-// the MX listener accepts it as a recipient and delivers it to her. The
-// submission binding compares the envelope sender against the actor's
-// mailbox set as the client spelled it, and refuses.
+// An active alias that lands in an account's mailbox is an address that
+// account may speak for, on the envelope exactly as in the header. The
+// two halves are measured against one set, so a client that puts the
+// alias in both fields sends, and the message carries the alias to the
+// recipient.
+var ALIAS_ENVELOPE_MARKER = "alias-envelope-2d61b4f8";
+
+async function sendingAsAnOwnedAlias(ports, caPem, alice, bob, aliasAddress) {
+  var sender = await submissionSession(ports.submission, caPem,
+    alice, ALICE_PASSWORD, "submission-alias");
+
+  sender.send("MAIL FROM:<" + aliasAddress + ">");
+  var reply = await sender.read(/^\d{3} /m, "MAIL FROM answered");
+  count("an alias that lands in the account's mailbox is accepted as an envelope sender",
+    /^250 /m.test(reply), visible(reply));
+
+  sender.send("RCPT TO:<" + bob + ">");
+  await sender.read(/^\d{3} /m, "RCPT TO answered");
+  sender.send("DATA");
+  await sender.read(/^354 /m, "DATA answered");
+  sender.sendRaw([
+    "From: " + aliasAddress,
+    "To: " + bob,
+    "Subject: " + ALIAS_ENVELOPE_MARKER,
+    "Date: Sat, 23 Aug 2026 12:00:00 +0000",
+    "Message-ID: <" + ALIAS_ENVELOPE_MARKER + "@" + DOMAIN + ">",
+    "",
+    "A message whose envelope and author are both the alias.",
+    "",
+    ".",
+    "",
+  ].join("\r\n"), "<a message written entirely under the alias>");
+  var accepted = await sender.read(/^\d{3} /m, "message answered");
+  count("and the message goes, so the envelope and the author binding agree about " +
+    "the same address rather than one permitting what the other refuses",
+    /^250 /m.test(accepted), visible(accepted));
+
+  sender.send("QUIT");
+  sender.close();
+}
+
+// The addresses that route to an account and are still not identities it
+// may send under. Each is refused at `MAIL FROM`, which is where the
+// envelope binding answers, and each is refused for a reason the author
+// binding already applies to the header.
+async function theEnvelopeRefusesWhatIsNotASendingIdentity(ports, caPem, alice, vectors) {
+  for (var i = 0; i < vectors.length; i += 1) {
+    var vector = vectors[i];
+    var sender = await submissionSession(ports.submission, caPem,
+      alice, ALICE_PASSWORD, "submission-not-an-identity-" + i);
+    sender.send("MAIL FROM:<" + vector.address + ">");
+    var reply = await sender.read(/^\d{3} /m, "MAIL FROM answered");
+    count(vector.name + " is refused as an envelope sender, because " + vector.why,
+      /^553 5\.7\.1 /m.test(reply), visible(reply));
+    count("and " + vector.name + " draws the not-owned refusal rather than a parse failure",
+      /not owned by authenticated identity/.test(reply), visible(reply));
+    sender.send("QUIT");
+    sender.close();
+  }
+}
+
+// An alias on a second hosted domain is an identity exactly as one on
+// the first is. Asked on a server hosting two domains, because a
+// binding measured on a single-domain server cannot show whether the
+// domain is part of what it compares.
+async function anAliasOnASecondHostedDomainIsASendingIdentity(ports, caPem, alice, aliasAddress) {
+  var sender = await submissionSession(ports.submission, caPem,
+    alice, ALICE_PASSWORD, "submission-alias-second-domain");
+  sender.send("MAIL FROM:<" + aliasAddress + ">");
+  var reply = await sender.read(/^\d{3} /m, "MAIL FROM answered");
+  count("an alias on a second hosted domain is accepted as an envelope sender, so the " +
+    "set follows the alias rows rather than the account's own domain",
+    /^250 /m.test(reply), visible(reply));
+  sender.send("QUIT");
+  sender.close();
+}
+
+// The withdrawal an operator performs, read on the next message rather
+// than at the next sign-in. The session below authenticated while the
+// alias was active, so a set cached on the session would still hold it.
+async function awithdrawnAliasStopsBeingASender(ports, caPem, identity, alice, aliasAddress) {
+  var sender = await submissionSession(ports.submission, caPem,
+    alice, ALICE_PASSWORD, "submission-alias-withdrawn");
+
+  sender.send("MAIL FROM:<" + aliasAddress + ">");
+  var before = await sender.read(/^\d{3} /m, "MAIL FROM answered");
+  count("the alias is a sending identity while it is active",
+    /^250 /m.test(before), visible(before));
+
+  sender.send("RSET");
+  await sender.read(/^250 /m, "RSET answered");
+
+  // One source can hold several destinations, so the source alone does
+  // not name a single alias and the store refuses it. Name the pair.
+  await identity.aliases.setStatus({
+    address:     aliasAddress,
+    destination: alice,
+    status:      "disabled",
+    reason:      "withdrawn mid-session by the submission test",
+  });
+
+  sender.send("MAIL FROM:<" + aliasAddress + ">");
+  var after = await sender.read(/^\d{3} /m, "second MAIL FROM answered");
+  count("and it stops being one at the next message rather than at the next sign-in, " +
+    "because the set is read from the store on every envelope",
+    /^553 5\.7\.1 /m.test(after), visible(after));
+
+  sender.send("QUIT");
+  sender.close();
+
+  await identity.aliases.setStatus({
+    address:     aliasAddress,
+    destination: alice,
+    status:      "active",
+    reason:      "restored by the submission test",
+  });
+}
+
+// The account's own subaddress, on both ports. RFC 5233 makes
+// `alice+receipts@` a sub-address of `alice@`, and the routing layer
+// folds the tag away, so the MX listener accepts it as a recipient and
+// delivers it to her. The envelope binding folds the same tag against
+// the same canonical form, so the port she sends from and the port that
+// receives give one answer about one address.
 //
-// Both answers are asserted, because the pair is the finding: it is a
-// false refusal rather than a way in, and what makes it visible is that
-// the same address draws 250 on one port and 553 on the other. Recorded
-// in ROADMAP.md, and pinned here so neither half moves without the
-// other being looked at.
-async function theTwoPortsDisagreeAboutAnOwnedSubaddress(ports, caPem, alice) {
+// Both are asserted together, because a client configured with a
+// subaddress as its identity puts that address in `MAIL FROM` and in
+// `From`, and one port answering differently from the other is the
+// failure this pair exists to catch.
+async function theTwoPortsAgreeAboutAnOwnedSubaddress(ports, caPem, alice, bob) {
   var at = alice.indexOf("@");
   var tagged = alice.slice(0, at) + "+receipts" + alice.slice(at);
 
@@ -246,24 +429,38 @@ async function theTwoPortsDisagreeAboutAnOwnedSubaddress(ports, caPem, alice) {
     alice, ALICE_PASSWORD, "submission-subaddress");
   sender.send("MAIL FROM:<" + tagged + ">");
   var reply = await sender.read(/^\d{3} /m, "MAIL FROM answered");
-  count("submission refuses the account's own subaddress as a sender",
-    /^553 5\.7\.1 /m.test(reply), visible(reply));
-  count("and the refusal is the not-owned one rather than a parse failure",
-    /not owned by authenticated identity/.test(reply), visible(reply));
+  count("submission accepts the account's own subaddress as an envelope sender, which " +
+    "is the address a client configured with that identity writes",
+    /^250 /m.test(reply), visible(reply));
   sender.send("QUIT");
   sender.close();
 
-  // The other half, on the port that receives. A recipient this server
-  // refuses to let her send as is one it accepts mail for on her behalf.
+  // The other half, on the port that receives. An address this server
+  // accepts mail for on her behalf is one it lets her send as.
   var peer = await Wire.mx(ports.mx, { caPem: caPem, servername: HOSTNAME, label: "mx-subaddress" });
   peer.send("MAIL FROM:<outsider@peer.example>");
   await peer.read(/^\d{3} /m, "MAIL FROM answered");
   peer.send("RCPT TO:<" + tagged + ">");
   var rcpt = await peer.read(/^\d{3} /m, "RCPT TO answered");
-  count("while the MX listener accepts the same address as a recipient",
+  count("and the MX listener accepts the same address as a recipient",
     /^250 /m.test(rcpt), visible(rcpt));
   peer.send("QUIT");
   peer.close();
+
+  // A tag on an address that is not hers is still not hers. The fold
+  // takes the tag off and the mailbox underneath is what is compared, so
+  // this is the vector that separates folding from stripping and
+  // trusting whatever is left.
+  var forger = await submissionSession(ports.submission, caPem,
+    alice, ALICE_PASSWORD, "submission-subaddress-forged");
+  var forged = bob.slice(0, bob.indexOf("@")) + "+receipts" + bob.slice(bob.indexOf("@"));
+  forger.send("MAIL FROM:<" + forged + ">");
+  var refused = await forger.read(/^\d{3} /m, "MAIL FROM answered");
+  count("a tag on somebody else's local part is refused, because the fold reads the " +
+    "mailbox the address is delivered to rather than dropping the part it cannot check",
+    /^553 5\.7\.1 /m.test(refused), visible(refused));
+  forger.send("QUIT");
+  forger.close();
 }
 
 // The two spellings of an envelope sender that decide whether the
@@ -324,11 +521,30 @@ async function theEnvelopeBindingComparesAddressesRatherThanStrings(ports, caPem
 // wire code is a claim about what the server did next, and the mailbox
 // is where that claim is settled.
 
-// A refused submission is answered by the framework listener, which
-// writes one reply for every reason an agent handoff can fail. The code
-// is pinned because an operator filtering their log for a refusal needs
-// it to be the code that actually appears.
-var HANDOFF_REFUSAL = /^451 4\.3\.0 /m;
+// The replies a refused submission draws, each pinned exactly. A code
+// an operator cannot filter for is a refusal they cannot find, and a
+// reply whose enhanced status contradicts its code gives a peer parsing
+// one the opposite verdict from a peer parsing the other, so both halves
+// are in every pattern.
+//
+// The two the author binding writes are separated by what an operator
+// would go and look at. `5.7.1` says the author was read and this
+// account may not write it, which sends them to the alias table.
+// `5.6.0` says the header block does not name one readable author,
+// which sends them to the client that wrote it. Both are permanent: the
+// verdict is a function of the message and the credential, and a retry
+// carries the same two.
+var AUTHOR_REFUSAL    = /^550 5\.7\.1 /m;
+var HEADER_REFUSAL    = /^550 5\.6\.0 /m;
+// 554, not 550. RFC 5321 section 4.2.2 gives 554 for a transaction that
+// failed after the message was accepted for transfer, which is where a
+// body check runs, and it is what the listener's own bare-LF refusal
+// writes. Pinning 550 here would have asserted a code no path produces.
+var SMUGGLING_REFUSAL = /^554 5\.7\.0 /m;
+
+// Any reply at all whose class is permanent, for the assertions whose
+// subject is that the peer was not told to retry.
+var PERMANENT_REPLY = /^5\d\d 5\.\d{1,3}\.\d{1,3} /m;
 
 function fromVectors(alice, bob) {
   var at     = alice.indexOf("@");
@@ -368,6 +584,7 @@ function fromVectors(alice, bob) {
       marker:   "from-other-account-71fa9b26",
       headers:  ["From: " + bob],
       accepted: false,
+      wire:     AUTHOR_REFUSAL,
       why:      "an account may not write a colleague's address in From, which " +
                 "is the impersonation the envelope binding never covered",
     },
@@ -376,6 +593,7 @@ function fromVectors(alice, bob) {
       marker:   "from-unassigned-2c8e6f04",
       headers:  ["From: \"The Chair\" <ceo@" + DOMAIN + ">"],
       accepted: false,
+      wire:     AUTHOR_REFUSAL,
       why:      "an address nobody holds is not an address this account holds, " +
                 "and the domain key would sign it into alignment",
     },
@@ -384,6 +602,7 @@ function fromVectors(alice, bob) {
       marker:   "from-foreign-domain-84d15a7c",
       headers:  ["From: alice@notmine.example"],
       accepted: false,
+      wire:     AUTHOR_REFUSAL,
       why:      "nothing in the message is an identity this account may write, so " +
                 "the message is attributable to nobody who authenticated for it",
     },
@@ -392,6 +611,7 @@ function fromVectors(alice, bob) {
       marker:   "from-list-unbound-5f39ea18",
       headers:  ["From: " + alice + ", " + bob],
       accepted: false,
+      wire:     AUTHOR_REFUSAL,
       why:      "bob is at a domain this server hosts and is not an identity this " +
                 "account may write, so it is refused. The screen is per author and " +
                 "applies to hosted domains only: a list naming her alongside an " +
@@ -411,6 +631,7 @@ function fromVectors(alice, bob) {
       marker:   "from-delegated-local-e26b45c1",
       headers:  ["From: " + bob, "Sender: " + alice],
       accepted: false,
+      wire:     AUTHOR_REFUSAL,
       why:      "a Sender header the same client writes cannot license an author " +
                 "at a domain this server signs for, or the binding is one header " +
                 "away from being bypassed by whoever it was meant to stop",
@@ -430,6 +651,7 @@ function fromVectors(alice, bob) {
       marker:   "from-sender-forged-d3810b6f",
       headers:  ["From: " + alice, "Sender: " + bob],
       accepted: false,
+      wire:     AUTHOR_REFUSAL,
       why:      "Sender names who sent it, so a Sender she may not write is a " +
                 "claim that somebody else transmitted this",
     },
@@ -438,6 +660,7 @@ function fromVectors(alice, bob) {
       marker:   "from-sender-doubled-b7c209e5",
       headers:  ["From: " + alice, "Sender: " + alice, "Sender: " + bob],
       accepted: false,
+      wire:     HEADER_REFUSAL,
       why:      "RFC 5322 section 3.6 allows one Sender, and two leave the " +
                 "transmitting agent for the receiver to guess at",
     },
@@ -446,6 +669,7 @@ function fromVectors(alice, bob) {
       marker:   "from-doubled-1ac4de70",
       headers:  ["From: " + alice, "From: " + bob],
       accepted: false,
+      wire:     HEADER_REFUSAL,
       why:      "RFC 5322 section 3.6 allows one From, and two leave the author " +
                 "for the receiver to choose, which is the choice being forged",
     },
@@ -454,6 +678,7 @@ function fromVectors(alice, bob) {
       marker:   "from-absent-48b3e0c9",
       headers:  [],
       accepted: false,
+      wire:     HEADER_REFUSAL,
       why:      "RFC 5322 section 3.6 makes From mandatory, and a message with " +
                 "none is one this server would sign without knowing whose it is",
     },
@@ -462,6 +687,7 @@ function fromVectors(alice, bob) {
       marker:   "from-empty-group-f5027ab4",
       headers:  ["From: undisclosed-authors:;"],
       accepted: false,
+      wire:     HEADER_REFUSAL,
       why:      "RFC 6854 group syntax naming nobody identifies no author, so " +
                 "there is no identity to bind and none to display",
     },
@@ -470,6 +696,7 @@ function fromVectors(alice, bob) {
       marker:   "from-display-carries-another-2f8c19b0",
       headers:  ["From: \"" + alice + "\" <" + bob + ">"],
       accepted: false,
+      wire:     AUTHOR_REFUSAL,
       why:      "the address is the part inside the angle brackets, and it is a " +
                 "colleague's. A reader that took the quoted text for the address " +
                 "would bind against a name the author chose rather than against " +
@@ -480,6 +707,7 @@ function fromVectors(alice, bob) {
       marker:   "from-display-shadow-a4e17d6c",
       headers:  ["From: \"Alice <" + alice + ">\" <" + bob + ">"],
       accepted: false,
+      wire:     AUTHOR_REFUSAL,
       why:      "an owned address spelled inside the display name, angle brackets " +
                 "and all, is still text. Reading it as a second address would let " +
                 "any account write any colleague's address by naming its own beside it",
@@ -489,6 +717,7 @@ function fromVectors(alice, bob) {
       marker:   "from-group-names-another-7c30b5e9",
       headers:  ["From: recipients:" + bob + ";"],
       accepted: false,
+      wire:     AUTHOR_REFUSAL,
       why:      "RFC 6854 group syntax is a wrapper rather than an exemption: the " +
                 "address inside is the author, and it is one this account does not hold",
     },
@@ -501,8 +730,10 @@ function fromVectors(alice, bob) {
       // mail for a name the operator never registered.
       headers:  ["From: alice@exаmple.com"],
       accepted: false,
+      wire:     HEADER_REFUSAL,
       why:      "a mixed-script domain is not the domain it is drawn to look like, " +
-                "and nothing here holds an address at it",
+                "and the address guard refuses to read it at all rather than " +
+                "resolving a name whose letters are not the letters they appear to be",
     },
   ];
 }
@@ -549,10 +780,16 @@ async function theFromHeaderIsBoundToTheAuthenticatedAccount(ports, caPem, alice
     }
     count("From naming " + vector.name + " is refused, because " + vector.why,
       !/^250 /m.test(reply), visible(reply));
-    // Pinned on the code the listener actually writes. A refusal an
-    // operator cannot filter for is a refusal they cannot find.
-    count("and the refusal of " + vector.name + " is the one the handoff writes",
-      HANDOFF_REFUSAL.test(reply), visible(reply));
+    // The refusal is permanent, so a conforming MTA bounces it to its
+    // own sender instead of retrying a message that will be refused
+    // identically until its queue lifetime runs out (RFC 5321 §4.2.1).
+    count("and the refusal of " + vector.name + " is permanent rather than a retry invitation",
+      PERMANENT_REPLY.test(reply), visible(reply));
+    // Pinned on the exact pair the listener writes, because an operator
+    // filtering their log needs the code that actually appears and a
+    // peer reads the enhanced status rather than the code.
+    count("and it carries the code this refusal names for itself",
+      vector.wire.test(reply), visible(reply));
   }
 }
 
@@ -588,6 +825,12 @@ async function onlyThePermittedFromHeadersReachedTheMailbox(ports, caPem, alice,
     count("nothing reached the mailbox from the message whose From named " + vector.name,
       !landed, vector.marker + (landed ? " is present" : " is absent"));
   }
+
+  // The alias case settled in the same mailbox. A 250 is a claim about
+  // what the server did next, and this is where it is answered.
+  var aliasLanded = seen.indexOf(ALIAS_ENVELOPE_MARKER) !== -1;
+  count("the message sent entirely under an alias reached the recipient's mailbox",
+    aliasLanded, ALIAS_ENVELOPE_MARKER + (aliasLanded ? " is present" : " is missing"));
 }
 
 // The same rule on the other way in. RFC 3030 chunked transfer is a
@@ -625,7 +868,7 @@ async function theBindingHoldsOnTheChunkedPathToo(ports, caPem, alice, bob) {
     } else {
       count("and a chunked message under an address she may not write is refused, " +
         "so announcing CHUNKING is not a way around the binding",
-        HANDOFF_REFUSAL.test(reply), visible(reply));
+        AUTHOR_REFUSAL.test(reply), visible(reply));
     }
     sender.send("QUIT");
     sender.close();
@@ -749,7 +992,7 @@ async function theServerStillReportsAFailedRecipient(ports, caPem, alice) {
   // is about the recipient rather than about the header.
   count("a message she may write is not refused for its header when the " +
     "recipient is the thing that is wrong",
-    !HANDOFF_REFUSAL.test(reply) || /^250 /m.test(reply), visible(reply));
+    !AUTHOR_REFUSAL.test(reply) && !HEADER_REFUSAL.test(reply), visible(reply));
 
   await b.audit.flush();
   var after = await b.audit.query({ action: FROM_REJECTED, limit: 200 });
@@ -904,7 +1147,7 @@ async function aBodyReadAsTwoMessagesIsRefusedOnEveryPath(ports, caPem, alice, b
     peer.sendRaw(terminated, "<a body ending " + variant.name + ", and its terminating dot>");
     var mxReply = await peer.read(/^\d{3} /m, "message answered");
     count("a body carrying " + variant.name + " is refused on the port a stranger delivers to",
-      !/^250 /m.test(mxReply), visible(mxReply));
+      SMUGGLING_REFUSAL.test(mxReply), visible(mxReply));
     peer.send("QUIT");
     peer.close();
 
@@ -917,7 +1160,7 @@ async function aBodyReadAsTwoMessagesIsRefusedOnEveryPath(ports, caPem, alice, b
       "<a body ending " + variant.name + ", and its terminating dot>");
     var dataReply = await viaData.read(/^\d{3} /m, "message answered");
     count(variant.name + " is refused when an account holder submits it over DATA",
-      !/^250 /m.test(dataReply), visible(dataReply));
+      SMUGGLING_REFUSAL.test(dataReply), visible(dataReply));
     viaData.send("QUIT");
     viaData.close();
 
@@ -927,7 +1170,7 @@ async function aBodyReadAsTwoMessagesIsRefusedOnEveryPath(ports, caPem, alice, b
     bdat(viaBdat, payload, true, "<a body carrying " + variant.name + ">");
     var bdatReply = await viaBdat.read(/^\d{3} /m, "chunked message answered");
     count(variant.name + " is refused when the same account holder submits it in chunks",
-      !/^250 /m.test(bdatReply), visible(bdatReply));
+      SMUGGLING_REFUSAL.test(bdatReply), visible(bdatReply));
     viaBdat.send("QUIT");
     viaBdat.close();
   }
@@ -954,7 +1197,7 @@ async function aSequenceSplitAcrossTwoChunksIsRefused(ports, caPem, alice, bob) 
   bdat(sender, payload.subarray(cut), true, "<the dot and everything after it>");
   var second = await sender.read(/^\d{3} /m, "last chunk answered");
   count("and the message the two chunks add up to is refused",
-    !/^250 /m.test(second), visible(second));
+    SMUGGLING_REFUSAL.test(second), visible(second));
 
   sender.send("QUIT");
   sender.close();
@@ -1052,13 +1295,12 @@ async function theSubmissionPathSignsWithoutRewriting(ports, caPem, alice, bob, 
   sender.send("DATA");
   await sender.read(/^354 /m, "DATA answered");
   // RFC 5321 section 4.1.1.4 terminates the mail data with CRLF, a
-  // period and CRLF, and the CRLF that opens that sequence is not part
-  // of the message. So the terminator is written in full here rather
-  // than borrowing the message's own last line ending for it, which
-  // leaves the stored copy comparable to the fixture octet for octet
-  // instead of two bytes short of it for a reason that has nothing to do
-  // with signing.
-  sender.sendRaw(Buffer.concat([message, Buffer.from("\r\n.\r\n", "latin1")]),
+  // period and CRLF, where the first CRLF is the end of the message's
+  // own last line. The fixture already ends in CRLF, so only the period
+  // line is written after it, and the stored copy is comparable to the
+  // fixture octet for octet. Writing a further CRLF first would add an
+  // empty last line to the message.
+  sender.sendRaw(Buffer.concat([message, Buffer.from(".\r\n", "latin1")]),
     "<a message carrying octets that are not valid UTF-8>");
   var accepted = await sender.read(/^\d{3} /m, "message answered");
   count("an 8-bit message is accepted for delivery", /^250 /m.test(accepted), visible(accepted));
@@ -1162,19 +1404,40 @@ async function run() {
     identity = await store.open(cfg);
     await identity.domains.add({ domain: DOMAIN });
     await identity.domains.acknowledgeDns({ domain: DOMAIN, by: "submission test" });
+    // A second hosted domain, because a binding measured on a server
+    // hosting one domain cannot show whether the domain is part of what
+    // it compares.
+    await identity.domains.add({ domain: SECOND_DOMAIN });
+    await identity.domains.acknowledgeDns({ domain: SECOND_DOMAIN, by: "submission test" });
     var alice = await identity.accounts.create({
       address: "alice@" + DOMAIN, password: ALICE_PASSWORD });
     var bob = await identity.accounts.create({
       address: "bob@" + DOMAIN, password: BOB_PASSWORD });
     var aliasAddress = "sales@" + DOMAIN;
     await identity.aliases.add({ address: aliasAddress, destination: alice.address });
+    // An alias on the second domain, which is an identity, and a
+    // catch-all on the same domain, which is not.
+    var secondDomainAlias = "support@" + SECOND_DOMAIN;
+    await identity.aliases.add({ address: secondDomainAlias, destination: alice.address });
+    await identity.aliases.add({ domain: SECOND_DOMAIN, catchAll: true,
+      destination: alice.address });
+    // An alias whose destination is another alias rather than a mailbox.
+    // Mail addressed to it reaches alice, and the author set follows one
+    // row rather than a chain, so it is not an identity either.
+    var chainedAlias = "events@" + DOMAIN;
+    await identity.aliases.add({ address: chainedAlias, destination: aliasAddress });
+    var withdrawableAlias = "orders@" + DOMAIN;
+    await identity.aliases.add({ address: withdrawableAlias, destination: alice.address });
 
     var sections = {
       // The MX port is bound here because one case below asks both
       // listeners about the same address and compares their answers.
       mx:          { enabled: true,  port: await reservePort(), address: LOOPBACK },
       submission:  { enabled: true,  port: await reservePort(), address: LOOPBACK },
-      submissions: { enabled: false, port: await reservePort(), address: LOOPBACK },
+      // Bound because the shipped configuration binds it. Leaving it off
+      // would run this whole file against the one submission transport
+      // where a binding defect on the other cannot appear.
+      submissions: { enabled: true,  port: await reservePort(), address: LOOPBACK },
       imap:        { enabled: true,  port: await reservePort(), address: LOOPBACK },
       pop3:        { enabled: false, port: await reservePort(), address: LOOPBACK },
       managesieve: { enabled: false, port: await reservePort(), address: LOOPBACK },
@@ -1196,15 +1459,36 @@ async function run() {
     running = true;
 
     var ports = {
-      submission: sections.submission.port,
-      imap:       sections.imap.port,
-      mx:         sections.mx.port,
+      submission:  sections.submission.port,
+      submissions: sections.submissions.port,
+      imap:        sections.imap.port,
+      mx:          sections.mx.port,
     };
 
     await aliceWritesToBobAndBobReadsIt(ports, leaf.ca, alice.address, bob.address);
     await aliceCannotSendAsBob(ports, leaf.ca, alice.address, bob.address);
-    await sendingAsAnOwnedAlias(ports, leaf.ca, alice.address, aliasAddress);
-    await theTwoPortsDisagreeAboutAnOwnedSubaddress(ports, leaf.ca, alice.address);
+    await sendingAsAnOwnedAlias(ports, leaf.ca, alice.address, bob.address, aliasAddress);
+    await anAliasOnASecondHostedDomainIsASendingIdentity(ports, leaf.ca, alice.address,
+      secondDomainAlias);
+    await theEnvelopeRefusesWhatIsNotASendingIdentity(ports, leaf.ca, alice.address, [
+      {
+        name:    "a catch-all that routes to her mailbox",
+        address: "anything-at-all@" + SECOND_DOMAIN,
+        why:     "a catch-all claims every name at a domain, so counting one would hand " +
+                 "the account holding it every address the domain could ever carry",
+      },
+      {
+        name:    "an alias that reaches her through a second alias",
+        address: chainedAlias,
+        why:     "the set follows one alias row rather than a chain, which is the same " +
+                 "rule the author binding applies to the header",
+      },
+    ]);
+    await theImplicitTlsPortBindsTheSameIdentity(ports, leaf.ca, alice.address, bob.address,
+      aliasAddress, "anything-at-all@" + SECOND_DOMAIN);
+    await awithdrawnAliasStopsBeingASender(ports, leaf.ca, identity, alice.address,
+      withdrawableAlias);
+    await theTwoPortsAgreeAboutAnOwnedSubaddress(ports, leaf.ca, alice.address, bob.address);
     await theEnvelopeBindingComparesAddressesRatherThanStrings(ports, leaf.ca, alice.address);
     await theFromHeaderIsBoundToTheAuthenticatedAccount(ports, leaf.ca, alice.address, bob.address);
     await onlyThePermittedFromHeadersReachedTheMailbox(ports, leaf.ca, alice.address, bob.address);

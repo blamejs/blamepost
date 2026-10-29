@@ -1,0 +1,10 @@
+From: Alice <alice@example.com>
+To: Bob <bob@example.net>
+Subject: a message with markup and nothing else
+Message-ID: <html-only@example.com>
+Date: Mon, 16 Jun 2025 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>Hello <b>Bob</b>, see <a href="https://example.net/">this</a>.</p>
+<script>alert(1)</script><img src="x" onerror="alert(2)"><p>&amp; &#65; &lt;</p></body></html>

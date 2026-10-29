@@ -1,0 +1,34 @@
+From: alice@example.com
+To: bob@example.net
+Subject: Nested
+Date: Sat, 23 Aug 2026 12:00:00 +0000
+Message-ID: <nested@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer-1"
+
+--outer-1
+Content-Type: multipart/alternative; boundary="inner-1"
+
+--inner-1
+Content-Type: text/plain; charset=us-ascii
+
+Inner plain.
+
+--inner-1
+Content-Type: text/html; charset=us-ascii
+
+<div>Inner <script>alert(1)</script> html.</div>
+
+--inner-1--
+
+--outer-1
+Content-Type: message/rfc822
+
+From: carol@example.org
+To: alice@example.com
+Subject: The forwarded one
+Content-Type: text/plain; charset=us-ascii
+
+Forwarded body.
+
+--outer-1--

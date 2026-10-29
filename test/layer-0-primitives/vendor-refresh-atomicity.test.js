@@ -182,11 +182,37 @@ function _readme(version) {
  * because `vendor-update.sh` resolves the repository from its own
  * location and would otherwise rewrite the real vendored tree.
  */
+// The scripts the refresh reaches, walked from its own requires rather
+// than listed here. A hand-written list is a second copy of a fact the
+// source already carries, and it goes wrong silently: the day the
+// refresh script gained a local require, the fixture copied a script
+// whose dependency was absent, and it surfaced as a module resolution
+// error inside a subprocess rather than as a missing file at the copy.
+// The walk is transitive so a dependency of a dependency travels too.
+function _scriptClosure(entry) {
+  var seen = [];
+  var queue = [entry];
+  var pattern = /require\(\s*"\.\/([A-Za-z0-9._-]{1,64})"\s*\)/g;
+  while (queue.length > 0) {
+    var file = queue.shift();
+    if (seen.indexOf(file) !== -1) continue;
+    seen.push(file);
+    var src = fs.readFileSync(path.join(REPO_ROOT, "scripts", file), "utf8");
+    pattern.lastIndex = 0;
+    var found;
+    while ((found = pattern.exec(src)) !== null) queue.push(found[1]);
+  }
+  return seen;
+}
+
 function _makeRepo(scriptPath) {
   var root = helpers.tempDir("vendorrepo");
   fs.mkdirSync(path.join(root, "scripts"), { recursive: true });
   fs.copyFileSync(scriptPath, path.join(root, "scripts", "vendor-update.sh"));
-  fs.copyFileSync(REFRESH_SCRIPT, path.join(root, "scripts", "refresh-vendor-manifest.js"));
+  _scriptClosure(path.basename(REFRESH_SCRIPT)).forEach(function (name) {
+    fs.copyFileSync(path.join(REPO_ROOT, "scripts", name),
+      path.join(root, "scripts", name));
+  });
 
   var dest = path.join(root, "lib", "vendor", "blamejs");
   _writePackage(dest, OLD_VERSION, {

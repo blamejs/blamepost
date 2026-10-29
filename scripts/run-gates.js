@@ -48,8 +48,8 @@
  * gate exiting clean over an empty set stops the cut, and that refusal
  * lived in `scripts/release.js` alone. So a gate publishing `EXAMINED 0`
  * passed `npm run gates`, passed CI, and was caught only if somebody
- * happened to run a release, which is exactly the tree this repository
- * has already paid for: the spelling gate resolved its reads against a
+ * happened to run a release. That has already happened in this
+ * repository: the spelling gate resolved its reads against a
  * wrong base, the tree went unread, its canary still passed, and four real
  * findings vanished behind a clean exit code. A canary proves a checker
  * still FIRES; only a count proves it REACHED anything. The count belongs
@@ -167,6 +167,57 @@ function _parseGate(commandText) {
   }
   if (tokens.length < 2) throw new Error("gate command names no script: " + text);
   return { text: text, script: tokens[1], args: tokens.slice(1) };
+}
+
+// The npm key the declared chain lives under. Frozen: it is what package.json
+// publishes and what CI types as `npm run gates`.
+var CHAIN_KEY = "gates";
+
+/**
+ * declaredGates(packageJsonPath) reads the declared chain and returns its
+ * links, parsed.
+ *
+ * -> [ { text, script, args } ], one per link, in declared order.
+ *
+ * WHY THIS IS EXPORTED. `scripts/release.js` ran a battery of its own, spelled
+ * out by hand, and it had drifted: three gates the chain runs were absent from
+ * it, so a release cut executed a WEAKER battery than a developer typing
+ * `npm run gates` did, which is the opposite of what a release wants. That is
+ * the second-hand-maintained-list defect this repository keeps paying for, and
+ * the fix is not to re-sync the copy. It is for both callers to read the one
+ * authority, which is `scripts.gates` in package.json, through the one parser,
+ * which is `_parseGate` above. A gate added there then starts running in the
+ * release cut with no second edit.
+ *
+ * The chain is written as one QUOTED command per link after the runner's own
+ * path, so the quoted spans ARE the links. A chain that names the runner and
+ * nothing else, or one that cannot be read at all, THROWS: running no gates and
+ * reporting clean is the verdict every part of this contract exists to refuse,
+ * and an empty read is exactly how it would be reached.
+ */
+function declaredGates(packageJsonPath) {
+  var pkg;
+  try {
+    pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  } catch (e) {
+    throw new Error("the declared gate chain could not be read from " + packageJsonPath +
+      ": " + ((e && e.message) || String(e)) + ". The chain is the authority for what the " +
+      "static battery runs, so a battery cannot be assembled without it.");
+  }
+  var chain = String((pkg.scripts && pkg.scripts[CHAIN_KEY]) || "");
+  if (chain.trim().length === 0) {
+    throw new Error("package.json declares no `scripts." + CHAIN_KEY + "`, so there is no gate " +
+      "chain to run. An absent chain would run no gate and report clean, which is a perfect " +
+      "score over nothing.");
+  }
+  var quoted = chain.match(/"[^"]+"/g) || [];
+  var gates  = quoted.map(function (s) { return _parseGate(s.slice(1, -1)); });
+  if (gates.length === 0) {
+    throw new Error("`scripts." + CHAIN_KEY + "` names the runner and no gate: " + chain +
+      ". The links are written as one quoted command each; a chain with none would run " +
+      "nothing and exit clean.");
+  }
+  return gates;
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +491,9 @@ module.exports = {
   NOT_RUN:         NOT_RUN,
   UNANSWERED:      UNANSWERED,
   ACCEPTED_TOKENS: ACCEPTED_TOKENS,
+  CHAIN_KEY:       CHAIN_KEY,
+  parseGate:       _parseGate,
+  declaredGates:   declaredGates,
 };
 
 if (require.main === module) {

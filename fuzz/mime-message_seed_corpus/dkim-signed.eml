@@ -1,0 +1,15 @@
+DKIM-Signature: v=1; a=ed25519-sha256; c=relaxed/relaxed; d=example.com;
+ s=blamepost1; t=1787227200; h=from:to:subject:date:message-id;
+ bh=2jmj7l5rSw0yVb+vlWAYkK/YBwk=; b=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=mail.example.com;
+ s=blamepost1r; t=1787227200; h=from:to:subject:date:message-id;
+ bh=2jmj7l5rSw0yVb+vlWAYkK/YBwk=; b=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+From: alice@example.com
+To: bob@example.net
+Subject: A message worth signing
+Date: Sat, 23 Aug 2026 12:00:00 +0000
+Message-ID: <signed@example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Body under signature.

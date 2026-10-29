@@ -1,0 +1,15 @@
+{
+  "id": "0123456789abcdef0123456789abcdef",
+  "from": "alice@example.com",
+  "recipient": "bob@‮ten.elpmaxe‬",
+  "attempt": 1,
+  "nextAttemptAt": 1750000300000,
+  "reason": "550 5.1.1 ‭no such user‬",
+  "reasonCode": "5.1.1",
+  "requireTls": false,
+  "held": false,
+  "heldBecause": "",
+  "queuedAt": 1750000000000,
+  "attemptsRecorded": 1,
+  "history": []
+}

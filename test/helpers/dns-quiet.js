@@ -28,6 +28,8 @@
  * at a dead port by doing so.
  */
 
+var nodeNet = require("node:net");
+
 var b = require("../../lib/vendor/blamejs");
 
 // Where the resolver is sent. Port 9 is the discard service, which
@@ -45,6 +47,35 @@ if (process.env[ARMED_VAR] === "1") {
   b.network.dns.useDnsOverHttps({ url: QUIET_ENDPOINT });
 }
 
+/**
+ * Whether the endpoint above is really refusing connections.
+ *
+ * It is the precondition for every run armed with this file, and it
+ * lives here rather than in each caller for the reason a shared reader
+ * always does: a machine with something listening on that port measures
+ * a lookup that is accepted and never answered, which is a different
+ * failure and one that burns the caller's whole budget instead of
+ * failing in a few milliseconds.
+ *
+ * Resolves true when the connection is refused, which is the state a
+ * caller needs before it arms a run.
+ */
+function endpointIsRefusing() {
+  return new Promise(function (resolve) {
+    var socket = nodeNet.connect({ host: QUIET_HOST, port: QUIET_PORT });
+    var settled = false;
+    function done(closed) {
+      if (settled) return;
+      settled = true;
+      try { socket.destroy(); }
+      catch (_e) { /* drop-silent by design: the verdict is already decided */ }
+      resolve(closed);
+    }
+    socket.once("connect", function () { done(false); });
+    socket.once("error", function () { done(true); });
+  });
+}
+
 module.exports = {
   // The path to hand `--require`, so a caller names this file by asking
   // it rather than by rebuilding the path and drifting from it.
@@ -53,4 +84,5 @@ module.exports = {
   HOST:      QUIET_HOST,
   PORT:      QUIET_PORT,
   ENDPOINT:  QUIET_ENDPOINT,
+  endpointIsRefusing: endpointIsRefusing,
 };

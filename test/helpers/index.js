@@ -65,6 +65,31 @@ var fs   = require("node:fs");
 var os   = require("node:os");
 var path = require("node:path");
 
+// Fixtures are created private, because the server under test refuses to
+// start against a directory that is not.
+//
+// `b.security.assertProduction` refuses a data directory whose mode is
+// looser than 0750, and `blamepost.start` calls it. Under the usual 0022
+// umask a bare `mkdirSync(dir, { recursive: true })` yields 0755, so a
+// fixture that creates its own data directory hands the server the exact
+// refusal an operator gets, and roughly forty files did. The same umask
+// gave `helpers/certs.js` a 0755 directory to write TLS PRIVATE KEYS
+// into. Setting the umask here fixes both, and every later fixture,
+// without each file having to remember.
+//
+// This is set rather than merely relied on because the check does not run
+// on Windows, where POSIX modes carry no meaning: the suite passed on a
+// workstation and failed on every Linux host, which is how it reached a
+// runner unnoticed.
+//
+// A fixture that deliberately wants a LOOSE mode, to prove the server
+// refuses it, must use `chmodSync`, which the umask does not touch. Every
+// such fixture in this tree already does. Handing a directory-creation
+// call a mode that carries group or other bits yields 0700 instead and
+// asserts nothing, so the `test-fixture-mode-masked-by-umask` detector
+// refuses that shape.
+if (process.platform !== "win32") process.umask(0o077);
+
 // Repository root, resolved from this file rather than from the process
 // working directory, so a test forked with any cwd finds the same tree.
 var REPO_ROOT   = path.resolve(__dirname, "..", "..");
@@ -455,6 +480,78 @@ function tempDir(prefix) {
   return dir;
 }
 
+/**
+ * dataDir(root, name) creates a directory for a test to point
+ * BLAMEPOST_DATA_DIR at, and gives it the permissions the shipped server
+ * requires of one.
+ *
+ * `b.security.assertProduction` refuses to start against a data
+ * directory whose mode is looser than 0750, and `blamepost.start` calls
+ * it, so a fixture that creates the directory itself decides whether the
+ * server under test can boot at all. A bare
+ * `mkdirSync(dir, { recursive: true })` yields 0755 under the usual 0022
+ * umask, which is exactly the refusal an operator gets. The refusal is
+ * correct: the server is telling the operator that a directory holding
+ * sealed keys and a decrypted working copy is readable by every account
+ * on the host, and `Dockerfile` chmods /var/lib/blamepost to 0750 for
+ * the same reason.
+ *
+ * The mode is applied with chmod rather than passed to mkdir because
+ * mkdir's mode is masked by the umask and chmod is not, so a caller
+ * cannot be given something looser than it asked for.
+ *
+ * On Windows the assertion does not run, since POSIX modes carry no
+ * meaning there, so the chmod is skipped and the directory is created
+ * exactly as before. That platform gap is the reason this defect reached
+ * a runner: a suite that only ever ran on Windows could not observe it.
+ */
+function dataDir(root, name) {
+  if (typeof root !== "string" || root.length === 0) {
+    throw new TypeError("dataDir: root must be a non-empty string");
+  }
+  if (name !== undefined && name !== null) {
+    if (typeof name !== "string" || !/^[A-Za-z0-9._-]{1,60}$/.test(name)) {
+      throw new TypeError("dataDir: name must match /^[A-Za-z0-9._-]{1,60}$/");
+    }
+  }
+  var dir = path.join(root, name === undefined || name === null ? "data" : name);
+  fs.mkdirSync(dir, { recursive: true });
+  if (process.platform !== "win32") fs.chmodSync(dir, 0o700);
+  return dir;
+}
+
+// The documentation block reader, relative to a repository root.
+// `scripts/source-primitives.js` requires it from this path.
+var DOCUMENTATION_READER_REL = path.join("lib", "web", "wiki", "blocks.js");
+
+/**
+ * carryDocumentationReader(root) gives a fixture repository root the
+ * documentation block reader that `scripts/source-primitives.js`
+ * requires, without adding any source to the `lib/` walk.
+ *
+ * The reader is copied to `<root>/carried-reader/wiki/blocks.js`, and
+ * `<root>/lib/web` is created as a link to `<root>/carried-reader`. The
+ * script loads the reader through the link. The walk over `lib/` does
+ * not descend into a link, so a fixture reads only the sources its test
+ * writes, and a `lib/` holding nothing but the link has no source at all.
+ *
+ * The link is a junction on Windows, which needs no elevated privilege,
+ * and a directory symlink elsewhere. Returns the path the reader is
+ * reachable at through the link.
+ */
+function carryDocumentationReader(root) {
+  if (typeof root !== "string" || root.length === 0) {
+    throw new TypeError("carryDocumentationReader: root must be a non-empty string");
+  }
+  var carried = path.join(root, "carried-reader");
+  fs.mkdirSync(path.join(carried, "wiki"), { recursive: true });
+  fs.copyFileSync(path.join(REPO_ROOT, DOCUMENTATION_READER_REL),
+    path.join(carried, "wiki", "blocks.js"));
+  fs.mkdirSync(path.join(root, "lib"), { recursive: true });
+  fs.symlinkSync(carried, path.join(root, "lib", "web"), "junction");
+  return path.join(root, DOCUMENTATION_READER_REL);
+}
+
 // Handles whose close() has to run before a directory is removed, keyed
 // by the directory. See closeWithTempDir.
 var _tempDirCloses = new Map();
@@ -767,6 +864,58 @@ function standInDelivery(overrides) {
 }
 
 // ---------------------------------------------------------------------------
+// Audit rows
+// ---------------------------------------------------------------------------
+
+/**
+ * auditCapture() collects every audit row written while it is installed.
+ *
+ * Rows are taken where they are written rather than read back out of a
+ * database, so a run that never opens one still sees them and a run that
+ * does is not waiting on a flush. `replaceChain` hands the row straight
+ * here, so the capture needs no signing chain of its own.
+ *
+ * The store is process-wide. Install one capture per run and hand it
+ * back in a `finally`, or the next file in the same process inherits it.
+ *
+ *   rows()             every row, in the order it was written.
+ *   forAction(action)  the rows carrying one action.
+ *   release()          give the audit store back.
+ */
+function auditCapture() {
+  var rows = [];
+  frameworkHandle().audit.useStore({
+    replaceChain: true,
+    record: async function (row) { rows.push(row); },
+  });
+  return {
+    rows:      function () { return rows.slice(); },
+    forAction: function (action) {
+      return rows.filter(function (row) { return row && row.action === action; });
+    },
+    release:   function () { frameworkHandle().audit.useStore(null); },
+  };
+}
+
+/**
+ * metadataOf(row) reads an audit row's metadata as an object.
+ *
+ * A row's metadata arrives as the JSON text it went in as, so a caller
+ * reading a field off it has to parse first. Reading it unparsed yields
+ * `undefined` for every field, which quietly satisfies any assertion
+ * phrased as an upper bound, so this refuses rather than returning an
+ * empty object when there is nothing to read.
+ */
+function metadataOf(row) {
+  var raw = row && row.metadata;
+  if (raw && typeof raw === "object") return raw;
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new Error("audit row carries no metadata to read: " + JSON.stringify(row));
+  }
+  return JSON.parse(raw);
+}
+
+// ---------------------------------------------------------------------------
 
 module.exports = {
   // Node stdlib re-exports, so a test file needs one require for the
@@ -777,6 +926,10 @@ module.exports = {
 
   // Stand-in handles.
   standInDelivery: standInDelivery,
+
+  // Audit rows, captured where they are written.
+  auditCapture: auditCapture,
+  metadataOf:   metadataOf,
 
   // Faults the volume can raise. Two removals and one write, each with
   // its own helper, named for the call it patches: a fixture faulting
@@ -807,10 +960,16 @@ module.exports = {
   // Temporary data directories, and the handles that have to be given
   // back before one is removed.
   tempDir:           tempDir,
+  dataDir:           dataDir,
   withTempDir:       withTempDir,
   closeWithTempDir:  closeWithTempDir,
   removeTempDir:     removeTempDir,
   cleanupTempDirs:   cleanupTempDirs,
+
+  // A fixture root that loads the documentation block reader without
+  // adding source to its `lib/` walk.
+  carryDocumentationReader: carryDocumentationReader,
+  DOCUMENTATION_READER_REL: DOCUMENTATION_READER_REL,
 };
 
 // The framework handle is a getter so the require cost lands only on

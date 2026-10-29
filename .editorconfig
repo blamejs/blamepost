@@ -18,3 +18,11 @@ trim_trailing_whitespace = false
 [lib/vendor/**]
 trim_trailing_whitespace = false
 insert_final_newline = false
+
+# Fuzz seeds are the exact bytes a wire-protocol reader is handed. A
+# trailing space is part of a command, and a final newline appended by an
+# editor turns a well-formed line into one the guard refuses for a bare
+# LF, which would cost the corpus the accept path it was written for.
+[fuzz/*_seed_corpus/**]
+trim_trailing_whitespace = false
+insert_final_newline = false

@@ -20,8 +20,14 @@
 // An uncovered, unmarked, non-re-throwing swallow FAILS the gate: add a RED vector that
 // drives the catch, or re-throw.
 //
+// A marker answers for ONE swallow. A marker line that excused two is refused by name and
+// both swallows are printed, because a sentence written about one catch cannot be the
+// recorded decision for another one that happens to sit near it.
+//
 // Runs AFTER `npm run coverage` (which writes coverage/lcov.info). Reads that report; it
-// does not run the suite itself.
+// does not run the suite itself. CI runs the instrumented suite and then this gate as the
+// next step, so a pull request answers it; `npm run coverage:gated` is the same pair
+// locally.
 //
 // WHAT THE RUN EXAMINED is published as the last lines of stdout, on a passing run and a
 // failing one alike:
@@ -111,14 +117,98 @@ function findSwallows(rel, src) {
   return out;
 }
 
-// A per-line `allow:swallow-unverified` marker on any line of the catch body (or up to 2
-// lines above the catch), matching the codebase-patterns marker convention.
-function isMarked(srcLines, startLine, endLine) {
-  for (var ln = startLine - 2; ln <= endLine; ln++) {
-    var s = srcLines[ln - 1];
-    if (s && /\ballow:swallow-unverified\b/.test(s)) return true;
+// A per-line `allow:swallow-unverified` marker, in the three places it is attached to a
+// catch: on the catch's own line, in the comment that OPENS its body, or in the comment
+// block written directly above it. Anywhere else in the file it belongs to some other
+// statement, and one marker answering for two swallows is one swallow nobody looked at.
+//
+// The block above is walked rather than counted off in lines. The rule here used to be a
+// fixed two lines above the catch, which decided whether a marker belonged to a swallow by
+// how long its reason happened to be: a reason that wrapped onto a third line put the
+// marker one line out of reach, the gate reported the swallow as unmarked, and the
+// sentence explaining why it fails closed was sitting in the file directly above it. That
+// is the layout-coupled bound this project bans in a detector, in the direction that turns
+// a written decision into noise.
+//
+// The walk steps over a single-line `try { ... }` opener between the block and the catch,
+// because the comment is written for the statement rather than for whichever half of it
+// the `catch` keyword landed on. It steps over THAT opener only: a line that begins `try`
+// and also carries a `catch` or a `finally` is a complete statement of its own, and
+// stepping over one of those puts no bound on how far the marker reaches. A run of
+// adjacent single-line try/catch statements is then silenced end to end by the one marker
+// written above the first of them. The walk otherwise stops at the first line that is
+// neither a comment nor that opener, so a marker cannot reach past ordinary code to a
+// catch it was not written for.
+//
+// The body scan stops at the first line of code for the same reason in the other
+// direction. A catch body can hold a whole try/catch statement of its own, and a scan over
+// the catch's full span reads the INNER statement's marker as the enclosing catch's: the
+// reason a reader would check describes the cleanup, and the fault the outer catch
+// actually swallows has nothing written about it at all.
+var MARKER_RE = /\ballow:swallow-unverified\b/;
+var COMMENT_RE = /^(?:\/\/|\*|\/\*)/;
+var TRY_OPENER_RE = /^\}?\s*try\b/;
+
+// The opener of the try statement this catch belongs to, as opposed to a complete
+// try/catch or try/finally statement that merely starts with the same word.
+function _isOwnTryOpener(s) {
+  return TRY_OPENER_RE.test(s) && !/\bcatch\b/.test(s) && !/\bfinally\b/.test(s);
+}
+
+/**
+ * markerLineFor(srcLines, startLine, endLine) -> the 1-based line carrying the marker
+ * this catch is excused by, or 0 when it carries none.
+ *
+ * The LINE rather than a yes, because which swallow a marker answers for is the whole
+ * question here, and a boolean cannot be checked for having answered twice. `main` keys
+ * the shared-marker refusal on what this returns.
+ */
+function markerLineFor(srcLines, startLine, endLine) {
+  var ln, s;
+  // On the catch's own line, which is where a single-line catch carries it.
+  s = srcLines[startLine - 1];
+  if (s && MARKER_RE.test(s)) return startLine;
+  // In the comment that opens the body, up to the first line of code.
+  for (ln = startLine + 1; ln <= endLine; ln++) {
+    s = String(srcLines[ln - 1] === undefined ? "" : srcLines[ln - 1]).trim();
+    if (!COMMENT_RE.test(s)) break;
+    if (MARKER_RE.test(s)) return ln;
   }
-  return false;
+  // In the comment block written directly above the catch.
+  for (ln = startLine - 1; ln >= 1; ln--) {
+    s = String(srcLines[ln - 1] === undefined ? "" : srcLines[ln - 1]).trim();
+    if (s === "") break;                       // the block is not attached to this catch
+    if (_isOwnTryOpener(s)) continue;          // the statement's own opener
+    if (!COMMENT_RE.test(s)) break;
+    if (MARKER_RE.test(s)) return ln;
+  }
+  return 0;
+}
+
+function isMarked(srcLines, startLine, endLine) {
+  return markerLineFor(srcLines, startLine, endLine) !== 0;
+}
+
+/**
+ * sharedMarkers(claims) -> [ { marker, swallows } ], for every marker line that excused
+ * more than one swallow.
+ *
+ * `claims` maps `<file>:<marker line>` to the swallows that were let through by it.
+ *
+ * The reach rules above decide, one catch at a time, which marker is attached to it. This
+ * asks the same invariant from the other end, where no reach rule is involved and none can
+ * grant more than it says: a written reason answers for ONE swallow. Two swallows behind
+ * one sentence means
+ * the sentence describes at most one of them, and the other was let through by an
+ * explanation of something else. Reporting it names both, which is what a reader needs to
+ * decide which one the reason was for and what the other one still owes.
+ */
+function sharedMarkers(claims) {
+  var out = [];
+  Object.keys(claims || {}).sort().forEach(function (key) {
+    if (claims[key].length > 1) out.push({ marker: key, swallows: claims[key].slice() });
+  });
+  return out;
 }
 
 function main() {
@@ -144,6 +234,11 @@ function main() {
   }
   var cov = parseLcov(fs.readFileSync(LCOV, "utf8"));
   var bad = [];
+  // Which marker line let which swallow through, recorded only for the swallows that
+  // actually reached the marker read. A covered swallow never consults one, so a marker
+  // it happens to sit near is not a reason it was let through and does not count as a
+  // claim on it.
+  var claims = {};
   var swallowCount = 0, coveredCount = 0, markedCount = 0;
   sources.forEach(function (file) {
     var rel = _norm(file);
@@ -166,11 +261,20 @@ function main() {
         if (fileCov[ln] > 0) { covered = true; break; }
       }
       if (covered) { coveredCount++; return; }
-      if (isMarked(srcLines, sw.startLine, sw.endLine)) { markedCount++; return; }
+      var markerLine = markerLineFor(srcLines, sw.startLine, sw.endLine);
+      if (markerLine !== 0) {
+        markedCount++;
+        var key = rel + ":" + markerLine;
+        if (!claims[key]) claims[key] = [];
+        claims[key].push(rel + ":" + sw.startLine + " catch (" + sw.param + ")");
+        return;
+      }
       bad.push({ file: rel, line: sw.startLine, param: sw.param });
     });
   });
-  console.log("[check-swallow-coverage] swallows=" + swallowCount + " covered=" + coveredCount + " marked=" + markedCount + " unverified=" + bad.length);
+  var shared = sharedMarkers(claims);
+  console.log("[check-swallow-coverage] swallows=" + swallowCount + " covered=" + coveredCount
+    + " marked=" + markedCount + " unverified=" + bad.length + " shared-markers=" + shared.length);
 
   // The units this run answers for, decided before the verdict sentence is
   // written. A run that examined nothing must not print the passing sentence
@@ -187,8 +291,18 @@ function main() {
     bad.forEach(function (b) {
       console.error("  " + b.file + ":" + b.line + "  catch (" + b.param + ") -- add a RED vector that drives this catch, re-throw, or mark `allow:swallow-unverified <reason>`");
     });
-  } else if (empty.length === 0) {
-    console.log("[check-swallow-coverage] OK -- every lib swallow re-throws, is execution-covered, or is explicitly marked.");
+  }
+  if (shared.length) {
+    console.error("\nMarkers excusing more than one swallow (a written reason answers for one):");
+    shared.forEach(function (s) {
+      console.error("  " + s.marker + " excused " + s.swallows.length + ":");
+      s.swallows.forEach(function (w) { console.error("      " + w); });
+      console.error("    One of these is what the reason describes. Give the others their own"
+        + " marker with their own reason, or a RED vector that drives the catch.");
+    });
+  }
+  if (bad.length === 0 && shared.length === 0 && empty.length === 0) {
+    console.log("[check-swallow-coverage] OK -- every lib swallow re-throws, is execution-covered, or carries a marker of its own.");
   }
 
   // What this run answered for, published whatever the verdict.
@@ -196,10 +310,10 @@ function main() {
   // The sentence above is true of a run that walked no source at all, and it
   // is the same sentence in the same words. Three gates in the declared chain
   // publish this same walk as `lib-source-files`, so an empty one there would
-  // be caught, but "caught somewhere else" is not the same as answered for: a
-  // coverage run and this gate are invoked together through one npm script
-  // that nothing in the chain drives, so on that path this verdict is the only
-  // one there is.
+  // be caught, but "caught somewhere else" is not the same as answered for.
+  // This gate is invoked bare, as its own step after the instrumented suite,
+  // and nothing captures its stdout: the exit code is the whole of what it
+  // says, so the refusal of an empty set has to be its own.
   //
   // Both units, because they empty independently and in opposite directions. A
   // walk pointed at a directory that moved takes `lib-source-files` to zero.
@@ -208,18 +322,20 @@ function main() {
   // about nothing, which is the one this gate exists to give.
   var code = examinedCounts.publish(units, { tag: "[check-swallow-coverage]" });
 
-  process.exit(bad.length ? 1 : code);
+  process.exit(bad.length || shared.length ? 1 : code);
 }
 
-// Exported for hermetic unit tests. The swallow finder and the marker reader
-// are pure, read no report and touch no network, and they are the load-bearing
-// logic: `lib-swallows` reaching zero is this finder having stopped matching,
+// Exported for hermetic unit tests. The swallow finder, the marker reader and the
+// shared-marker refusal are pure, read no report and touch no network, and they are the
+// load-bearing logic: `lib-swallows` reaching zero is this finder having stopped matching,
 // so a case that holds it to a known shape is what keeps that count honest.
 // Requiring this file runs nothing.
 module.exports = {
-  findSwallows: findSwallows,
-  isMarked:     isMarked,
-  parseLcov:    parseLcov,
+  findSwallows:   findSwallows,
+  isMarked:       isMarked,
+  markerLineFor:  markerLineFor,
+  sharedMarkers:  sharedMarkers,
+  parseLcov:      parseLcov,
 };
 
 if (require.main === module) main();

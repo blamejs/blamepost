@@ -129,12 +129,28 @@ function _markerAnswer(entry, qname, qtype) {
  * file: `FAILING` cannot be looked up at all, and `HANGING` is accepted
  * and never answered.
  *
+ * Every answer carries `validated`, which is what the shipped resolver
+ * reports the response's DNSSEC authentication under (RFC 4035 §3.2.3).
+ * An entry sets `authenticated: false` for a name in an unsigned zone.
+ * The field is not decoration: RFC 7672 §1.3 forbids a sender from using
+ * a TLSA record that arrived unauthenticated, so a fixture that left the
+ * field off would have a caller reading silence where the real handle
+ * always speaks.
+ *
+ * `opts.reportsDnssec: false` leaves the field off every answer instead,
+ * which is the operator-supplied handle rather than the shipped one:
+ * `posture.create` takes any handle with the readers below, and one
+ * wrapped around an internal service reports nothing about DNSSEC. That
+ * is a third answer and not a variant of the second, so it is asked for
+ * rather than arrived at.
+ *
  * `calls` records every question asked, so a test can assert that the
  * resolver the operator pinned is the one a lookup went to.
  */
-function resolverOver(zone) {
+function resolverOver(zone, opts) {
   var table = _entries(zone);
   var calls = [];
+  var reportsDnssec = !(opts && opts.reportsDnssec === false);
 
   function _answer(name, qtype, pick) {
     calls.push(qtype + " " + _key(name));
@@ -142,7 +158,9 @@ function resolverOver(zone) {
     if (entry === undefined || entry === null) throw _nxdomain(_key(name), qtype);
     var marker = _markerAnswer(entry, _key(name), qtype);
     if (marker !== undefined) return marker;
-    return pick(entry);
+    var answer = pick(entry);
+    if (reportsDnssec) answer.validated = entry.authenticated !== false;
+    return answer;
   }
 
   return {
@@ -237,7 +255,8 @@ var TYPED_READERS = Object.freeze([
  * resolver.
  *
  * Values are resource records in the shape `query` resolves to, so a
- * gate reading `rrs[i].decoded` sees what it would see in production. A
+ * gate reading `rrs[i].decoded` sees what it would see in production, or
+ * `{ rrs, authenticated: false }` for a name in a zone nothing signed. A
  * name and type the table does not carry does not exist, which the
  * handle signals the way the shipped resolver signals it, with
  * `resolver/nxdomain`. An entry whose value is `FAILING` is a lookup
@@ -280,10 +299,18 @@ function pinnedResolverOver(zone) {
     var qname = _key(name);
     var qtype = String(type).toUpperCase();
     asked.push(qname + "|" + qtype);
-    var rrs = table[qname + "|" + qtype];
-    var marker = _markerAnswer(rrs, qname, qtype);
+    var entry = table[qname + "|" + qtype];
+    var marker = _markerAnswer(entry, qname, qtype);
     if (marker !== undefined) return marker;
-    if (!rrs) throw _nxdomain(qname, qtype);
+    if (!entry) throw _nxdomain(qname, qtype);
+    // A value may be the records alone, or `{ rrs, authenticated }` for
+    // a name in a zone nothing signed. The second shape exists because a
+    // fixture that can only produce an authenticated answer lets a case
+    // about DNSSEC pass without the question being asked: RFC 7672 §1.3
+    // forbids a sender from using a TLSA record that arrived
+    // unauthenticated, so the answer's authentication is the verdict
+    // rather than a detail of it.
+    var rrs = Array.isArray(entry) ? entry : entry.rrs;
     return Promise.resolve({
       rrs:        rrs.slice(),
       authority:  [],
@@ -291,7 +318,7 @@ function pinnedResolverOver(zone) {
       ttl:        60000,
       fromCache:  false,
       stale:      false,
-      validated:  true,
+      validated:  Array.isArray(entry) ? true : entry.authenticated !== false,
     });
   }
 

@@ -17,6 +17,12 @@
   </div>
   {% endif %}
 
+  {% if transportRefused %}
+  <p class="fineprint">
+    The session cookie carries the <code>__Host-</code> prefix and the Secure attribute, which a
+    browser stores only on a connection it reached over TLS.
+  </p>
+  {% else %}
   <form method="post" action="/sign-in" class="signin-form">
     <input type="hidden" name="_csrf" value="{{ csrfToken }}">
 
@@ -36,8 +42,9 @@
   </form>
 
   <p class="fineprint">
-    The session cookie carries the <code>__Host-</code> prefix and the Secure attribute, so this
-    page is served over TLS. Repeated failures from one address are slowed down.
+    The session cookie carries the <code>__Host-</code> prefix and the Secure attribute.
+    Repeated failures from one address are slowed down.
   </p>
+  {% endif %}
 </section>
 {% endblock %}

@@ -62,6 +62,8 @@ var blamepost = require("../../lib");
 var Wire        = wire.Wire;
 var reservePort = wire.reservePort;
 var visible     = wire.visible;
+var imapLiteral = wire.imapLiteral;
+var pop3Body    = wire.pop3Body;
 var LOOPBACK    = wire.LOOPBACK;
 
 var HOSTNAME = "mx.example.com";
@@ -133,58 +135,10 @@ var LATIN1_BODY = Buffer.concat([
 ]);
 var LATIN1_MESSAGE = Buffer.concat([LATIN1_HEADER, LATIN1_BODY]);
 
-// ---- reading a response off the wire ----------------------------------------
-
-// The octets of an IMAP literal in a response. A latin1 view of the
-// buffer is a one to one mapping from octets to characters, so an index
-// into the view is an offset into the buffer and the announced count can
-// be applied to the buffer directly.
-//
-// Both halves are returned because the pair is the claim: a literal that
-// announces one count and is followed by a different number of octets
-// desynchronises the client's parser, whatever the payload says.
-function imapLiteral(bytes) {
-  var view  = bytes.toString("latin1");
-  var match = /\{(\d+)\}\r\n/.exec(view);
-  if (!match) {
-    throw new Error("no literal in the FETCH response: " + visible(view.slice(0, 300)));
-  }
-  var announced = parseInt(match[1], 10);
-  var from      = match.index + match[0].length;
-  // Everything from the literal to the close of the FETCH response,
-  // which is what the announced count is a claim about.
-  var closed  = view.lastIndexOf(")\r\n", view.length);
-  var present = closed === -1 ? bytes.length - from : closed - from;
-  return {
-    announced: announced,
-    present:   present,
-    payload:   bytes.subarray(from, from + announced),
-  };
-}
-
-// The message body of a POP3 multi-line response: everything between the
-// `+OK` line and the terminating dot, with RFC 1939 section 3 dot
-// stuffing undone.
-function pop3Body(bytes) {
-  var view  = bytes.toString("latin1");
-  var open  = view.indexOf("\r\n");
-  if (open === -1) throw new Error("no +OK line: " + visible(view.slice(0, 300)));
-  var end = view.indexOf("\r\n.\r\n", open);
-  if (end === -1) throw new Error("no terminating dot: " + visible(view.slice(0, 300)));
-  var body = bytes.subarray(open + 2, end + 2);
-  // Undoing the stuffing on the octets rather than on a decoded copy,
-  // for the same reason the socket is in binary mode.
-  var out = [];
-  var at  = 0;
-  var text = body.toString("latin1");
-  for (;;) {
-    var dot = text.indexOf("\r\n..", at);
-    if (dot === -1) { out.push(body.subarray(at)); break; }
-    out.push(body.subarray(at, dot + 3));
-    at = dot + 4;
-  }
-  return Buffer.concat(out);
-}
+// The two readers that take a response apart as octets, `imapLiteral`
+// and `pop3Body`, live in `test/helpers/wire.js`. The inbound direction
+// reads the same two shapes, and two copies of them would be two ideas
+// about where a literal ends and which dots the stuffing put there.
 
 // ---- cases ------------------------------------------------------------------
 
@@ -388,22 +342,56 @@ async function retrIsByteExact(session, msgNum) {
 
 // ---- runner -----------------------------------------------------------------
 
+// One APPEND, read by the tag it was sent under.
+//
+// RFC 9051 section 7 gives a command's result a line opening with that
+// command's tag, and gives an untagged line the asterisk. A pattern of
+// `\S+` matches both, so a read written that way returns whichever line
+// lands first and the caller cannot tell a result from a remark.
+//
+// This listener emits one of those remarks after every APPEND. blamejs
+// issue 699: once a synchronizing literal's octets are consumed the CRLF
+// that ended the command line is still in the buffer, the next turn of
+// the read loop takes it as a line of its own, and there is no branch
+// for an empty one, so a client gets `* BAD ... empty command line`
+// after an APPEND that stored the message. Whether that line arrives
+// before or after the tagged reply is a matter of how the two writes
+// land, which is why a `\S+` read passed on one platform and read the
+// remark as the result on the other.
+//
+// Anchoring on the tag measures the result and leaves the defect on the
+// wire where it belongs, and the second assertion is what keeps it that
+// way: a reply this file acted on has to be the tagged one.
+async function appendOne(session, payload, note, claim) {
+  var tag = session.tag();
+  await session.sendLiteral(tag + " APPEND INBOX", payload, note);
+  var reply = await session.read(new RegExp("^" + tag + " (OK|NO|BAD)", "m"), claim);
+  // The tag is inside the assertion rather than beside it, so this
+  // cannot be satisfied by an untagged line that happens to say OK.
+  count(claim, new RegExp("^" + tag + " OK", "m").test(reply), visible(reply));
+
+  // A barrier, not a wait. The remark above is written on the turn of
+  // the listener's read loop after the APPEND, so a command sent now is
+  // answered after it, and reading that answer takes the remark off the
+  // buffer whichever order the two writes landed in. The next APPEND
+  // therefore starts on a clear buffer, and its literal continuation
+  // cannot read a leftover `* BAD` as a refusal of the literal it is
+  // about to send. Nothing sleeps: the tagged reply is the event.
+  var barrier = session.tag();
+  session.send(barrier + " NOOP");
+  await session.read(new RegExp("^" + barrier + " (OK|NO|BAD)", "m"), "NOOP answered");
+  return reply;
+}
+
 // Both fixtures go in through APPEND, which is the one client path that
 // carries a literal of arbitrary octets (RFC 9051 section 6.3.12). A
 // fixture written through the store would not prove that a message can
 // reach the store intact in the first place.
 async function appendBoth(session) {
-  await session.sendLiteral(session.tag() + " APPEND INBOX", UTF8_MESSAGE,
-    "<the multi-byte message>");
-  var first = await session.read(/^\S+ (OK|NO|BAD)/m, "first APPEND answered");
-  count("a message carrying multi-byte characters is accepted",
-    /^\S+ OK/m.test(first), visible(first));
-
-  await session.sendLiteral(session.tag() + " APPEND INBOX", LATIN1_MESSAGE,
-    "<the 8-bit message>");
-  var second = await session.read(/^\S+ (OK|NO|BAD)/m, "second APPEND answered");
-  count("a message carrying octets that are not valid UTF-8 is accepted",
-    /^\S+ OK/m.test(second), visible(second));
+  await appendOne(session, UTF8_MESSAGE, "<the multi-byte message>",
+    "a message carrying multi-byte characters is accepted");
+  await appendOne(session, LATIN1_MESSAGE, "<the 8-bit message>",
+    "a message carrying octets that are not valid UTF-8 is accepted");
 }
 
 async function run() {

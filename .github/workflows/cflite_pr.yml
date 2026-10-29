@@ -15,9 +15,20 @@ name: ClusterFuzzLite PR fuzzing
 # mirrors, what OpenSSF Scorecard's Fuzzing check detects, and what
 # would re-engage if a JS fix ships upstream.
 #
-# Findings: jazzer's `-error_exitcode=1` fails the step with the
-# reproducer printed inline, and the libFuzzer crash artifact lands at
-# `crash-*` in the workspace and uploads on failure.
+# Findings: the step fails with the reproducer printed inline, both as
+# hex and as base64, and the libFuzzer crash artifact lands at `crash-*`
+# in the workspace and uploads on failure. `-error_exitcode=1` sets the
+# code for a libFuzzer-detected failure; an uncaught exception from the
+# harness exits 77 instead, which is jazzer's own code for one. Either
+# way the step fails, and `node fuzz/run-once.js <target> @crash-<hash>`
+# replays the artifact under plain Node for a stack trace.
+#
+# `--sync` is passed to every harness that returns a value. A harness that
+# returns a promise carries the line `module.exports.async = true;`, and
+# `node fuzz/run-once.js --mode <target>` reads that line and prints sync
+# or async. Under --sync jazzer does not wait for a returned promise, so a
+# rejection from an asynchronous harness would never be reported.
+# .clusterfuzzlite/build.sh asks the same question the same way.
 
 on:
   pull_request:
@@ -58,9 +69,19 @@ jobs:
         id: harnesses
         run: |
           set -euo pipefail
+          # The harness set is discovered rather than listed, so a new
+          # fuzz/<name>.fuzz.js runs with no workflow edit. Finding none is a
+          # refusal rather than a pass whenever .clusterfuzzlite/ is present,
+          # since that directory is what configures fuzzing. The count is
+          # published on every run, passing or failing.
           if [ ! -d fuzz ]; then
             echo "targets=[]" >> "$GITHUB_OUTPUT"
             echo "any=false" >> "$GITHUB_OUTPUT"
+            echo "EXAMINED 0 fuzz-harnesses"
+            if [ -d .clusterfuzzlite ]; then
+              echo "REFUSED: .clusterfuzzlite/ configures fuzzing and fuzz/ is absent."
+              exit 1
+            fi
             echo "No fuzz/ directory, so there is nothing to fuzz."
             exit 0
           fi
@@ -68,9 +89,21 @@ jobs:
             | sed 's/\.fuzz\.js$//' \
             | sort \
             | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          COUNT=$(printf '%s' "$TARGETS" | jq 'length')
+          case "$COUNT" in
+            ''|*[!0-9]*)
+              echo "REFUSED: the harness count could not be read."
+              exit 1
+              ;;
+          esac
           echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
-          if [ "$TARGETS" = "[]" ]; then
+          echo "EXAMINED $COUNT fuzz-harnesses"
+          if [ "$COUNT" -eq 0 ]; then
             echo "any=false" >> "$GITHUB_OUTPUT"
+            if [ -d .clusterfuzzlite ]; then
+              echo "REFUSED: .clusterfuzzlite/ configures fuzzing and fuzz/ carries no *.fuzz.js harness."
+              exit 1
+            fi
             echo "fuzz/ carries no *.fuzz.js harness yet."
           else
             echo "any=true" >> "$GITHUB_OUTPUT"
@@ -93,10 +126,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Node 24.19.0 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - name: Set up Node 24.22.1 LTS
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: '24.19.0'
+          node-version: '24.22.1'
 
       - name: Install jazzer.js
         run: npm ci --prefix fuzz
@@ -111,21 +144,38 @@ jobs:
           set -euo pipefail
           harness="fuzz/${TARGET}.fuzz.js"
           corpus="fuzz/${TARGET}_seed_corpus"
-          echo "::group::jazzer fuzz $harness ($FUZZ_TIME s)"
-          # The seed corpus goes in as the first positional argument when
-          # present; libFuzzer treats directory arguments as corpus inputs.
-          if [ -d "$corpus" ]; then
-            npx --prefix fuzz jazzer "$harness" "$corpus" -- \
-              -max_total_time="$FUZZ_TIME" -error_exitcode=1 -timeout=30
-          else
-            npx --prefix fuzz jazzer "$harness" -- \
-              -max_total_time="$FUZZ_TIME" -error_exitcode=1 -timeout=30
-          fi
+          dict="fuzz/${TARGET}.dict"
+          # The seed corpus goes in as a positional argument when
+          # present; libFuzzer treats a directory argument as corpus
+          # inputs.
+          corpus_args=()
+          if [ -d "$corpus" ]; then corpus_args+=("$corpus"); fi
+          # The dictionary carries the CR and LF sequences the curated
+          # corpus cannot. A seed is a text file, and CR is the one byte
+          # an editor rewrites on the way to disk, so each seed holds one
+          # command with no terminator and the wire framing comes from
+          # here. Every guard's bare-CR and bare-LF refusal and the
+          # DATA-body smuggling detector are defined on those bytes, so
+          # without the dictionary that whole family is unreachable.
+          libfuzzer_args=(-max_total_time="$FUZZ_TIME" -error_exitcode=1 -timeout=30)
+          if [ -f "$dict" ]; then libfuzzer_args+=(-dict="$dict"); fi
+          mode="$(node fuzz/run-once.js --mode "$TARGET")"
+          case "$mode" in
+            sync)  mode_args=(--sync) ;;
+            async) mode_args=() ;;
+            *)
+              echo "REFUSED: run-once.js --mode $TARGET printed '$mode', not sync or async."
+              exit 1
+              ;;
+          esac
+          echo "::group::jazzer fuzz $harness ($FUZZ_TIME s, $mode)"
+          npx --prefix fuzz jazzer "${mode_args[@]}" "$harness" "${corpus_args[@]}" -- \
+            "${libfuzzer_args[@]}"
           echo "::endgroup::"
 
       - name: Upload crash artifact
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: fuzz-crash-${{ matrix.target }}
           path: |

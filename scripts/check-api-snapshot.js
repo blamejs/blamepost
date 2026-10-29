@@ -152,6 +152,23 @@ try {
       "the baseline so it lands in a committed diff.");
   }
 
+  // The other direction, and the one the polarity check above cannot see. That
+  // asks whether a RECORDED polarity still matches; this asks whether a
+  // DECLARED one is recorded at all. A polarity declared in source and never
+  // committed is governed by nothing, and a later edit of that single word
+  // re-classifies every past and future change to the list with no baseline
+  // entry to contradict it. Refreshing the baseline is what records it, so this
+  // belongs here rather than in the refresh, which would then refuse the only
+  // thing that can clear it.
+  var untrackedPolarities = snap.checkMembershipUntracked(
+    baseline.membershipByArray, membership);
+  if (untrackedPolarities.length > 0) {
+    _refuse(counts, "declared @membership polarity absent from the snapshot:",
+      untrackedPolarities,
+      "regenerate the baseline with `node scripts/refresh-api-snapshot.js` and commit it, so " +
+      "each declared polarity is recorded and frozen.");
+  }
+
   var diff = snap.compare(baseline, current, { membership: membership });
 
   console.log(snap.formatDiff(diff));

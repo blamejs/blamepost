@@ -202,6 +202,73 @@ function aMessageHandedOverAsTextIsReadTheSameWay() {
     reportedHeaderBlock(Buffer.alloc(0)) === "");
 }
 
+// A message this server holds is a Buffer, and a caller holding text
+// gets the case above. Everything else is a caller that has no message,
+// and the quote it produces goes out to whoever an envelope named.
+//
+// What a coercion does to those values is write the value's own text
+// into the report: `null` quotes the four characters `null`, a number
+// quotes its digits, and an array of bytes quotes the decimal spelling
+// of each one separated by commas. All four compose a report this server
+// signs and addresses to a third party, naming a message that does not
+// exist, and the sender reading it cannot tell it from a report about
+// one of theirs.
+//
+// A byte array is the one of these a caller reaches by accident rather
+// than by fault: `Uint8Array` is what a stream read, a decoder and a
+// structured clone all hand back, and it carries the message correctly.
+// Coerced through text it becomes the digits, which is the failure that
+// looks least like one in a log.
+function aCallerWithNoMessageIsRefusedRatherThanQuoted() {
+  var cases = [
+    ["null", null],
+    ["undefined", undefined],
+    ["the number zero", 0],
+    ["a number", 260],
+    ["false", false],
+    ["an object", { headers: "none" }],
+  ];
+  for (var i = 0; i < cases.length; i += 1) {
+    var threw = null;
+    var got = null;
+    try { got = reportedHeaderBlock(cases[i][1]); }
+    catch (e) { threw = e; }
+    count("a caller handing " + cases[i][0] + " instead of a message is refused, so no " +
+      "report quotes that value's own text back to a sender as their headers",
+      threw !== null, threw === null ? "returned " + JSON.stringify(got) : "threw " + threw.name);
+  }
+
+  var raw = Buffer.from("From: alice@example.com\r\nTo: bob@example.net\r\n\r\nbody\r\n", "utf8");
+  var fromBytes = null;
+  var bytesThrew = null;
+  try { fromBytes = reportedHeaderBlock(new Uint8Array(raw)); }
+  catch (e) { bytesThrew = e; }
+  count("a caller holding the message as a byte array gets the block those bytes carry, " +
+    "rather than the decimal spelling of every octet in it",
+    bytesThrew === null && fromBytes === reportedHeaderBlock(raw),
+    bytesThrew !== null ? "threw " + bytesThrew.message : JSON.stringify(fromBytes));
+}
+
+// The refusal says which argument was wrong and why a message has to be
+// bytes, because the caller reading it is composing a report and the
+// alternative it needs is `headerBreak`'s: offsets into a message are
+// offsets into octets.
+function theRefusalNamesTheArgumentAndTheReason() {
+  var threw = null;
+  try { reportedHeaderBlock(null); }
+  catch (e) { threw = e; }
+  if (threw === null) {
+    count("the refusal names the primitive and the argument", false, "nothing was thrown");
+    return;
+  }
+  count("the refusal names the primitive it came from, so a caller composing a report knows " +
+    "which of its arguments to fix",
+    String(threw.message).indexOf("reportedHeaderBlock") !== -1, threw.message);
+  count("and it is a TypeError, which is what every other wrong-shaped argument in this " +
+    "module raises",
+    threw instanceof TypeError, threw.name);
+}
+
 // ---------------------------------------------------------------------------
 
 async function run() {
@@ -219,6 +286,10 @@ async function run() {
     function () { return theCutNeverLandsInsideACharacter(); });
   await helpers.withTestTimeout("reported-header-block: a message handed over as text",
     function () { return aMessageHandedOverAsTextIsReadTheSameWay(); });
+  await helpers.withTestTimeout("reported-header-block: a caller with no message is refused",
+    function () { return aCallerWithNoMessageIsRefusedRatherThanQuoted(); });
+  await helpers.withTestTimeout("reported-header-block: the refusal names the argument",
+    function () { return theRefusalNamesTheArgumentAndTheReason(); });
   return helpers.getChecks();
 }
 

@@ -321,7 +321,10 @@ async function run() {
     var keyPath = helpers.path.join(dataDir, "keys", "example.com.bp202601.ed25519.sealed");
     check("the private key is a file under the keys folder", helpers.fs.existsSync(keyPath));
     var onDisk = helpers.fs.readFileSync(keyPath, "utf8");
-    check("the private key is sealed at rest", onDisk.indexOf("vault:") === 0);
+    // Sealed, and sealed as this selector's key rather than to the volume
+    // at large. The plain seal opens wherever it is found, so a file
+    // carrying it opens as a signing key whatever it was sealed as.
+    check("the private key is sealed at rest", onDisk.indexOf("vault.aad:") === 0);
     check("no plaintext private key is written", onDisk.indexOf("BEGIN PRIVATE KEY") === -1);
 
     // ---- key material that will not open -----------------------------------
@@ -333,12 +336,14 @@ async function run() {
     // record and log its message for the operator, so a fault carrying
     // neither is filed as an unknown and read as a transient one.
     //
-    // Three shapes, because they have three different remedies. A file
-    // that is gone is a volume missing part of itself. A file that is
-    // there and does not open was written under a different vault key or
-    // has been damaged where it lies. A file that is there and carries
-    // no seal at all is signing material lying in the open, which is the
-    // one thing sealing a key at rest exists to prevent.
+    // Four shapes, because they have four different remedies. A file
+    // that is gone is a volume missing part of itself. A file sealed to
+    // this selector that does not open is not this selector's key, and
+    // no command re-derives one. A file carrying the plain volume seal
+    // that does not open was written under a different vault key or has
+    // been damaged where it lies. A file that carries no seal at all is
+    // signing material lying in the open, which is the one thing sealing
+    // a key at rest exists to prevent.
     //
     // The damage is done to a second domain, so the key the rest of this
     // file signs with is never touched, and the file is put back whole
@@ -363,7 +368,7 @@ async function run() {
       return freshSignerFor(dataDir, handle, "example.net");
     });
     count("a sealed key cut short refuses in this layer's words rather than the vault's",
-      cutShort !== null && cutShort.code === "dkim/key-seal-unopened",
+      cutShort !== null && cutShort.code === "dkim/key-seal-foreign",
       cutShort ? String(cutShort.code) : "signed with a key that did not open");
     count("and the refusal names the domain and the selector, which is what an operator " +
       "acts on",
@@ -386,6 +391,32 @@ async function run() {
     count("and is not the code a domain still waiting to be set up refuses under",
       cutShort !== null && cutShort.code !== "dkim/no-active-selector",
       cutShort ? String(cutShort.code) : "(no refusal)");
+
+    // The same damage to a key still carrying the plain volume seal,
+    // which is what a volume holds until `blamepost dkim reseal` has run
+    // on it. Such a file carries nothing saying which value it is, so a
+    // seal that will not open says only that: it was written under a
+    // different vault key, or its bytes have been damaged. The remedy is
+    // a restore rather than a replacement, so it is a refusal of its own.
+    var netKeyPem = helpers.b.vault.aad.unseal(wholeKey, {
+      purpose:   "blamepost.mail.dkim.signing-key",
+      domain:    "example.net",
+      selector:  "bp202609",
+      algorithm: "ed25519",
+    });
+    helpers.fs.writeFileSync(netKeyPath, helpers.b.vault.seal(netKeyPem), { mode: 0o600 });
+    helpers.fs.truncateSync(netKeyPath, TRUNCATED_KEY_BYTES);
+    var olderCutShort = refusalOf(function () {
+      return freshSignerFor(dataDir, handle, "example.net");
+    });
+    count("a key sealed the way this volume sealed them before, cut short, refuses under the " +
+      "code whose remedy is a restore rather than a new pair",
+      olderCutShort !== null && olderCutShort.code === "dkim/key-seal-unopened",
+      olderCutShort ? String(olderCutShort.code) : "signed with a key that did not open");
+    count("and names the domain and the selector too",
+      olderCutShort !== null && olderCutShort.message.indexOf("example.net") !== -1 &&
+      olderCutShort.message.indexOf("bp202609") !== -1,
+      olderCutShort ? olderCutShort.message : "(no refusal)");
 
     // The vault passes a value carrying no seal straight back, so a key
     // file that was never sealed reads as key material and signs. That
@@ -495,6 +526,48 @@ async function run() {
       refusalOf(function () {
         return blamepost.mail.dkim.create({ dataDir: dataDir, store: handle, rsaBits: 2048 });
       }) === null, "the floor was refused");
+
+    // The other two settings the handle takes decide what a signature
+    // covers and how it is canonicalized. The framework refuses either
+    // one when it builds the signer, which happens the first time a
+    // domain signs rather than when the server starts, so a value
+    // carried unread to that point lets a mistyped setting boot cleanly
+    // and then sends every message from every hosted domain unsigned,
+    // with the refusal worded for whoever composed the framework and
+    // reaching only an audit row.
+    var badCanon = refusalOf(function () {
+      return blamepost.mail.dkim.create({
+        dataDir: dataDir, store: handle, canonicalization: "relaxed/nonsense",
+      });
+    });
+    count("a canonicalization the signer cannot use is refused when the handle is built, " +
+      "rather than on the first message from the first domain",
+      badCanon !== null, "the handle was built");
+    count("and the refusal names the forms that are accepted",
+      badCanon !== null && badCanon.message.indexOf("relaxed/relaxed") !== -1,
+      badCanon ? badCanon.message.slice(0, 200) : "(no refusal)");
+    count("the shipped default is still accepted, so the check refuses what is wrong rather " +
+      "than everything that is stated",
+      refusalOf(function () {
+        return blamepost.mail.dkim.create({
+          dataDir: dataDir, store: handle, canonicalization: "relaxed/relaxed",
+        });
+      }) === null, "the default was refused");
+
+    var badHeader = refusalOf(function () {
+      return blamepost.mail.dkim.create({
+        dataDir: dataDir, store: handle, headersToSign: ["from", ""],
+      });
+    });
+    count("a header set carrying something that is not a header name is refused at the same " +
+      "point, because it decides what a signature binds",
+      badHeader !== null, "the handle was built");
+    count("and a header set of real names is accepted",
+      refusalOf(function () {
+        return blamepost.mail.dkim.create({
+          dataDir: dataDir, store: handle, headersToSign: ["from", "subject"],
+        });
+      }) === null, "a usable header set was refused");
 
     // ---- rotation ----------------------------------------------------------
 

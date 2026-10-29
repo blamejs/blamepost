@@ -42,7 +42,7 @@ jobs:
     # drives the shipped image is the base budget plus the harness's own
     # image-build and health-wait ceilings, with reporting slack. A stuck
     # job fails here instead of riding the 6-hour GitHub default.
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -57,10 +57,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Node 24.19.0 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - name: Set up Node 24.22.1 LTS
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: '24.19.0'
+          node-version: '24.22.1'
 
       - name: Show Node + npm version
         run: node --version && npm --version
@@ -85,7 +85,14 @@ jobs:
         # layer cannot be masked by a cached one.
         run: docker build --file Dockerfile --tag blamepost-integration:ci .
 
-      - name: Run smoke
+      - name: Run smoke under coverage
+        # The suite, instrumented, so the swallow gate below has a report
+        # to answer from. `npm run coverage` is `c8` around the same
+        # `node test/smoke.js` this step used to run: same files, same
+        # watchdogs, same verdict, plus `coverage/lcov.info`. The forked
+        # test processes are covered because c8 publishes its output
+        # directory through the environment and the orchestrator passes
+        # the environment down.
         env:
           # Fork each test file rather than running one long-lived
           # in-process pass: a file that hangs is SIGKILLed by the
@@ -98,13 +105,27 @@ jobs:
           # threadpool (default 4) at once under parallel smoke; a
           # larger pool removes the contention and idle threads are free.
           UV_THREADPOOL_SIZE: "16"
+          # Each test opens its database with its working copy under the
+          # temporary directory, and the database refuses a working copy
+          # that is not on a tmpfs or ramfs mount. /tmp on the runner is
+          # on disk and /dev/shm is tmpfs.
+          TMPDIR: /dev/shm
+          # c8 merges one coverage report per process the run started,
+          # and at the default 4 GB heap the merge ran out of memory.
+          # The runner has 16 GB. The setting is a ceiling, so the test
+          # processes that inherit it use no more than they did.
+          NODE_OPTIONS: "--max-old-space-size=8192"
           # Per-file watchdog budget, generous over the heaviest file
           # while still failing a genuinely stuck one well inside the
-          # job ceiling. A file that drives the shipped image gets this
-          # budget plus the harness's image-build and health-wait
+          # job ceiling. c8 makes each file run 3 to 5 times as long as
+          # it does uninstrumented, because every process the file
+          # starts writes a coverage report when it exits. The heaviest,
+          # cli-surface.test.js, runs for about 250 seconds
+          # uninstrumented. A file that drives the shipped image gets
+          # this budget plus the harness's image-build and health-wait
           # ceilings, because a cold build runs for minutes before the
           # test body starts.
-          SMOKE_FILE_TIMEOUT_MS: "300000"
+          SMOKE_FILE_TIMEOUT_MS: "1500000"
           # The runner holds only the files that drive the shipped image
           # behind a container engine, and this makes an absent engine
           # refuse the run rather than report those files as skipped.
@@ -116,7 +137,15 @@ jobs:
           # The tag built above, so the container-driving files assert
           # against one image rather than each building their own.
           BLAMEPOST_TEST_IMAGE: blamepost-integration:ci
-        run: node test/smoke.js
+        run: npm run coverage
+
+      - name: Swallow coverage gate
+        # Every `catch` in lib/ that does not re-throw has to be entered
+        # by the suite, so what it does with the fault is asserted rather
+        # than assumed. It reads the report the step above writes, which
+        # is why it runs here and not with the static gates: those answer
+        # from the checkout alone and this one cannot.
+        run: node scripts/check-swallow-coverage.js
 
       - name: Upload smoke log on failure
         # `.test-output/smoke.log` carries every line of stdout/stderr
@@ -130,7 +159,7 @@ jobs:
         # be read. The whole directory is uploaded rather than the one
         # file, so a gate that persisted its own log arrives with it.
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: smoke-log-${{ matrix.os }}
           path: .test-output/
@@ -147,10 +176,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Node 24.19.0 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - name: Set up Node 24.22.1 LTS
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: '24.19.0'
+          node-version: '24.22.1'
 
       - name: Compare against the committed baseline
         # Fails on breaking changes (removed methods, changed
@@ -188,10 +217,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Node 24.19.0 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - name: Set up Node 24.22.1 LTS
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: '24.19.0'
+          node-version: '24.22.1'
 
       - name: Declared static-gate chain (package.json scripts.gates)
         # Codebase-patterns detectors, source comment blocks, the API
@@ -248,10 +277,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Node 24.19.0 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - name: Set up Node 24.22.1 LTS
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: '24.19.0'
+          node-version: '24.22.1'
 
       - name: Run vendor-currency check
         env:
@@ -272,10 +301,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Node 24.19.0 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - name: Set up Node 24.22.1 LTS
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: '24.19.0'
+          node-version: '24.22.1'
 
       - name: Run actions-currency check
         # Resolves each pinned `uses: owner/repo@<sha>  # vX.Y.Z`
@@ -361,10 +390,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Node 24.19.0 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - name: Set up Node 24.22.1 LTS
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: '24.19.0'
+          node-version: '24.22.1'
 
       - name: Build vendored-tree CycloneDX SBOM
         # blamejs is vendored under lib/vendor/, so `npm audit` and
@@ -399,7 +428,7 @@ jobs:
         # scannable dependency surface is the dev toolchain the
         # committed lockfile pins, which is exactly the supply chain
         # that runs during a release.
-        uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67  # v2.5.1
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36  # v2.7.0
         with:
           scan-args: |-
             --lockfile=package-lock.json
@@ -409,7 +438,7 @@ jobs:
         # vendored: refresh with `bash scripts/vendor-update.sh` (the
         # vendor-currency job names the upstream release) and re-run.
         if: steps.vendor.outputs.present == 'true'
-        uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67  # v2.5.1
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36  # v2.7.0
         with:
           scan-args: |-
             --sbom=sbom.vendored.cdx.json
@@ -515,14 +544,14 @@ jobs:
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
 
       - name: Build the image into the local daemon
         # No build cache: this job builds from source on every run so a
         # broken layer cannot be masked by a cached one, and so the
         # workflow keeps no writable cache for a fork pull request to
         # poison.
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
           file: Dockerfile
@@ -628,18 +657,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      outcome: ${{ steps.eslint.outcome }}
-      output:  ${{ steps.eslint.outputs.output }}
+      output: ${{ steps.eslint.outputs.output }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Set up Node 24.19.0 LTS
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - name: Set up Node 24.22.1 LTS
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: '24.19.0'
+          node-version: '24.22.1'
 
       - name: Install devDependencies (lockfile-pinned)
         run: npm ci --no-audit --no-fund
@@ -675,8 +703,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      outcome: ${{ steps.hadolint_result.outputs.outcome }}
-      output:  ${{ steps.hadolint_result.outputs.output }}
+      output: ${{ steps.hadolint_result.outputs.output }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -696,21 +723,25 @@ jobs:
           format:     tty
           no-fail:    false
           failure-threshold: warning
+          # This action declares no step outputs, so the only way to read
+          # its findings from a later step is the file it writes. The
+          # default is /dev/stdout, which reaches the log and nothing
+          # else. Color is off because this text is pasted into a pull
+          # request comment, and tty format writes escape sequences that
+          # a reader acts on rather than sees.
+          output-file: hadolint-results.txt
+          no-color:    true
 
       - name: Capture Hadolint result
         if: always()
         id: hadolint_result
-        env:
-          HADOLINT_OUTCOME: ${{ steps.hadolint.outcome }}
         run: |
-          if [ -z "${HADOLINT_RESULTS:-}" ]; then
-            echo "outcome=$HADOLINT_OUTCOME" >> "$GITHUB_OUTPUT"
+          if [ ! -s hadolint-results.txt ]; then
             echo "output=" >> "$GITHUB_OUTPUT"
           else
-            echo "outcome=$HADOLINT_OUTCOME" >> "$GITHUB_OUTPUT"
             {
               echo "output<<HADOLINT_EOF"
-              printf '%s\n' "$HADOLINT_RESULTS"
+              cat hadolint-results.txt
               echo "HADOLINT_EOF"
             } >> "$GITHUB_OUTPUT"
           fi
@@ -720,8 +751,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      outcome: ${{ steps.shellcheck.outcome }}
-      output:  ${{ steps.shellcheck.outputs.output }}
+      output: ${{ steps.shellcheck.outputs.output }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

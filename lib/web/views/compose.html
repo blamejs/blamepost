@@ -19,10 +19,21 @@
   </div>
   {% endif %}
 
+  {% if sourceNote %}
+  <div class="notice notice-warn" role="status" id="source-note">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>{{ sourceNote }}</p>
+  </div>
+  {% endif %}
+
   <form method="post" action="/compose" class="composer" data-island="compose">
     <input type="hidden" name="_csrf" value="{{ csrfToken }}">
     <input type="hidden" name="inReplyTo" value="{{ draft.inReplyTo }}">
     <input type="hidden" name="references" value="{{ draft.references }}">
+    {% if draft.forwardOf %}
+    <input type="hidden" name="forwardOf" value="{{ draft.forwardOf }}">
+    <input type="hidden" name="forwardFolder" value="{{ draft.forwardFolder }}">
+    {% endif %}
 
     {% if mayChooseAuthor %}
     <div class="field">
@@ -62,11 +73,14 @@
     <div class="field">
       <label for="text">Message</label>
       <textarea id="text" name="text" rows="18" spellcheck="true">{{ draft.text }}</textarea>
+      {% if draft.forwardOf %}
+      <p class="hint" id="forward-attached">The original message is attached to this one with its own headers and attachments.</p>
+      {% endif %}
     </div>
 
     <div class="formbar">
       <button type="submit" class="btn btn-primary">Send</button>
-      <a class="btn btn-quiet" href="{{ inboxHref }}">Discard</a>
+      <a class="btn btn-quiet" href="/{{ inboxHref }}">Discard</a>
       <p class="fineprint">Outbound mail is signed for the sending domain before it leaves.</p>
     </div>
   </form>

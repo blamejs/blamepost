@@ -36,6 +36,21 @@
  * database and dropped on the way to the operator is the same gap one
  * step further along.
  *
+ * Reading them back is also where a row can do harm. The reason column
+ * holds words somebody typed, and a terminal acts on what a browser
+ * renders inertly: the single-byte escape introducer repaints the line
+ * above the one it is on, and a right-to-left override prints the rest
+ * of the row backwards. The surface those land on is the one an operator
+ * opens during an incident, so the command-line half suspends a second
+ * mailbox for a reason carrying three such codepoints and reads the
+ * trail back.
+ *
+ * Both renderings are read. This binary screens every value it hands a
+ * stream, the machine-readable answer included, so a monitor consuming
+ * that form is as much a reader as the operator at the terminal. It also
+ * means there is no reading from here of what the volume holds, and this
+ * file does not claim one: what it reads is what reaches a stream.
+ *
  * Run standalone: node test/layer-1-state/audit-actor-attribution.test.js
  */
 
@@ -74,6 +89,23 @@ var ACKNOWLEDGED_BY = "the zone owner on call";
 // principal, so the shell operator has to be distinguishable from an
 // account id at a glance and by a filter.
 var COMMAND_LINE_MARK = "cli:";
+
+// The three codepoints a reason is driven through, each built from its
+// code point so this file carries none of them in its own bytes. The
+// first opens an escape sequence in one byte and so colors or moves
+// whatever prints it; the second reorders everything after it; the third
+// renders as nothing at all. Only the first is a control character, so a
+// screen that stops at the control range passes the other two.
+var CSI  = String.fromCharCode(0x9b);
+var RLO  = String.fromCharCode(0x202e);
+var ZWSP = String.fromCharCode(0x200b);
+
+// What the second account is suspended for, with the three codepoints
+// laid through it. The words on either side are checked as well: a
+// screen that answered by dropping the value would take the reason an
+// operator is reading the row for.
+var LEGIBLE_REASON = "mailbox shared with a third party";
+var HOSTILE_REASON = "mailbox shared" + CSI + " with a" + RLO + " third" + ZWSP + " party";
 
 var SHUTDOWN_TIMEOUT_MS = 5000;
 
@@ -175,6 +207,55 @@ function theOperatorReadingTheTrailIsShownWhoActed(cli, expected) {
   count("and the line for the suspension names who performed it",
     expected.length > 0 && text.stdout.indexOf("by " + expected) !== -1,
     text.stdout.slice(0, 400));
+}
+
+// A reason is words somebody typed, and the trail is read in a terminal.
+//
+// The volume keeps the value as it arrived, which is what makes the row
+// a record of what was actually written, so the screen has to run on the
+// way out. If it does not, a reason carrying the escape introducer
+// repaints the line above it, and one carrying an override prints the
+// rest of the row backwards, on the surface an operator opens during an
+// incident.
+//
+// What the screen may not do is answer by dropping the value: the words
+// on either side of the three codepoints are the reason the row is being
+// read, so both halves are checked here.
+// Both renderings are read, and the second one is the reason this is not
+// a check on the table. Every value this binary hands a stream goes
+// through the screen, the machine-readable answer included, so there is
+// no reading of the row from here that shows what the volume holds. What
+// can be read from here is what reaches a stream, which is the surface
+// the harm is on, and a monitor consuming the machine-readable form is
+// as much a reader as the operator at the terminal.
+function theTrailReadsBackWithoutRepaintingTheTerminal(cli) {
+  var suspensions = rowFor(cli, "account.suspended");
+  count("the suspension reached the trail, so the readings below are made over a row " +
+    "that is there",
+    suspensions.ok && suspensions.rows.length >= 2,
+    suspensions.rows.length + " row(s) " + suspensions.both.slice(0, 200));
+
+  var text = cli(["audit", "read", "--action", "account.suspended", "--limit", "10"]);
+  count("reading the trail as text succeeds over a row whose reason carries them",
+    text.status === 0, text.both.slice(0, 240));
+
+  var renderings = [
+    { name: "the table an operator reads", out: text.stdout },
+    { name: "the machine-readable answer a monitor reads", out: suspensions.stdout },
+  ];
+  for (var i = 0; i < renderings.length; i += 1) {
+    var seen = renderings[i];
+    count("nothing a terminal would act on rather than print reaches " + seen.name,
+      seen.out.indexOf(CSI) === -1, JSON.stringify(seen.out.slice(0, 400)));
+    count("nor a codepoint that reorders everything after it, in " + seen.name,
+      seen.out.indexOf(RLO) === -1, JSON.stringify(seen.out.slice(0, 400)));
+    count("nor one that renders as nothing, in " + seen.name,
+      seen.out.indexOf(ZWSP) === -1, JSON.stringify(seen.out.slice(0, 400)));
+    count("and the words the operator opened the row for survive in " + seen.name +
+      ", because a screen that answered by dropping the value would take the reason " +
+      "with them",
+      seen.out.indexOf(LEGIBLE_REASON) !== -1, seen.out.slice(0, 600));
+  }
 }
 
 // Reading the trail is itself recorded, and the row it writes is subject
@@ -336,9 +417,24 @@ function theCommandLineHalf(root) {
   count("and records that the zone is published", acked.status === 0,
     "exit " + acked.status + " " + acked.both.slice(0, 240));
 
+  // A second mailbox, suspended for a reason with the three codepoints
+  // laid through it. It is a second account rather than a second
+  // suspension of the first, because a suspended account cannot be
+  // suspended again and the row has to be one the trail actually holds.
+  var second = cli(["account", "add", "bob@" + DOMAIN, "--password", ALICE_PASSWORD]);
+  count("and creates a second account", second.status === 0,
+    "exit " + second.status + " " + second.both.slice(0, 240));
+
+  var stoppedHostile = cli(["account", "suspend", "bob@" + DOMAIN,
+    "--reason", HOSTILE_REASON]);
+  count("and suspends it for a reason carrying what a terminal would act on",
+    stoppedHostile.status === 0,
+    "exit " + stoppedHostile.status + " " + stoppedHostile.both.slice(0, 240));
+
   var actor = theOperatorWhoRanTheCommandIsOnTheRow(cli);
   theAcknowledgementKeepsBothFactsApart(cli);
   theOperatorReadingTheTrailIsShownWhoActed(cli, actor);
+  theTrailReadsBackWithoutRepaintingTheTerminal(cli);
   readingTheTrailRecordsWhoRead(cli);
 }
 

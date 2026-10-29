@@ -60,15 +60,13 @@ var ALICES_SUBJECT = "Alices own message";
 // from something that is not a folder at all.
 var DEFAULT_MAILBOXES = ["Archive", "Drafts", "INBOX", "Junk", "Sent", "Trash"];
 
-// A folder row and a message row both link under /mail/, and a pattern
-// matching the path alone cannot separate them: a message opens at
-// /mail/INBOX/obj_<id>, which is a folder path carrying a second
-// segment, so every message on the page reads as a mailbox. Excluding
-// the separator to dodge that goes blind to the row worth catching,
-// a folder whose own name carries a separator. The page marks the two
-// kinds apart by class, so the class is what these read.
-var FOLDER_LINK_RE  = /class="folder-link[^"]*"\s+href="\/mail\/([^"]*)"/g;
-var MESSAGE_LINK_RE = /class="msg-body"\s+href="\/mail\/([^"]*)"/g;
+// A folder row and a message row both link under /mail, and both are
+// read by class rather than by the shape of the target. A folder is named
+// in the query string and a message in the path, so a pattern matching
+// the path alone would answer for the message and skip the folder
+// entirely. The class is what the page marks the two kinds apart with.
+var FOLDER_LINK_RE  = /class="folder-link[^"]*"\s+href="\/mail\?folder=([^"&]*)"/g;
+var MESSAGE_LINK_RE = /class="msg-body"\s+href="\/mail\/([^"?&]*)/g;
 
 // A message identity as the store issues it (RFC 8474 objectid) and as
 // it appears in a path. A folder named this is not a folder.
@@ -237,14 +235,14 @@ function testTheFolderListIsThisAccountsOwn(inbox, bobsFolder) {
     listed.slice().sort().join(",") === DEFAULT_MAILBOXES.join(","), listed.join(","));
 
   // This fixture put a message in the inbox, so the page renders a
-  // message link too, and that link is a folder path with a second
-  // segment on it. Reading the page by path alone turns it into a
-  // seventh mailbox named INBOX/obj_<id>. Asserting the link is there
-  // keeps the count above honest: without it the exact set could pass
-  // on a page that simply had nothing to confuse it with.
+  // message link too, and that link sits under the same path the folder
+  // rail links to. Asserting it is there keeps the count above honest:
+  // without it the exact set could pass on a page that had nothing to
+  // confuse it with.
   var messageLinks = hrefTargets(inbox.body, MESSAGE_LINK_RE);
-  count("the page renders the message link that a path shaped reader mistakes for a folder",
-    messageLinks.length > 0 && messageLinks[0].indexOf("/") !== -1, messageLinks.join(","));
+  count("the page renders the message link that sits under the mailbox path",
+    messageLinks.length > 0 && MESSAGE_ID_RE.test(messageLinks[0]),
+    messageLinks.join(","));
 
   count("no folder row is named after a message",
     listed.filter(function (name) {
@@ -265,14 +263,14 @@ function testTheFolderListIsThisAccountsOwn(inbox, bobsFolder) {
 }
 
 async function testAnotherAccountsFolderIsNotReadable(alice, bobsFolder, bobsMessage) {
-  var folderPage = await alice.get("/mail/" + encodeURIComponent(bobsFolder));
+  var folderPage = await alice.get("/mail?folder=" + encodeURIComponent(bobsFolder));
   count("a URL carrying another account's store folder is refused",
     folderPage.status === 404, folderPage.status);
   check("the refusal carries none of that account's mail",
     folderPage.body.indexOf(BOBS_SUBJECT) === -1);
 
-  var messagePage = await alice.get("/mail/" + encodeURIComponent(bobsFolder) +
-    "/" + encodeURIComponent(bobsMessage));
+  var messagePage = await alice.get("/mail/" + encodeURIComponent(bobsMessage) +
+    "?folder=" + encodeURIComponent(bobsFolder));
   count("a message inside another account's store folder is refused the same way",
     messagePage.status === 404, messagePage.status);
   check("the refusal carries none of that message's body",
@@ -280,7 +278,7 @@ async function testAnotherAccountsFolderIsNotReadable(alice, bobsFolder, bobsMes
 
   // Reading is the loud half; a mutation through the same URL is the
   // half that leaves no page behind to notice.
-  var mutation = await alice.post("/mail/" + encodeURIComponent(bobsFolder) + "/actions",
+  var mutation = await alice.post("/mail/actions?folder=" + encodeURIComponent(bobsFolder),
     "application/x-www-form-urlencoded",
     "action=trash&objectId=" + encodeURIComponent(bobsMessage));
   count("a mutation aimed at another account's store folder is refused as well",

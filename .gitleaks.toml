@@ -58,6 +58,12 @@ regexes = [
   '''v=STSv1;\s*id=[A-Za-z0-9]+''',
   # Bearer-token templates in API documentation.
   '''Authorization: Bearer <[A-Za-z0-9_-]+>''',
+  # DNS provider API tokens in the test fixtures. Every one opens with
+  # the literal `fixtureDnsToken`, which a provider-issued token, a run
+  # of random characters, does not carry. Anchored on those bytes rather
+  # than on the test tree, so a real token pasted into a test is still
+  # found.
+  '''fixtureDnsToken[A-Za-z0-9]+''',
   # Obviously-fake example passphrases in operator docs and sample config.
   '''hunter2-?pass-?[A-Za-z0-9-]+''',
   '''blamepost-(?:test-|example-)?passphrase[A-Za-z0-9-]*''',

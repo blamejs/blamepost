@@ -424,7 +424,7 @@ async function testDomainAuditIdentity(handle) {
 // renders an address backwards while reading forwards, which is the
 // spoofing the Trojan Source work named, and neither HTML escaping nor
 // JSON encoding touches it: the codepoint is legitimate and the renderer
-// honours it. Zero-width and Unicode Tags characters hide text in the
+// honors it. Zero-width and Unicode Tags characters hide text in the
 // same field.
 //
 // Built from code points rather than typed, so the bytes under test are
@@ -480,6 +480,11 @@ async function testDisplayNameScreening(handle) {
 
 // ---- a selector's key file name cannot name something that is not a file ----
 
+// Built from its code point rather than typed, the way the display-name
+// constants above are. A raw control byte in the source makes grep
+// report the whole file as binary and print none of its matching lines.
+var CONTROL_BYTE = String.fromCharCode(0);
+
 async function testSelectorKeyRefScreening(handle) {
   await handle.domains.add({ domain: "keys.example" });
 
@@ -497,7 +502,7 @@ async function testSelectorKeyRefScreening(handle) {
     "a backslash separator":                   "sub\\dir.sealed",
     "a reserved device name":                  "CON.sealed",
     "a bare reserved device name":             "nul",
-    "a name with a control character in it":   "a b.sealed",
+    "a name with a control character in it":   "a" + CONTROL_BYTE + "b.sealed",
     "an alternate data stream":                "example.sealed:hidden",
   };
   var names = Object.keys(bad);

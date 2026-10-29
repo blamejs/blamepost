@@ -24,12 +24,16 @@
  *     was sent. The name is the interesting part: a client says INBOX,
  *     the store holds a physical folder whose name it never sees, and
  *     the translation between them is where isolation lives.
- *   - A peer offering an address this server does not host is never
- *     answered with a 250. Accepting mail and then discarding it is the
- *     failure the wire-protocol rule exists to prevent: a sender is
- *     told the message arrived and nobody ever sees it. The case says
- *     where the refusal lands today and why it is not the 550 the RFC
- *     would rather have.
+ *   - A peer offering an address this server does not host is refused at
+ *     RCPT with a permanent 550, before it spends a message on the
+ *     address. Accepting mail and then discarding it is the failure the
+ *     wire-protocol rule exists to prevent: a sender is told the message
+ *     arrived and nobody ever sees it. The case pins the code and the
+ *     enhanced status together, since a 550 carrying a 4.x.x status
+ *     gives a peer reading the code the opposite verdict from one
+ *     reading the status, and it pins that the refusal does not end the
+ *     transaction, because one message reaching a bad address and a good
+ *     one has to reach the good one.
  *
  * Message authentication is deliberately in monitor rather than enforce
  * for this run. The gate resolves SPF and DMARC against live DNS at the
@@ -177,21 +181,20 @@ async function aMessageArrivesAndIsRead(ports, caPem, address) {
 // should tell the sender cannot be sent, so the message would be gone
 // with nobody informed.
 //
-// The refusal lands at the end of DATA rather than at RCPT, and it is
-// transient rather than permanent, because that is the loudest answer
-// this composition can reach. The framework's MX listener refuses
-// another domain at RCPT from its `localDomains` list, but it has no
-// hook for the per address question, and the only refusal its agent
-// handoff can produce is `451 4.3.0`. A peer holding a 451 still has the
-// message: it retries, gives up on its own schedule, and reports back to
-// the sender.
+// The refusal lands at RCPT and is permanent. The framework's MX
+// listener refuses another domain from its `localDomains` list, and
+// `_mxRecipientPolicy` answers the per-address question beside it, so a
+// name nobody holds here is refused while the peer is still on the
+// socket and before it has transmitted a byte of the body.
 //
-// So this pins two things. The wrong answer, 250, is refused outright.
-// The right answer, 550 at RCPT, needs a hook the MX listener does not
-// have, which is filed as blamejs#630. When it lands this case tightens
-// rather than changes: same claim, earlier and permanent, and the branch
-// below already takes that answer if it starts arriving.
-async function anUnknownRecipientIsNeverAccepted(ports, caPem) {
+// This pins three things, and the first is the one that made the case
+// worth writing: 250 for a mailbox that does not exist is refused
+// outright, because a peer that considers the message delivered cannot
+// be sent the report that would tell its sender otherwise. Then that the
+// code and the enhanced status agree on permanence, since a `550 4.x.x`
+// hands opposite verdicts to a reader parsing one and a reader parsing
+// the other. Then that a refused recipient does not end the transaction.
+async function anUnknownRecipientIsNeverAccepted(ports, caPem, address) {
   var peer = await mxSession(ports.mx, caPem, "mx-refuse");
 
   peer.send("MAIL FROM:<" + PEER + ">");
@@ -200,34 +203,29 @@ async function anUnknownRecipientIsNeverAccepted(ports, caPem) {
   peer.send("RCPT TO:<nobody@" + DOMAIN + ">");
   var rcptReply = await peer.read(/^\d{3} /m, "RCPT TO answered");
 
-  // A permanent refusal here would be the better outcome, so accept it
-  // if a framework release starts providing one, and go on to check the
-  // rest only while it does not.
-  if (/^550 /m.test(rcptReply)) {
-    count("an address this server does not host is refused at RCPT", true, visible(rcptReply));
-    peer.send("QUIT");
-    peer.close();
-    return;
-  }
+  // The refusal is permanent and it arrives at RCPT, which is the whole
+  // point: a peer told 4xx retries a message that will be refused
+  // identically until its queue lifetime runs out, and a peer told
+  // anything at DATA has already sent the body. `_mxRecipientPolicy`
+  // answers here, so the sender learns the mailbox does not exist before
+  // spending a message on it.
+  count("an address this server does not host is refused at RCPT",
+    /^550 /m.test(rcptReply), visible(rcptReply));
 
-  peer.send("DATA");
-  await peer.read(/^354 /m, "DATA answered");
-  peer.sendRaw([
-    "From: " + PEER,
-    "To: nobody@" + DOMAIN,
-    "Subject: for a mailbox that is not here",
-    "",
-    "body",
-    "",
-    ".",
-    "",
-  ].join("\r\n"), "<the message and its terminating dot>");
+  // The code and the enhanced status are what a peer branches on, and
+  // they have to agree: a 550 carrying a 4.x.x status gives one verdict
+  // to a reader parsing the code and the opposite to one parsing the
+  // status.
+  count("the refusal is permanent in its enhanced status as well as its code",
+    /^550 5\.\d+\.\d+/m.test(rcptReply), visible(rcptReply));
 
-  var verdict = await peer.read(/^\d{3} /m, "message answered");
-  count("a message for a mailbox that does not exist is never accepted",
-    !/^250 /m.test(verdict), visible(verdict));
-  count("the peer is told to keep the message and try again",
-    /^4\d\d /m.test(verdict), visible(verdict));
+  // A refused recipient must not take the session with it. The peer has
+  // to be able to name another recipient, which is what lets one message
+  // reach the addresses that do exist.
+  peer.send("RCPT TO:<" + address + ">");
+  var secondRcpt = await peer.read(/^\d{3} /m, "second RCPT TO answered");
+  count("a recipient refused at RCPT does not end the transaction",
+    /^250 /m.test(secondRcpt), visible(secondRcpt));
 
   peer.send("QUIT");
   peer.close();
@@ -324,7 +322,7 @@ async function run() {
     var ports = { mx: sections.mx.port, imap: sections.imap.port };
 
     await aMessageArrivesAndIsRead(ports, leaf.ca, alice.address);
-    await anUnknownRecipientIsNeverAccepted(ports, leaf.ca);
+    await anUnknownRecipientIsNeverAccepted(ports, leaf.ca, alice.address);
 
     await server.stop({ timeoutMs: SHUTDOWN_TIMEOUT_MS });
     running = false;

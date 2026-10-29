@@ -45,6 +45,10 @@ var fs     = require("node:fs");
 var crypto = require("node:crypto");
 var path   = require("node:path");
 
+// The one reader and writer of the published-count contract, so the definition
+// of a refusable zero here is the one every caller applies.
+var examinedCounts = require("./examined-counts.js");
+
 var MANIFEST_PATH = path.join(__dirname, "..", "lib", "vendor", "MANIFEST.json");
 
 function hashFile(p) {
@@ -190,6 +194,25 @@ function main() {
   process.stdout.write("[refresh-vendor-manifest] wrote " +
     pkgs.length + " packages / " + totalHashes + " hashes to " +
     MANIFEST_PATH + " (refreshedAt=" + refreshedAt + ")\n");
+
+  // WHAT THE REFRESH REACHED, published as the last lines of stdout.
+  //
+  // This file is not a gate, and it writes the record two of them read:
+  // check-vendor-integrity.js verifies the tree against these hashes and
+  // check-vendor-currency.js compares these versions against upstream. A
+  // manifest whose `packages` map arrived absent or empty walks no package,
+  // hashes nothing, writes itself back, and exits 0. Both gates then answer
+  // over an empty record and report clean, and each of them refuses its own
+  // zero only because this file did not hand them one to begin with.
+  //
+  // Two units, because they fail apart. `manifest-packages` is the map that
+  // was read. `hashed-slots` is what the walk actually computed inside it: a
+  // package whose file list emptied leaves the package count healthy and the
+  // hashes it was refreshed to produce gone.
+  return examinedCounts.publish([
+    { unit: "manifest-packages", n: pkgs.length },
+    { unit: "hashed-slots",      n: totalHashes },
+  ], { tag: "[refresh-vendor-manifest]" });
 }
 
 // `--hash <path>` prints one hash and writes nothing. Bad input throws
@@ -225,6 +248,11 @@ module.exports = {
 
 if (require.main === module) {
   var flagAt = process.argv.indexOf("--hash");
+  // `--hash` writes one digest and nothing else, because a caller reads that
+  // stdout to decide whether a vendored tree may be published; a count line
+  // after it would arrive inside the value. The refresh mode's stdout is a
+  // human report, so its counts go there and its exit code carries the
+  // refusal.
   if (flagAt !== -1) hashOnly(process.argv[flagAt + 1]);
-  else main();
+  else process.exit(main());
 }

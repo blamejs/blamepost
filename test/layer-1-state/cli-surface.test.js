@@ -32,6 +32,21 @@
  * removal. A run that comes back asking for a flag the document never
  * mentioned is the same defect pointing the other way.
  *
+ * The flag half runs in both directions, and the second one is newer. A
+ * flag a document names has to be one the verb reads, and a flag the verb
+ * reads has to be one its own usage block names: `dkim generate` took
+ * `--selector` and printed a usage block that did not mention it, so the
+ * only way to find the flag was to read the source.
+ *
+ * The argument half is the same question about names rather than flags. A
+ * lookup answers null for a mailbox that is not here and for a string that
+ * could never name one, and the two are different answers: one is fixed by
+ * creating the account, the other by retyping the line. `account show
+ * a@@b` reported the second as the first, at the exit code that means this
+ * server tried and failed, while `account add a@@b` refused the same
+ * string as an argument fault. A script driving either could not tell a
+ * typo from a missing mailbox.
+ *
  * The gate behind those two checks is proven live rather than assumed:
  * a flag the verb does not read, and an argument too many, both have to
  * be refused by name.
@@ -66,7 +81,8 @@ var ALICE_PASSWORD   = "quiet lantern bicycle 4291";
 // The command groups that take a verb, and the commands that take flags
 // instead. Both halves are reconciled; only the shape of the comparison
 // differs.
-var VERB_GROUPS  = ["account", "domain", "dkim", "queue", "blobs", "audit", "backup", "restore"];
+var VERB_GROUPS  = ["account", "domain", "dkim", "zone", "credential", "reports", "dmarc",
+  "queue", "blobs", "attachments", "audit", "backup", "restore"];
 var FLAG_COMMANDS = ["serve", "init", "doctor"];
 
 // Documents an operator reads. A command named in any of them has to be
@@ -114,6 +130,21 @@ var FLAG_VALUES = {
   bundle:             "2026-01-01T00-00-00-000Z-0123abcd",
   point:              "no-such-rollback-point",
   "passphrase-file":  "no-such-passphrase-file",
+  // The zone credential. It names no file that exists, so a replayed
+  // line reaches the flag check and stops before anything is sealed.
+  "token-file":       "no-such-token-file",
+  // The sending credential verbs. A replayed line names a domain or an
+  // identifier that is not on the volume, so it reaches the flag check
+  // and stops before a credential is issued or changed. The two windows
+  // are inside the bounds the registry holds, because a value outside
+  // them would refuse for the bound rather than for the flag.
+  "bounce-to":        "nobody@nothosted.example",
+  expires:            "2099-01-01T00:00:00Z",
+  "max-messages":     "1",
+  "max-recipients":   "1",
+  "window-minutes":   "60",
+  "grace-hours":      "1",
+  "local-part":       "postmaster",
   fingerprint:        "0000000000000000000000000000000000000000000000000000000000000000",
   out:                "no-such-output-bundle",
   in:                 "no-such-input-bundle",
@@ -130,7 +161,22 @@ var FLAG_VALUES = {
 // Flags that take no value. Passing one a value would make the value
 // look like an argument and produce a refusal about arity instead.
 var BOOLEAN_FLAGS = ["destroy", "withdraw", "immediate", "force", "dane", "json", "confirm",
-  "verify", "include-archived"];
+  "verify", "include-archived", "include-unauthenticated", "clear", "include-revoked",
+  "include-expired"];
+
+// A name no verb in the group can read. The address carries two at
+// signs and the domain an empty label, so each is refused by the shape
+// check rather than looked up and missed, and neither can collide with a
+// row this run created.
+var UNREADABLE = {
+  account: "a@@b",
+  domain:  "a..b",
+};
+
+// What a refusal has to say about one. Naming the value back and saying
+// it could not be read is the half an operator acts on; the exit code is
+// the half a script acts on.
+var REFUSED_UNREADABLE = /is not a usable (mailbox address|domain name)/;
 
 // A refusal that means the flag or the argument was not part of the
 // verb's surface, and one that means a required flag was missing. Both
@@ -262,7 +308,14 @@ function documentedInvocations() {
 // verb half: a line in a source string names its argument as `<id>` or
 // `<domain>` rather than giving one, so it is not a line to replay, and
 // the replay set above is left exactly as it was.
-var SKIP_DIRS  = { ".git": 1, "node_modules": 1, "vendor": 1, ".test-output": 1, "coverage": 1 };
+// Generated directories that hold no shipped source. `.playwright-mcp` is the
+// browser tool's snapshot output: gitignored, rewritten on every browser run,
+// and carrying whatever page text was on screen, so a verb it quotes says
+// nothing about a document an operator reads. Named one by one rather than
+// skipping every dot-directory, because `.github/` is committed source and its
+// workflows can name a real command.
+var SKIP_DIRS  = { ".git": 1, "node_modules": 1, "vendor": 1, ".test-output": 1, "coverage": 1,
+  ".playwright-mcp": 1 };
 var SCAN_EXTS  = { ".js": 1, ".mjs": 1, ".md": 1, ".json": 1, ".html": 1, ".yml": 1, ".yaml": 1, ".sh": 1 };
 
 // A command split by a string concatenation is still one command:
@@ -600,6 +653,87 @@ function theUnreadFlagGateIsLive(run) {
     strayArg.both.indexOf("someone-else@" + DOMAIN) !== -1, strayArg.both.slice(0, 200));
 }
 
+// A name the operator typed that could not be read, on every verb that
+// takes one.
+//
+// `store.accounts.get` and `store.domains.get` both answer null for a row
+// that is not here AND for a string that could never name one, which is
+// the right answer for a lookup: a wire listener holding attacker input
+// wants a verdict rather than a throw. Deciding which of the two happened
+// is this surface's job, because this is the layer an operator types at.
+// Folding them together prints "no account a@@b" over a string that is
+// not an address, at the exit code reserved for a server that tried and
+// failed, so a script driving a bulk run cannot tell a typo from a
+// mailbox somebody already removed.
+//
+// The verbs are read off the published table rather than listed here, so
+// a verb added to either group is covered without a second edit. Every
+// flag the verb reads is supplied, because a verb that asks for a reason
+// first would otherwise answer about the reason and never reach the name.
+//
+// The target cannot match anything on the volume, which is what makes it
+// safe to hand the destructive verbs their own flags: there is no row for
+// `--destroy` to reach.
+function anUnreadableNameIsAnArgumentFault(run) {
+  var surface = require("../../bin/blamepost.js").VERB_SURFACE;
+  var wrong = [];
+  var examined = 0;
+
+  Object.keys(UNREADABLE).forEach(function (group) {
+    Object.keys(surface[group]).forEach(function (verb) {
+      if (surface[group][verb].args < 1) return;
+      examined += 1;
+      var result = _spawnReplay(run, group, verb, surface[group][verb].flags,
+        UNREADABLE[group]);
+      var line = "blamepost " + group + " " + verb + " " + UNREADABLE[group] +
+        " -> exit " + result.status + " " + result.both.trim().slice(0, 160);
+      if (result.status !== 2 || !REFUSED_UNREADABLE.test(result.both)) wrong.push(line);
+    });
+  });
+
+  count("there are verbs taking a name to check, so this is comparing something",
+    examined >= 15, examined + " verb(s) examined");
+  count("a name that cannot be read is refused as the argument fault it is, and the " +
+    "refusal says it could not be read rather than that the record is absent",
+    wrong.length === 0, wrong.join(" ; "));
+}
+
+// The same question the other way round, and the one a verb-only
+// reconciliation cannot see.
+//
+// `everyUsageFlagIsRead` proves the usage block offers nothing the verb
+// will refuse. It cannot see a flag pointing the other way: one the verb
+// reads and its usage block never prints. `dkim generate --selector` was
+// declared in the table, read at the call, described in the flag list the
+// parser prints, and absent from the block an operator reads when they
+// run the group with no verb, which is the page that says which verb
+// takes what.
+function everyFlagAVerbReadsIsInItsUsage(run) {
+  var surface = require("../../bin/blamepost.js").VERB_SURFACE;
+  var hidden = [];
+  var examined = 0;
+
+  VERB_GROUPS.forEach(function (group) {
+    var printed = usageFlagsOf(run, group);
+    Object.keys(surface[group]).forEach(function (verb) {
+      examined += 1;
+      var shown = printed[verb] || [];
+      surface[group][verb].flags.forEach(function (name) {
+        if (shown.indexOf(name) !== -1) return;
+        hidden.push("`" + group + " " + verb + "` reads --" + name +
+          " and its usage block prints " +
+          (shown.length ? "--" + shown.join(" --") : "no flag against it"));
+      });
+    });
+  });
+
+  count("every verb in the table was held against its usage block",
+    examined >= 50, examined + " verb(s) examined");
+  count("every flag a verb reads is one its own usage block names, so the only way to " +
+    "find it is not to read the source",
+    hidden.length === 0, hidden.join(" ; "));
+}
+
 // The three commands the table above cannot speak for.
 //
 // `VERB_SURFACE` is keyed by verb, and `serve`, `init` and `doctor` have
@@ -836,20 +970,25 @@ async function run() {
     identity.close();
     identity = null;
 
+    // The sweep starts a process for every documented invocation, so its
+    // children collect no coverage; the verbs' own files cover what runs.
     var cli = cliHelper.create({
       dataDir:         dataDir,
       workDir:         workDir,
       hostname:        HOSTNAME,
       vaultPassphrase: VAULT_PASSPHRASE,
+      coverage:        false,
     });
 
     var documented = documentedInvocations();
     everyDocumentedVerbExists(cli, documented);
     theGateCoversEveryVerbTheGroupOffers(cli);
     theUnreadFlagGateIsLive(cli);
+    anUnreadableNameIsAnArgumentFault(cli);
     theVerblessCommandsRefuseAnArgument(cli);
     everyDocumentedFlagIsRead(cli, documented);
     everyUsageFlagIsRead(cli);
+    everyFlagAVerbReadsIsInItsUsage(cli);
     everyDocumentedCommandFlagExists(cli, documented);
     anUnknownVerbIsRefused(cli);
     await suspensionStopsSendingAndReceiving(cli, cfg);

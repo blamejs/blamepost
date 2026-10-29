@@ -1,0 +1,49 @@
+# libFuzzer dictionary for the SMTP command reader.
+#
+# The line terminators are here because the seed corpus cannot carry
+# them. A curated seed is a text file, and the CR the wire uses is the
+# one byte an editor rewrites on the way to disk, so the corpus holds one
+# command per file with no terminator and the framing bytes arrive from
+# this dictionary instead. They are the interesting ones: the guard's
+# bare-CR and bare-LF refusals and the smuggling detector are all defined
+# on exactly these sequences (CVE-2023-51764, CVE-2023-51765,
+# CVE-2023-51766).
+
+crlf="\x0d\x0a"
+bare_cr="\x0d"
+bare_lf="\x0a"
+nul="\x00"
+term_canonical="\x0d\x0a.\x0d\x0a"
+term_bare_lf="\x0a.\x0a"
+term_mixed_a="\x0a.\x0d\x0a"
+term_mixed_b="\x0d\x0a.\x0a"
+
+ehlo="EHLO "
+helo="HELO "
+mail_from="MAIL FROM:<"
+rcpt_to="RCPT TO:<"
+data="DATA"
+bdat="BDAT "
+last="LAST"
+vrfy="VRFY "
+expn="EXPN "
+noop="NOOP"
+rset="RSET"
+quit="QUIT"
+auth="AUTH "
+starttls="STARTTLS"
+help="HELP"
+
+param_size="SIZE="
+param_body="BODY=8BITMIME"
+param_ret="RET=HDRS"
+param_envid="ENVID="
+param_auth="AUTH="
+param_notify="NOTIFY=SUCCESS"
+param_orcpt="ORCPT=rfc822;"
+
+null_sender="<>"
+tag="+"
+at="@"
+address_literal="[192.0.2.10]"
+punycode="xn--"

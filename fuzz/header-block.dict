@@ -1,0 +1,33 @@
+# libFuzzer dictionary for the header block boundary.
+#
+# The blank line that ends a header block is written by CRLF CRLF or by LF
+# LF, and a peer may mix the two, fold a header with a whitespace-only
+# continuation, or put a CRLF blank line later in the body. The seeds are
+# LF text files, so every CR byte arrives from here. The header names are
+# the ones the author binding reads.
+
+crlf="\x0d\x0a"
+lf="\x0a"
+cr="\x0d"
+crlf_blank="\x0d\x0a\x0d\x0a"
+lf_blank="\x0a\x0a"
+lf_then_crlf="\x0a\x0d\x0a"
+crlf_then_lf="\x0d\x0a\x0a"
+cr_lf_cr="\x0d\x0a\x0d"
+fold_space="\x0d\x0a\x20"
+fold_tab="\x0d\x0a\x09"
+blank_continuation="\x0d\x0a\x20\x0d\x0a"
+lf_fold="\x0a\x20"
+nul="\x00"
+invalid_utf8="\xff"
+truncated_utf8="\xe2\x82"
+
+from="From: "
+sender="Sender: "
+reply_to="Reply-To: "
+to="To: "
+subject="Subject: "
+content_type="Content-Type: multipart/mixed; boundary=\x22b\x22"
+boundary="--b"
+address="<alice@example.com>"
+forged="<victim@example.com>"

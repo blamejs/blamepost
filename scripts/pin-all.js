@@ -40,14 +40,62 @@ var LOCKFILES_ONLY = process.argv.indexOf("--lockfiles") !== -1;
 
 function readJson(p) { return JSON.parse(fs.readFileSync(p, "utf8")); }
 
-// Every directory whose committed package-lock.json backs a CI `npm ci`.
-// There is one: the repository root, whose lockfile pins the dev toolchain.
-// Nothing else in the tree declares dependencies. The runtime has none, and the
-// vendored framework is extracted from an integrity-verified registry tarball
-// rather than installed as a resolved dependency.
-var LOCKFILE_DIRS = [
-  { dir: ".", args: [], label: "root dev-tools" },
-];
+// Every directory whose committed package-lock.json backs an `npm ci`.
+//
+// Read from the tree rather than listed. A listed set answers for the
+// directories somebody remembered to add to it, and a workflow running
+// `npm ci` in a directory absent from the list installs from a lockfile
+// nothing compared against its package.json. The published count is the
+// same shape of miss: over a list it reports the list's length, so it holds
+// steady at the old number while a new manifest goes unread.
+//
+// The walk skips `node_modules` and the vendored tree. Neither holds a
+// manifest this repository pins: the runtime declares no dependencies, and
+// the vendored framework is extracted from an integrity-verified registry
+// tarball rather than installed as a resolved dependency.
+function _skipDir(rel) {
+  var base = path.basename(rel);
+  if (base === "node_modules" || base === ".git") return true;
+  return rel.split(path.sep).join("/") === "lib/vendor";
+}
+
+function discoverLockfileDirs() {
+  var found = [];
+
+  function walk(relDir) {
+    var abs = path.join(ROOT, relDir);
+    if (fs.existsSync(path.join(abs, "package.json"))) {
+      found.push(relDir === "" ? "." : relDir.split(path.sep).join("/"));
+    }
+    var entries;
+    try { entries = fs.readdirSync(abs, { withFileTypes: true }); }
+    catch (_e) { return; } // drop-silent by design: an unreadable directory holds no manifest to pin
+    entries.forEach(function (ent) {
+      if (!ent.isDirectory()) return;
+      var rel = relDir === "" ? ent.name : path.join(relDir, ent.name);
+      if (_skipDir(rel)) return;
+      walk(rel);
+    });
+  }
+
+  walk("");
+
+  return found.sort().map(function (dir) {
+    // `--fix` spawns npm with this path on the command line, so a directory
+    // carrying a shell metacharacter is refused rather than run.
+    if (!/^[A-Za-z0-9._/-]+$/.test(dir)) {
+      throw new Error("pin-all: refusing manifest directory " + JSON.stringify(dir) +
+        ": it must carry no shell metacharacter, because --fix passes it to npm.");
+    }
+    return {
+      dir:   dir,
+      args:  [],
+      label: dir === "." ? "root dev-tools" : dir + " toolchain",
+    };
+  });
+}
+
+var LOCKFILE_DIRS = discoverLockfileDirs();
 
 // Docker base images pinned by MIRRORING a Dependabot-maintained reference.
 // Empty here, because the shipped Dockerfile is both the Dependabot-tracked file and
@@ -65,8 +113,9 @@ var fixed = [];
 //   EXAMINED <n> pinned-specs
 //
 // Both, because they fail independently and the second is the one a healthy
-// first number hides. `lockfile-manifests` is how many declared directories
-// held a package.json at all. `pinned-specs` is how many top-level
+// first number hides. `lockfile-manifests` is how many directories the walk
+// found a package.json in and measured, so a manifest added anywhere in the
+// tree moves it. `pinned-specs` is how many top-level
 // dependency specs were actually COMPARED against the committed lockfile,
 // and it goes to zero on its own: `checkLockfile` returns early for a
 // manifest with no declared dependencies, so a package.json whose
@@ -150,9 +199,9 @@ function fixLockfile(entry) {
   catch (e) { problems.push(entry.dir + ": unreadable package.json: " + (e && e.message)); return; }
   // One command STRING rather than an args array plus shell, because Windows needs a shell
   // for the npm .cmd shim, and a shell concatenates an args array without
-  // escaping (Node's DEP0190). Every token comes from the static
-  // LOCKFILE_DIRS table above and must stay shell-safe (no spaces or
-  // metacharacters).
+  // escaping (Node's DEP0190). Every token must stay shell-safe, so
+  // `discoverLockfileDirs` above refuses a manifest directory carrying a
+  // space or a metacharacter instead of passing it through to npm.
   var cmd = ["npm", "install", "--package-lock-only", "--no-audit", "--no-fund"]
     .concat(entry.args).join(" ");
   var r = cp.spawnSync(cmd, {

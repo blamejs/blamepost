@@ -290,6 +290,123 @@ async function testSieveNoInitialResponseIsChallenged(port, caPem, address) {
   wire.close();
 }
 
+// ---- a credential offered before TLS ---------------------------------------
+
+// The property every session ladder in this suite rests on, and the one
+// no ladder can show. `test/helpers/wire.js` states it outright: every
+// listener here refuses a credential before TLS, which is exactly why
+// each ladder upgrades before it authenticates. That arrangement means
+// the absence of the property could never surface from a ladder, since
+// no ladder ever offers a credential in the clear.
+//
+// It is also what stands behind the operator posture that a TCP
+// terminator in front of one of these ports is not a route to it: the
+// listener is handed a plaintext connection and refuses every
+// credential. A listener that stopped doing so would put an address
+// check between a password and the wire.
+//
+// The credential offered is alice's REAL one, so a listener that had
+// stopped refusing would sign her in over the clear rather than fail
+// for some unrelated reason. Each protocol is asked in its own
+// spelling and each answer is pinned to that protocol's refusal rather
+// than to "not success", so a listener that closed the socket, timed
+// out, or answered a parse error fails here rather than passes.
+var BEFORE_TLS_VECTORS = [
+  {
+    name:    "IMAP",
+    // RFC 9051 section 6.2.2. A command the server will not run in this
+    // state is a protocol error, which is BAD.
+    offer:   function (session, address) {
+      session.send("x1 AUTHENTICATE PLAIN " + plainResponse(address, ALICE_PASSWORD));
+      return session.read(/^x1 (OK|NO|BAD)/m, "the answer to a credential before TLS");
+    },
+    refused: /^x1 BAD/m,
+    says:    "BAD",
+    signedIn: /^x1 OK/m,
+  },
+  {
+    name:    "submission",
+    // RFC 3207 section 4: a server that requires STARTTLS answers 530
+    // to anything else. RFC 4954 section 4 routes AUTH into the same
+    // refusal.
+    offer:   async function (session, address) {
+      session.send("EHLO client.example.net");
+      await session.read(/^250 /m, "EHLO accepted in the clear");
+      session.send("AUTH PLAIN " + plainResponse(address, ALICE_PASSWORD));
+      return session.read(/^\d{3}[ -]/m, "the answer to a credential before TLS");
+    },
+    // Pinned to the exact code rather than to any 5xx, because this is
+    // the one THREAT-MODEL.md names for the case and the value of a
+    // wire code is that somebody can filter on it.
+    refused: /^538 5\.7\.11 /m,
+    says:    "538 5.7.11, the code named for this refusal",
+    signedIn: /^235 /m,
+  },
+  {
+    name:    "POP3",
+    // RFC 2595 section 4: the credential commands are unavailable until
+    // STLS has run, and POP3 spells every refusal -ERR.
+    offer:   async function (session, address) {
+      session.send("USER " + address);
+      await session.read(/^(\+OK|-ERR)/m, "USER answered in the clear");
+      session.send("PASS " + ALICE_PASSWORD);
+      return session.read(/^(\+OK|-ERR)/m, "the answer to a credential before TLS");
+    },
+    refused: /^-ERR/m,
+    says:    "-ERR",
+    signedIn: /^\+OK/m,
+  },
+  {
+    name:    "ManageSieve",
+    // RFC 5804 section 2.2. The literal is the one spelling that
+    // carries credentials all the way through this listener, which is
+    // why it is the one offered here.
+    offer:   function (session, address) {
+      var response = plainResponse(address, ALICE_PASSWORD);
+      session.sendNonSyncLiteral('AUTHENTICATE "PLAIN"', response, "<the SASL response>");
+      return session.read(/^(OK|NO|BYE)/m, "the answer to a credential before TLS");
+    },
+    refused: /^(NO|BYE)/m,
+    says:    "NO or BYE",
+    signedIn: /^OK/m,
+  },
+];
+
+// The greeting each listener writes before anything is asked of it.
+// Read and discarded, so the answer a vector asserts on is the answer
+// to the credential rather than the banner still sitting in the buffer.
+var BEFORE_TLS_GREETINGS = {
+  IMAP:        /^\* OK \[CAPABILITY[^\r\n]*\r\n/,
+  submission:  /^220 /m,
+  POP3:        /^\+OK /m,
+  ManageSieve: /^OK[^\r\n]*\r\n/m,
+};
+
+async function testACredentialOfferedBeforeTlsIsRefused(ports, address) {
+  var transcripts = [];
+  for (var i = 0; i < BEFORE_TLS_VECTORS.length; i += 1) {
+    var vector  = BEFORE_TLS_VECTORS[i];
+    var session = await Wire.connect(ports[vector.name], vector.name + "-before-tls");
+    try {
+      await session.read(BEFORE_TLS_GREETINGS[vector.name], "greeting in the clear");
+      var reply = await vector.offer(session, address);
+      count(vector.name + " refuses a credential on an unencrypted session, so a plaintext " +
+        "connection reaching this port is not a route to an account",
+        !vector.signedIn.test(reply), visible(reply));
+      count("and " + vector.name + " says so with " + vector.says + ", its own refusal, " +
+        "rather than by closing the socket or timing out",
+        vector.refused.test(reply), visible(reply));
+      count("and the refusal tells the client to negotiate TLS rather than leaving it to " +
+        "guess why a correct password failed",
+        /TLS|STARTTLS|STLS|encrypt/i.test(reply), visible(reply));
+      transcripts.push(vector.name + ":\n" + session.transcript());
+    } finally {
+      session.close();
+    }
+  }
+  return transcripts.join("\n\n");
+}
+
 // ---- runner ----------------------------------------------------------------
 
 async function run() {
@@ -355,7 +472,11 @@ async function run() {
       submission:  { enabled: true,  port: await reservePort(), address: LOOPBACK },
       submissions: { enabled: false, port: await reservePort(), address: LOOPBACK },
       imap:        { enabled: true,  port: await reservePort(), address: LOOPBACK },
-      pop3:        { enabled: false, port: await reservePort(), address: LOOPBACK },
+      // Bound for the before-TLS case below. Its credential exchange is
+      // two commands rather than one, and it is the second listener
+      // this server offers to a client that can only reach it through
+      // something terminating TLS in front of the port.
+      pop3:        { enabled: true,  port: await reservePort(), address: LOOPBACK },
       managesieve: { enabled: true,  port: await reservePort(), address: LOOPBACK },
     };
 
@@ -390,12 +511,21 @@ async function run() {
       sievePort, leaf.ca, alice.address);
     await testSieveNoInitialResponseIsChallenged(sievePort, leaf.ca, alice.address);
 
+    var beforeTls = await testACredentialOfferedBeforeTlsIsRefused({
+      IMAP:        imapPort,
+      submission:  smtpPort,
+      POP3:        sections.pop3.port,
+      ManageSieve: sievePort,
+    }, alice.address);
+
     // The transcripts of the exchanges that authenticate, so a run's
     // log shows the wire rather than only the verdict.
     console.log("\nIMAP, credentials asked for:\n" + challenged);
     console.log("\nIMAP, credentials on the line:\n" + inline);
     console.log("\nSubmission, credentials asked for:\n" + smtpChallenged);
     console.log("\nManageSieve, credentials as a literal:\n" + sieveLiteral);
+    console.log("\nA credential offered before TLS, on every listener that takes one:\n" +
+      beforeTls);
 
     await server.stop({ timeoutMs: SHUTDOWN_TIMEOUT_MS });
     running = false;

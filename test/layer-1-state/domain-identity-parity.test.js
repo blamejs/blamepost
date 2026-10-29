@@ -130,6 +130,8 @@ function _repeat(letter, times) {
 var CONFUSABLES = [
   ["a Cyrillic letter standing in for a Latin one", "exаmple.example"],
   ["an ideographic full stop reading as a dot",     "example。example"],
+  ["a fullwidth full stop reading as a dot",        "example．example"],
+  ["a halfwidth full stop reading as a dot",        "example｡example"],
   ["an A-label whose decoded form is not this one", "xn--exmple-4nf.example"],
 ];
 

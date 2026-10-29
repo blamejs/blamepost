@@ -41,6 +41,7 @@ var/lib/blamepost/
 var/log/blamepost/
 blobs/
 queue/
+tlsrpt/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
@@ -127,6 +128,18 @@ memory/
 # keeps a release-time `git add -A` from sweeping generated inputs in.
 fuzz/*_seed_corpus/*
 !fuzz/*_seed_corpus/*.*
+
+# The reproducer a fuzz run writes when it finds something. libFuzzer puts
+# it in the directory the run started from, which for the documented
+# command is the repository root, so it lands beside the tracked files
+# rather than under fuzz/. The release path is `git add -A`, and a
+# reproducer is an input that crashed a parser: it belongs in the finding's
+# issue, not in the tree.
+crash-*
+leak-*
+timeout-*
+oom-*
+slow-unit-*
 
 # The vendored framework is the artifact operators consume, so every byte of
 # it is tracked. Three patterns above are unanchored and reach into it: `.*`

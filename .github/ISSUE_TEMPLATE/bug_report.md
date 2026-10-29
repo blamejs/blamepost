@@ -28,8 +28,8 @@ someone@example.com, and cut the base64 after AUTH.
 
 - [ ] Inbound MX (SMTP, port 25)
 - [ ] Submission (SMTP, ports 465 / 587)
-- [ ] IMAP (ports 143 / 993)
-- [ ] POP3 (ports 110 / 995)
+- [ ] IMAP (port 143, STARTTLS)
+- [ ] POP3 (port 110, STLS)
 - [ ] JMAP (`/jmap` on the web app)
 - [ ] ManageSieve (port 4190) or Sieve evaluation
 - [ ] Outbound delivery, queue or DSN

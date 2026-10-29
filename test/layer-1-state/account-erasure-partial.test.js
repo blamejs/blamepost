@@ -117,10 +117,17 @@ function rowsFor(table, accountId) {
 }
 
 // The metadata blob off one audit row, whichever way the column comes
-// back. The framework serializes it to JSON on the way in, and a reader
-// that assumed one of the two shapes would report a missing count as a
-// failing assertion about the erasure rather than about itself.
-function metadataOf(row) {
+// back, and null when there is no row to read. The framework serializes
+// it to JSON on the way in, and a reader that assumed one of the two
+// shapes would report a missing count as a failing assertion about the
+// erasure rather than about itself.
+//
+// Named apart from `helpers.metadataOf` because it is a different
+// function rather than a copy of one. The shared reader refuses a row
+// it cannot read, which is right where a row is known to exist; the
+// caller here asks about a row that may not, and a refusal there would
+// be an assertion about the wrong thing.
+function metadataOrNull(row) {
   if (!row) return null;
   var raw = row.metadata;
   if (raw === null || raw === undefined) return null;
@@ -300,7 +307,7 @@ async function theLibraryReportsWhatItCouldNotErase(cfg, seeded) {
     // volume. A filter script counted under a name that says mail answers
     // that question with a number nobody can act on, and it answers it in
     // the direction that overstates what survived.
-    var heldMeta = metadataOf(identityRows.length === 1 ? identityRows[0] : null);
+    var heldMeta = metadataOrNull(identityRows.length === 1 ? identityRows[0] : null);
     count("the row counts the annotation and the filter script apart from the mail, so a " +
       "count of the subject's surviving messages is a count of messages",
       heldMeta !== null && heldMeta.mailPreserved === 0 && heldMeta.mailFailed === 0 &&

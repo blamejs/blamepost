@@ -1,28 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) blamejs contributors
 "use strict";
-// scripts/source-primitives is the ONE reader of the `@primitive`
-// documentation blocks in lib/, and the one walk over the sources that carry
-// them. Every gate that governs a primitive takes its list from here.
+// scripts/source-primitives is how the gates read the documentation blocks in
+// lib/ and walk the sources that carry them. Every gate that governs a
+// primitive or a module block takes its list from here.
 //
-// Why one reader. Three gates ask different questions about the same blocks:
+// The walk and the block parse are lib/web/wiki/blocks.js, bound here to the
+// directory above this one. The reference wiki renders its pages from the
+// same module when the server builds it, so a block the gates read is the
+// block the wiki reads: one parse produces both. This file holds no block
+// parse of its own.
+//
+// Three gates ask different questions about the same blocks:
 // scripts/check-api-snapshot.js freezes each primitive's introduction version,
 // scripts/check-status-lifecycle.js forces a graduation or removal decision on
 // schedule, and scripts/validate-source-comment-blocks.js checks that the block
-// is well formed in the first place. A gate that finds its own primitives,
-// with its own regular expressions, governs exactly the set it
-// found. Two lists built by two walks agree only by luck, and the failure is
-// silent in the direction that matters: a primitive one gate cannot see is a
-// primitive that gate reports nothing about, and its verdict still reads clean.
-// Sourcing all three here makes the governed set and the documented set the
-// same set by construction rather than by coincidence.
+// is well formed in the first place. Each gate governs exactly the set it
+// reads, and all three read it here.
 //
-// The parse is BLOCK scoped rather than line scoped. A tag is
-// read only from the `/** ... */` block that declares the `@primitive`, so a
-// block that omits a tag cannot silently borrow the next block's: a line walk
-// that remembers the last `@primitive` it saw and waits for an `@since` binds
-// the wrong version onto the wrong token the moment one block leaves the tag
-// out, and reports a value for a primitive that never declared one.
+// The parse is BLOCK scoped rather than line scoped. A tag is read only from
+// the `/** ... */` block that declares the `@primitive`, so a block that omits
+// a tag reports null for it rather than the next block's value.
+//
+// The two line-scoped declaration readers below, `@membership` and
+// `@removed`, are read by the gates alone and stay in this file, over the same
+// walk.
 //
 // Pure module. No side effects, no network, and it reads the source tree only
 // when a caller asks it to.
@@ -30,139 +32,12 @@
 var fs   = require("node:fs");
 var path = require("node:path");
 
-var ROOT    = path.resolve(__dirname, "..");
-var LIB_DIR = path.join(ROOT, "lib");
+var ROOT   = path.resolve(__dirname, "..");
+var reader = require("../lib/web/wiki/blocks.js").at(ROOT);
 
-// Every .js file this project ships under lib/, at any depth, in a stable
-// order. The vendored tree is skipped: it is upstream's source, its comment
-// blocks are upstream's, and it is refreshed wholesale rather than edited.
-// Shared by every gate so a primitive documented in lib/mail/ is read exactly
-// like one documented at the top level.
-function libSources(libDir) {
-  libDir = libDir || LIB_DIR;
-  var out = [];
-  (function walk(dir) {
-    if (!fs.existsSync(dir)) return;
-    fs.readdirSync(dir, { withFileTypes: true })
-      .sort(function (a, b) { return a.name.localeCompare(b.name); })
-      .forEach(function (e) {
-        if (e.isDirectory()) {
-          if (e.name !== "vendor" && e.name !== "node_modules") walk(path.join(dir, e.name));
-        } else if (e.isFile() && /\.js$/.test(e.name)) {
-          out.push(path.join(dir, e.name));
-        }
-      });
-  }(libDir));
-  return out;
-}
-
-function relative(file) {
-  return path.relative(ROOT, file).split(path.sep).join("/");
-}
-
-// Every /** ... */ block in a source, with the 1-based line its opener sits on
-// so a finding points at something a reader can jump to.
-function _blocks(src) {
-  var out = [];
-  var re = /\/\*\*[\s\S]*?\*\//g;
-  var m;
-  while ((m = re.exec(src)) !== null) {
-    out.push({ text: m[0], line: src.slice(0, m.index).split(/\r?\n/).length });
-  }
-  return out;
-}
-
-// Strip the leading ` * ` decoration so tag matching and prose detection both
-// see the author's actual text.
-function _lines(blockText) {
-  return blockText
-    .replace(/^\/\*\*/, "")
-    .replace(/\*\/$/, "")
-    .split(/\r?\n/)
-    .map(function (l) { return l.replace(/^\s*\*\s?/, "").trimEnd(); });
-}
-
-function _tag(lines, name) {
-  var re = new RegExp("^@" + name + "\\s+(.+)$");
-  for (var i = 0; i < lines.length; i += 1) {
-    var m = re.exec(lines[i].trim());
-    if (m) return m[1].trim();
-  }
-  return null;
-}
-
-// Every whitespace or comma separated value across all repeats of one tag,
-// which is how `@related` names more than one target.
-function _allTagValues(lines, name) {
-  var re = new RegExp("^@" + name + "\\s+(.+)$");
-  var out = [];
-  lines.forEach(function (l) {
-    var m = re.exec(l.trim());
-    if (m) {
-      m[1].split(/[,\s]+/).forEach(function (tok) {
-        if (tok.length > 0) out.push(tok);
-      });
-    }
-  });
-  return out;
-}
-
-// Prose is any line that is neither a tag nor empty. A block whose only content
-// is tags describes nothing, and the reader it was written for is the one
-// deciding whether to call the thing.
-function _proseLength(lines) {
-  return lines
-    .filter(function (l) { return l.trim().length > 0 && l.trim().charAt(0) !== "@"; })
-    .join(" ")
-    .trim()
-    .length;
-}
-
-/**
- * collectPrimitives(files) returns one record per `@primitive` block.
- *
- * `files` is the walk to read, so a caller that has to report how wide the walk
- * was can take its length without walking twice. Omitting it reads lib/.
- *
- * Every record carries every tag any gate reads, whether or not the calling
- * gate uses it. A per caller projection would put the parse back where it
- * started, with each gate deciding for itself what a block says.
- *
- *   token       the dotted name the block declares
- *   file        repository relative path
- *   line        1-based line of the block opener
- *   since       @since, the introduction version
- *   status      @status, one of experimental / stable / deprecated
- *   spec        @spec, the standard it implements
- *   deprecated  @deprecated, the version it is removed by
- *   originated  @originated, the earlier version a corrected path preserves
- *   related     @related targets, flattened across repeats
- *   prose       length in characters of the non tag description
- */
-function collectPrimitives(files) {
-  var out = [];
-  (files || libSources()).forEach(function (file) {
-    var src = fs.readFileSync(file, "utf8");
-    _blocks(src).forEach(function (b) {
-      var lines = _lines(b.text);
-      var token = _tag(lines, "primitive");
-      if (!token) return;
-      out.push({
-        token:      token,
-        file:       relative(file),
-        line:       b.line,
-        since:      _tag(lines, "since"),
-        status:     _tag(lines, "status"),
-        spec:       _tag(lines, "spec"),
-        deprecated: _tag(lines, "deprecated"),
-        originated: _tag(lines, "originated"),
-        related:    _allTagValues(lines, "related"),
-        prose:      _proseLength(lines),
-      });
-    });
-  });
-  return out;
-}
+var LIB_DIR    = reader.LIB_DIR;
+var libSources = reader.libSources;
+var relative   = reader.relative;
 
 // The polarity words an `@membership` declaration may carry. Frozen here
 // because two readers ask about them: the api-snapshot gate classifies a
@@ -304,32 +179,23 @@ function membershipMap(records) {
   return out;
 }
 
-/**
- * tagMap(primitives, tag) projects the records onto { token: value }, keeping
- * only the ones that declared the tag.
- *
- * The api snapshot stores its freeze in exactly this shape, and reading it off
- * the shared records is what keeps the frozen set and the documented set the
- * same set. A duplicate token is refused by the comment block gate rather than
- * here, so the last one wins in the interim and the gate names it.
- */
-function tagMap(primitives, tag) {
-  var out = {};
-  primitives.forEach(function (p) {
-    if (p[tag]) out[p.token] = p[tag];
-  });
-  return out;
-}
-
+// `reader` is lib/web/wiki/blocks.js bound to this repository. A gate that
+// reads a fixture tree binds the same reader there with `reader.at(root)`.
+// `collect`, `collectPrimitives`, `collectModules` and `tagMap` are the
+// reader's own functions: the records every gate governs are the records the
+// wiki renders.
 module.exports = {
   ROOT:                   ROOT,
   LIB_DIR:                LIB_DIR,
   MEMBERSHIP_POLARITIES:  MEMBERSHIP_POLARITIES,
+  reader:                 reader,
   libSources:             libSources,
   relative:               relative,
-  collectPrimitives:      collectPrimitives,
+  collect:                reader.collect,
+  collectPrimitives:      reader.collectPrimitives,
+  collectModules:         reader.collectModules,
   collectMembership:      collectMembership,
   collectRemovals:        collectRemovals,
   membershipMap:          membershipMap,
-  tagMap:                 tagMap,
+  tagMap:                 reader.tagMap,
 };

@@ -1,0 +1,18 @@
+{
+  "id": "0123456789abcdef0123456789abcdef",
+  "from": "alice@example.com",
+  "recipient": "bob@example.net",
+  "attempt": 0,
+  "nextAttemptAt": 1750000300000,
+  "reason": "",
+  "reasonCode": "",
+  "requireTls": false,
+  "held": false,
+  "heldBecause": "",
+  "queuedAt": 1750000000000,
+  "attemptsRecorded": 0,
+  "history": [],
+  "route": "mx1.example.net",
+  "policy": { "note": "written by a build that is not this one2K" },
+  "31m": "a key a descriptor chose"
+}

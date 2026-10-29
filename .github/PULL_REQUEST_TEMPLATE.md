@@ -51,8 +51,8 @@ Closes #
 
 - [ ] Wire-protocol readers refuse malformed input LOUDLY with the protocol's defined error code, never tolerated "for compatibility"
 - [ ] Submission stays identity-bound: a `MAIL FROM` the authenticated account does not own is refused at the wire
-- [ ] Every delete path routes through `b.mail.agent.expunge` (retention floor + legal hold), never `b.mailStore.delete()` from a wire handler
-- [ ] Every outbound path goes through `b.mail.send.deliver(envelope)`, covering MX lookup, MTA-STS, DANE, retry and DSN
+- [ ] Every delete path routes through `b.mail.agent.expunge` (retention floor + legal hold), never `hardExpunge()` on the store from a wire handler
+- [ ] Every outbound path goes through the handle built by `b.mail.send.deliver.create(opts)`, covering MX lookup, MTA-STS, DANE, retry and DSN
 - [ ] DKIM / ARC signing still defaults to the Ed25519 + RSA-SHA256 dual signer (RFC 8463 §3). The `a=` registry admits no post-quantum value, so do not add one
 - [ ] No operator-side DNS requirement changed without a matching `docs/operator-guide.md` update
 

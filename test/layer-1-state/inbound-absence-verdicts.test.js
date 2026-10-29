@@ -65,6 +65,35 @@ var visible  = wire.visible;
 var HOSTNAME = "mx.example.com";
 var DOMAIN   = "example.com";
 
+// The settings reference an operator reads before starting this server,
+// and the row in it that prints what the MX listener does with the
+// verdict when the configuration says nothing.
+//
+// The server below is started with `inbound` absent rather than set,
+// which is the configuration an operator gets by changing nothing and
+// the only one in which the default can be observed at all. A run that
+// wrote the posture in would pass with the shipped default deleted, so
+// what it measured would be the line it had just written.
+//
+// The posture is read out of the document rather than out of the
+// module. Every verdict below is one of the two halves that posture
+// promises: a published policy that refuses ends in the code RFC 7372
+// section 3.2 gives a message that failed authentication, which is
+// `enforce`, and a resolver that cannot answer ends in a temporary
+// refusal, which is `defer`. A change to either the sentence or the
+// server without the other fails here.
+var SETTINGS_REFERENCE = "docs/operator-guide.md";
+var INBOUND_ROW_RE = /^\|\s*`BLAMEPOST_INBOUND`\s*\|[^|]*\|\s*`([^`]+)`\s*\|/m;
+
+function documentedInboundPosture() {
+  var text = nodeFs.readFileSync(
+    nodePath.join(helpers.REPO_ROOT, SETTINGS_REFERENCE), "utf8");
+  var matched = INBOUND_ROW_RE.exec(text);
+  if (matched === null) return null;
+  try { return JSON.parse(matched[1]); }
+  catch (_e) { return null; }
+}
+
 var VAULT_PASSPHRASE = "a long enough vault passphrase for one test run";
 var ALICE_PASSWORD   = "quiet lantern bicycle 4291";
 
@@ -546,15 +575,24 @@ async function run() {
       };
     }
 
+    var documented = documentedInboundPosture();
+    count("the settings reference prints an inbound posture for a configuration that says " +
+      "nothing, so the run below is held to a promise rather than to itself",
+      documented !== null && documented.mode === "enforce" &&
+      documented.onTemperror === "defer", JSON.stringify(documented));
+    count("and the configuration this run builds leaves the setting out, so what the " +
+      "verdicts measure is that posture rather than one written here",
+      cfg.inbound === null || cfg.inbound === undefined, JSON.stringify(cfg.inbound));
+
     var resolver = dnsZone.pinnedResolverOver(ZONE);
 
     server = blamepost.create({
+      // `inbound` is deliberately absent. Every verdict below is
+      // therefore produced by the posture a configuration that says
+      // nothing runs at, which is the one the settings reference prints
+      // and the one nearly every operator has.
       config: Object.assign({}, cfg, {
         httpPort: 0, httpsPort: 0, listeners: sections,
-        // The shipped posture, named here so every verdict below is the
-        // one an operator runs rather than one this file relaxed to
-        // make a point.
-        inbound: { mode: "enforce", onTemperror: "defer" },
       }),
       store:        identity,
       mailStore:    identity.mailbox,

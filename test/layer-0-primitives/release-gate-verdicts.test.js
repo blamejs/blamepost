@@ -38,10 +38,10 @@
  * it, which is every gate the flow runs. Elsewhere the same source runs
  * from a shebang and none of that applies.
  *
- * WHAT THE STAND-IN ANSWERS is data, not code: a plan of replies matched
+ * WHAT THE STAND-IN ANSWERS is data, not code: a table of replies matched
  * on the argument tokens, so a vector reads as the situation it describes
- * rather than as a program. An unplanned call is refused loudly instead
- * of answered with a default, because a default is how a vector passes
+ * rather than as a program. A call no reply matches is refused loudly
+ * instead of answered with a default, because a default is how a vector passes
  * without driving the path it names.
  *
  * No sockets and no database. It spawns node processes and reads what
@@ -65,8 +65,11 @@ var RUN_CEILING_MS = 60000;
 // What release.js requires from beside itself, copied into every fixture
 // tree. `examined-counts.js` is the one reader of the published-count
 // contract, shared with scripts/run-gates.js so the two cannot drift about
-// what a gate said it examined.
-var RELEASE_SIBLINGS = ["examined-counts.js"];
+// what a gate said it examined. `run-gates.js` is the runner that executes
+// the declared chain, and release.js reads two things from it: the count
+// words a gate may answer in, and `scripts.gates` out of package.json, which
+// is the one authority for WHICH gates the static battery runs.
+var RELEASE_SIBLINGS = ["examined-counts.js", "run-gates.js"];
 
 // The PR the stand-in answers for. Any number would do; a fixed one keeps
 // the transcript assertions readable.
@@ -91,9 +94,10 @@ var STAND_IN_SOURCE = [
   '"use strict";',
   'var standInFs   = require("node:fs");',
   'var standInPath = require("node:path");',
+  'var STAND_IN_TOOLS = ["gh", "git", "npm", "docker"];',
   'function _asTool(token) {',
   '  var name = standInPath.basename(String(token || "")).toLowerCase().replace(/\\.(?:exe|js)$/, "");',
-  '  return (name === "gh" || name === "git") ? name : null;',
+  '  return STAND_IN_TOOLS.indexOf(name) === -1 ? null : name;',
   '}',
   'var _tool = _asTool(process.argv[0]);',
   'var _argv = process.argv.slice(1);',
@@ -104,17 +108,17 @@ var STAND_IN_SOURCE = [
   '  _argv[0] = standInPath.basename(_argv[0]);',
   '}',
   'if (_tool !== null) {',
-  '  var _plan = JSON.parse(standInFs.readFileSync(process.env.BLAMEPOST_TOOL_STAND_IN, "utf8"));',
-  '  standInFs.appendFileSync(_plan.log, _tool + " " + _argv.join(" ") + "\\n");',
+  '  var _table = JSON.parse(standInFs.readFileSync(process.env.BLAMEPOST_TOOL_STAND_IN, "utf8"));',
+  '  standInFs.appendFileSync(_table.log, _tool + " " + _argv.join(" ") + "\\n");',
   '  var _reply = null;',
-  '  for (var _i = 0; _i < _plan.replies.length && _reply === null; _i += 1) {',
-  '    var _candidate = _plan.replies[_i];',
+  '  for (var _i = 0; _i < _table.replies.length && _reply === null; _i += 1) {',
+  '    var _candidate = _table.replies[_i];',
   '    if (_candidate.tool !== _tool) continue;',
   '    var _missed = _candidate.match.filter(function (t) { return _argv.indexOf(t) === -1; });',
   '    if (_missed.length === 0) _reply = _candidate;',
   '  }',
   '  if (_reply === null) {',
-  '    standInFs.writeSync(2, "tool stand-in: nothing planned for " + _tool + " " + _argv.join(" ") + "\\n");',
+  '    standInFs.writeSync(2, "tool stand-in: no reply for " + _tool + " " + _argv.join(" ") + "\\n");',
   '    process.exit(66);',
   '  }',
   '  if (_reply.stdout) standInFs.writeSync(1, _reply.stdout + "\\n");',
@@ -137,12 +141,25 @@ function _standInDirectory() {
     nodeFs.writeFileSync(nodePath.join(dir, "stand-in.js"), STAND_IN_SOURCE);
     var gh = nodePath.join(dir, "gh.exe");
     nodeFs.copyFileSync(process.execPath, gh);
-    try { nodeFs.linkSync(gh, nodePath.join(dir, "git.exe")); }
-    catch (_e) { nodeFs.copyFileSync(gh, nodePath.join(dir, "git.exe")); }
+    ["git.exe", "docker.exe"].forEach(function (name) {
+      try { nodeFs.linkSync(gh, nodePath.join(dir, name)); }
+      catch (_e) { nodeFs.copyFileSync(gh, nodePath.join(dir, name)); }
+    });
     nodeFs.writeFileSync(nodePath.join(dir, "npx.cmd"),
       "@echo off\r\necho npx stand-in: nothing installed, nothing run\r\nexit /b 0\r\n");
+    // `npm` is the one tool release.js reaches through a shell, so it
+    // resolves a .cmd shim rather than an executable. The shim runs node
+    // against a file named for the tool, which is what the preload reads
+    // the tool name off; the file itself is only reached if the preload
+    // did not fire, and it refuses loudly rather than answering.
+    nodeFs.writeFileSync(nodePath.join(dir, "npm.cmd"),
+      "@echo off\r\nnode \"%~dp0npm.js\" %*\r\n");
+    nodeFs.writeFileSync(nodePath.join(dir, "npm.js"),
+      '"use strict";\n' +
+      'process.stderr.write("npm stand-in: the preload did not answer\\n");\n' +
+      "process.exit(67);\n");
   } else {
-    ["gh", "git"].forEach(function (name) {
+    ["gh", "git", "npm", "docker"].forEach(function (name) {
       var file = nodePath.join(dir, name);
       nodeFs.writeFileSync(file, "#!/usr/bin/env node\n" + STAND_IN_SOURCE);
       nodeFs.chmodSync(file, 0o755);
@@ -159,7 +176,7 @@ function _standInDirectory() {
 // everything else. The existing path variable is dropped by name rather
 // than overwritten, because Windows reports it as `Path` and adding
 // `PATH` beside it leaves the child holding two of them.
-function _standInEnv(planPath, extra) {
+function _standInEnv(repliesPath, extra) {
   var dir = _standInDirectory();
   var env = {};
   Object.keys(process.env).forEach(function (k) {
@@ -167,7 +184,7 @@ function _standInEnv(planPath, extra) {
     env[k] = process.env[k];
   });
   env.PATH = dir + nodePath.delimiter + (process.env.PATH || "");
-  env.BLAMEPOST_TOOL_STAND_IN = planPath;
+  env.BLAMEPOST_TOOL_STAND_IN = repliesPath;
   if (process.platform === "win32") {
     // Forward slashes: this variable is parsed with backslash as an
     // escape, so a Windows path written as it comes arrives with its
@@ -178,14 +195,14 @@ function _standInEnv(planPath, extra) {
   return env;
 }
 
-// Write a reply plan and return the paths the caller reads back.
-function _plan(replies) {
-  var dir      = helpers.tempDir("toolplan");
-  var logPath  = nodePath.join(dir, "calls.log");
-  var planPath = nodePath.join(dir, "plan.json");
+// Write a reply table and return the paths the caller reads back.
+function _replyTable(replies) {
+  var dir         = helpers.tempDir("tool-replies");
+  var logPath     = nodePath.join(dir, "calls.log");
+  var repliesPath = nodePath.join(dir, "replies.json");
   nodeFs.writeFileSync(logPath, "");
-  nodeFs.writeFileSync(planPath, JSON.stringify({ log: logPath, replies: replies }, null, 2));
-  return { planPath: planPath, logPath: logPath };
+  nodeFs.writeFileSync(repliesPath, JSON.stringify({ log: logPath, replies: replies }, null, 2));
+  return { repliesPath: repliesPath, logPath: logPath };
 }
 
 function _calls(logPath) {
@@ -239,7 +256,7 @@ var CHECKS_FAILING_OUTPUT = [
 var CHECKS_PASSING_OUTPUT = "All checks were successful";
 
 async function _runWatch(opts) {
-  var plan = _plan([
+  var table = _replyTable([
     { tool: "gh", match: ["pr", "list"],      stdout: PR_NUMBER, exit: 0 },
     { tool: "gh", match: ["pr", "checks"],
       stdout: opts.checksExit === 0 ? CHECKS_PASSING_OUTPUT : CHECKS_FAILING_OUTPUT,
@@ -249,9 +266,9 @@ async function _runWatch(opts) {
   var rv = await spawnRun.runNodeScript([RELEASE_JS, "watch"], {
     cwd:       helpers.REPO_ROOT,
     ceilingMs: RUN_CEILING_MS,
-    env:       _standInEnv(plan.planPath, { RELEASE_SKIP_CODEX_WAIT: "1" }),
+    env:       _standInEnv(table.repliesPath, { RELEASE_SKIP_CODEX_WAIT: "1" }),
   });
-  rv.calls = _calls(plan.logPath);
+  rv.calls = _calls(table.logPath);
   return rv;
 }
 
@@ -330,22 +347,190 @@ async function openThreadsAloneKeepTheirCode() {
 }
 
 // ---------------------------------------------------------------------------
+// publish
+// ---------------------------------------------------------------------------
+
+// `publish` is the last subcommand of the flow, so its exit code is the
+// whole cut's verdict, and the two artifacts it answers for are published by
+// two different workflows. The npm side has always had a second reading: it
+// watches the run, and then it asks the registry what version is there, so a
+// run that could not be found does not decide anything on its own.
+//
+// The container side had only the first half. When `gh run list` came back
+// empty it printed a note and carried on, and an empty answer is what a
+// renamed workflow, a token without the scope to list runs, and an API
+// hiccup all produce. Each of those read as a published image.
+//
+// Driven the way an operator drives it: the subcommand in a child process
+// with `gh`, `npm` and `docker` answered by the stand-in, asserting on the
+// exit code and the transcript.
+var PUBLISHED_DIGEST = "sha256:" + "ab12cd34".repeat(8);
+
+// The image the fixture manifest resolves to. The tag carries no `v`: the
+// git tag is `vX.Y.Z` and the image published from it is `X.Y.Z`. Built
+// when it is read rather than at load, because the version it is composed
+// from is declared with the fixture tree further down.
+function fixtureImage() {
+  return "ghcr.io/blamejs/blamepost:" + FIXTURE_VERSION;
+}
+
+async function _runPublish(opts) {
+  opts = opts || {};
+  var root    = _fixtureTree({});
+  var replies = [
+    { tool: "gh", match: ["run", "list", "--workflow=npm-publish.yml"],
+      stdout: opts.npmRunId || "", exit: 0 },
+    { tool: "gh", match: ["run", "list", "--workflow=release-container.yml"],
+      stdout: opts.containerRunId || "", exit: 0 },
+    { tool: "npm", match: ["view"],
+      stdout: opts.npmVersion === undefined ? FIXTURE_VERSION : opts.npmVersion, exit: 0 },
+    { tool: "docker", match: ["imagetools", "inspect"],
+      stdout: opts.imageDigest === undefined ? "" : opts.imageDigest,
+      exit:   opts.imageExit === undefined ? 1 : opts.imageExit },
+  ];
+  if (opts.npmRunId) {
+    replies.push({ tool: "gh", match: ["run", "watch", opts.npmRunId],
+      stdout: "", exit: opts.npmWatchExit || 0 });
+  }
+  if (opts.containerRunId) {
+    replies.push({ tool: "gh", match: ["run", "watch", opts.containerRunId],
+      stdout: "", exit: opts.containerWatchExit || 0 });
+  }
+  var table = _replyTable(replies);
+  var rv = await spawnRun.runNodeScript([nodePath.join(root, "scripts", "release.js"), "publish"], {
+    cwd:       root,
+    ceilingMs: RUN_CEILING_MS,
+    env:       _standInEnv(table.repliesPath),
+  });
+  rv.calls = _calls(table.logPath);
+  rv.root  = root;
+  return rv;
+}
+
+// The live defect. No container run is found, nothing was ever asked of the
+// registry, and the npm side is healthy, so the flow reported a clean
+// publish for a tag whose image may not exist.
+async function anAbsentContainerRunIsNotAPublishedImage() {
+  var run = await _runPublish({ containerRunId: "", imageExit: 1 });
+
+  count("absent container run: the registry is asked about the image anyway",
+    run.calls.indexOf("docker buildx imagetools inspect " + fixtureImage()) !== -1,
+    run.calls.trim());
+  count("absent container run: the cut does not exit clean",
+    run.code !== 0, "exit " + run.code + ": " + tail(run.out, 8));
+  count("absent container run: the refusal names the image an operator would pull",
+    run.out.indexOf(fixtureImage()) !== -1, tail(run.out, 10));
+  count("absent container run: it never reports the image as published",
+    !/container image published/i.test(run.out), tail(run.out, 10));
+}
+
+// The same question with the run found and green. A watch that passed says
+// the workflow concluded, not that the registry serves the tag, so the
+// second reading has to happen either way.
+async function aPassingContainerRunStillHasToShowTheImage() {
+  var run = await _runPublish({ containerRunId: "4242", imageExit: 1 });
+
+  count("passing container run: it was watched to completion",
+    run.calls.indexOf("gh run watch 4242") !== -1, run.calls.trim());
+  count("passing container run: the registry is still asked",
+    run.calls.indexOf("docker buildx imagetools inspect") !== -1, run.calls.trim());
+  count("passing container run: an unservable image still stops the cut",
+    run.code !== 0, "exit " + run.code + ": " + tail(run.out, 8));
+}
+
+// An answer that is not a digest is not an answer. A command that exits
+// clean having printed a warning, or nothing at all, would otherwise read as
+// a published image.
+async function anAnswerThatIsNotADigestIsRefused() {
+  var run = await _runPublish({ imageExit: 0, imageDigest: "unauthorized" });
+  count("no digest: a clean exit with no digest in it is refused",
+    run.code !== 0, "exit " + run.code + ": " + tail(run.out, 8));
+  count("no digest: the refusal quotes what came back instead",
+    run.out.indexOf("unauthorized") !== -1, tail(run.out, 10));
+}
+
+// Both artifacts missing at once. An operator wants one pass to say what is
+// wrong with the release rather than two rounds, and the npm arm reporting
+// first must not hide the container arm behind it.
+async function bothSidesAreReportedFromOnePass() {
+  var run = await _runPublish({ npmVersion: "0.0.9", imageExit: 1 });
+  count("both missing: the cut stops",
+    run.code !== 0, "exit " + run.code + ": " + tail(run.out, 10));
+  count("both missing: the registry version it found is reported",
+    run.out.indexOf("0.0.9") !== -1, tail(run.out, 12));
+  count("both missing: the image is reported in the same pass",
+    run.out.indexOf(fixtureImage()) !== -1, tail(run.out, 12));
+}
+
+// The control. Without it a command that refused everything would satisfy
+// every vector above.
+async function aPublishedReleaseOnBothSidesExitsClean() {
+  var run = await _runPublish({
+    npmRunId:       "11",
+    containerRunId: "22",
+    imageExit:      0,
+    imageDigest:    PUBLISHED_DIGEST,
+  });
+  count("published: the cut exits clean",
+    run.code === 0, "exit " + run.code + ": " + tail(run.out, 10));
+  count("published: the npm version is read back",
+    /npm matches 0\.1\.0/.test(run.out), tail(run.out, 12));
+  count("published: the image digest is read back",
+    run.out.indexOf(PUBLISHED_DIGEST) !== -1, tail(run.out, 12));
+  count("published: both workflow runs were watched",
+    run.calls.indexOf("gh run watch 11") !== -1 &&
+    run.calls.indexOf("gh run watch 22") !== -1, run.calls.trim());
+}
+
+// A failing container workflow keeps the answer it already had: the watch
+// decides, and the registry reading below it never runs, because the image
+// that is there is the previous release's.
+async function aFailingContainerRunStillStopsTheCut() {
+  var run = await _runPublish({
+    npmRunId:             "11",
+    containerRunId:       "22",
+    containerWatchExit:   1,
+    imageExit:            0,
+    imageDigest:          PUBLISHED_DIGEST,
+  });
+  count("failing container run: the cut stops",
+    run.code !== 0, "exit " + run.code + ": " + tail(run.out, 10));
+  count("failing container run: the refusal is about the workflow rather than the registry",
+    /release-container workflow run concluded FAILED/.test(run.out), tail(run.out, 12));
+}
+
+// ---------------------------------------------------------------------------
 // The static battery, in a tree of its own
 // ---------------------------------------------------------------------------
 
-// Every gate script the battery runs, in the order it runs them. The
-// fixture writes all of them and then removes the one the vector is
-// about, so a missing gate is the only difference between two runs.
-var GATE_SCRIPTS = [
-  "test/layer-0-primitives/codebase-patterns.test.js",
-  "scripts/validate-source-comment-blocks.js",
-  "scripts/check-api-snapshot.js",
-  "scripts/check-spelling-consistency.js",
-  "scripts/check-status-lifecycle.js",
+// The fixture's own declared chain, written into its package.json as
+// `scripts.gates` the way the real one is. release.js no longer holds a list
+// of gates: it reads this one. So a fixture tree that declared nothing would
+// run no gate at all, and the vectors below would pass over a battery that
+// never happened.
+//
+// It carries a gate release.js has never named anywhere in its source,
+// `check-node-floor.js`, because that is the property the change is about: the
+// hand-written battery in release.js had drifted three gates behind the chain,
+// and a release cut therefore ran a weaker battery than `npm run gates`.
+// Nothing about this list is copied from the real package.json; the vector
+// below asserts that whatever it says is what runs.
+var CHAIN_GATES = [
+  "node test/layer-0-primitives/codebase-patterns.test.js",
+  "node scripts/validate-source-comment-blocks.js",
+  "node scripts/check-api-snapshot.js",
+  "node scripts/check-spelling-consistency.js",
+  "node scripts/check-status-lifecycle.js",
+  "node scripts/check-node-floor.js",
+  "node scripts/pin-all.js --check",
+];
+
+// The gates the battery runs BESIDE the chain: the release-artifact
+// round-trips, which compare a generated document against the notes it derives
+// from rather than sweeping a set of the tree.
+var BESIDE_CHAIN_GATES = [
   "scripts/consolidate-release-notes.js",
   "scripts/generate-changelog-entry.js",
-  "scripts/pin-all.js",
-  "scripts/check-vendor-currency.js",
 ];
 
 // The artifact regeneration `prepare` runs before it reaches the battery.
@@ -365,11 +550,9 @@ var DETECTOR_GATE = "test/layer-0-primitives/codebase-patterns.test.js";
 // line per unit they answer for, and the numbers here are the ones those
 // gates print against this repository today.
 //
-// A gate absent from this map publishes nothing, which is how release.js
-// runs the ones it does not route through the counted helper. Keeping
-// those in the fixture is what proves the battery still tolerates a gate
-// that makes no such claim, rather than demanding a count from everything
-// that happens to be a script.
+// Every gate the battery runs is in this map, because every one of them now
+// goes through the counted helper. A gate absent from it publishes nothing and
+// is refused, which is the shape `aGateThatPublishesNoCountStopsTheCut` drives.
 var GATE_COUNTS = {
   "test/layer-0-primitives/codebase-patterns.test.js": ["CHECKS 12"],
   "scripts/validate-source-comment-blocks.js": [
@@ -393,6 +576,21 @@ var GATE_COUNTS = {
   "scripts/consolidate-release-notes.js": [
     "EXAMINED 1 series-files",
     "EXAMINED 1 series-releases",
+  ],
+  "scripts/generate-changelog-entry.js": [
+    "EXAMINED 2 rendered-releases",
+    "EXAMINED 9 swept-prose-strings",
+    "EXAMINED 40 rendered-artifact-lines",
+  ],
+  "scripts/check-node-floor.js": [
+    "EXAMINED 26 workflow-floor-references",
+    "EXAMINED 4 container-floor-references",
+    "EXAMINED 8 document-floor-references",
+    "EXAMINED 3 floor-documents",
+  ],
+  "scripts/pin-all.js": [
+    "EXAMINED 2 lockfile-manifests",
+    "EXAMINED 3 pinned-specs",
   ],
   "scripts/check-vendor-currency.js": [
     "EXAMINED 1 manifest-packages",
@@ -428,7 +626,7 @@ function _gateStandInSource(rel, opts) {
   if (overridden) {
     overridden.forEach(function (line) { lines.push('console.log("' + line + '");'); });
   } else if (rel !== opts.silentGate) {
-    (GATE_COUNTS[rel] || []).forEach(function (published) {
+    (GATE_COUNTS[rel] || DEFAULT_GATE_COUNT).forEach(function (published) {
       var line = rel === opts.inertGate ? published.replace(/\s\d+\s?/, " 0 ").trimEnd() : published;
       lines.push('console.log("' + line + '");');
     });
@@ -436,21 +634,53 @@ function _gateStandInSource(rel, opts) {
   return '"use strict";\n' + lines.join("\n") + "\n";
 }
 
+// What a gate with no entry of its own publishes. Every gate the battery runs
+// goes through the counted helper, so a stand-in that published nothing would
+// be refused for that rather than for whatever the vector is about. Silence is
+// spelled by `opts.silentGate` alone.
+var DEFAULT_GATE_COUNT = ["EXAMINED 5 fixture-units"];
+
 // A tree with the shape release.js reads and nothing else: the script
 // itself, a manifest, notes for the version in it, and the gate scripts.
 // The real repository is never the subject here, because `commit` writes
 // a branch and a commit into whatever tree it is pointed at.
+// The declared chain as package.json spells it: the runner's path followed by
+// one quoted command per gate. `opts.omitChain` writes a manifest with no
+// `scripts.gates` at all, and `opts.extraChainGate` appends a link release.js
+// names nowhere in its own source.
+function _chainScript(opts) {
+  var links = CHAIN_GATES.slice();
+  if (opts.extraChainGate) links.push("node " + opts.extraChainGate);
+  return "node scripts/run-gates.js " +
+    links.map(function (l) { return '"' + l + '"'; }).join(" ");
+}
+
+// Every gate script a fixture tree carries. The fixture writes all of them and
+// then removes the one the vector is about, so a missing gate is the only
+// difference between two runs. `check-vendor-currency.js` sits after the
+// battery in `prepare` rather than inside it, and is carried for the one
+// subcommand that reaches it.
+function _fixtureGates(opts) {
+  return CHAIN_GATES
+    .concat(opts.extraChainGate ? ["node " + opts.extraChainGate] : [])
+    .map(function (link) { return link.split(/\s+/)[1]; })
+    .concat(BESIDE_CHAIN_GATES, ["scripts/check-vendor-currency.js"]);
+}
+
 function _fixtureTree(opts) {
   opts = opts || {};
   var root = helpers.tempDir("releasetree");
   ["scripts", "release-notes", "test", "test/layer-0-primitives"].forEach(function (d) {
     nodeFs.mkdirSync(nodePath.join(root, d), { recursive: true });
   });
-  nodeFs.writeFileSync(nodePath.join(root, "package.json"), JSON.stringify({
+  var manifest = {
     name:       "@blamejs/blamepost",
     version:    FIXTURE_VERSION,
     repository: { url: "https://github.com/blamejs/blamepost.git" },
-  }, null, 2) + "\n");
+  };
+  if (!opts.omitChain) manifest.scripts = { gates: _chainScript(opts) };
+  nodeFs.writeFileSync(nodePath.join(root, "package.json"),
+    JSON.stringify(manifest, null, 2) + "\n");
   // Notes for the version in the manifest AND for the one a bump lands on,
   // so `commit` and `prepare` each find the release they read.
   [FIXTURE_VERSION, PREPARED_VERSION].forEach(function (version) {
@@ -473,8 +703,9 @@ function _fixtureTree(opts) {
     nodeFs.copyFileSync(nodePath.join(helpers.REPO_ROOT, "scripts", name),
       nodePath.join(root, "scripts", name));
   });
-  GATE_SCRIPTS.concat(REGEN_SCRIPTS).forEach(function (rel) {
+  _fixtureGates(opts).concat(REGEN_SCRIPTS).forEach(function (rel) {
     if (rel === opts.omit) return;
+    nodeFs.mkdirSync(nodePath.join(root, nodePath.dirname(rel)), { recursive: true });
     nodeFs.writeFileSync(nodePath.join(root, rel), _gateStandInSource(rel, opts));
   });
   return root;
@@ -486,7 +717,7 @@ function _fixtureTree(opts) {
 // records the rest so a vector can assert that no commit was ever made.
 async function _runCommit(opts) {
   var root = _fixtureTree(opts);
-  var plan = _plan([
+  var table = _replyTable([
     { tool: "git", match: ["rev-parse", "--abbrev-ref"], stdout: "main", exit: 0 },
     { tool: "git", match: ["rev-parse", "--verify"],     stdout: "",     exit: 1 },
     { tool: "git", match: ["checkout"],                  stdout: "",     exit: 0 },
@@ -500,9 +731,9 @@ async function _runCommit(opts) {
   var rv = await spawnRun.runNodeScript([nodePath.join(root, "scripts", "release.js"), "commit"], {
     cwd:       root,
     ceilingMs: RUN_CEILING_MS,
-    env:       _standInEnv(plan.planPath),
+    env:       _standInEnv(table.repliesPath),
   });
-  rv.calls = _calls(plan.logPath);
+  rv.calls = _calls(table.logPath);
   rv.root  = root;
   return rv;
 }
@@ -515,16 +746,16 @@ async function _runCommit(opts) {
 // the regeneration scripts.
 async function _runPrepare(opts) {
   var root = _fixtureTree(opts);
-  var plan = _plan([
+  var table = _replyTable([
     { tool: "git", match: ["rev-parse", "--abbrev-ref"], stdout: "main", exit: 0 },
     { tool: "git", match: ["status", "--porcelain"],     stdout: "",     exit: 0 },
   ]);
   var rv = await spawnRun.runNodeScript([nodePath.join(root, "scripts", "release.js"), "prepare"], {
     cwd:       root,
     ceilingMs: RUN_CEILING_MS,
-    env:       _standInEnv(plan.planPath),
+    env:       _standInEnv(table.repliesPath),
   });
-  rv.calls = _calls(plan.logPath);
+  rv.calls = _calls(table.logPath);
   rv.root  = root;
   return rv;
 }
@@ -666,14 +897,76 @@ async function aCompleteBatteryRunsToTheCommit() {
     /validate-source-comment-blocks\.js: 22 lib-source-files, 115 primitive-blocks/.test(run.out) &&
     /check-api-snapshot\.js: 22 lib-source-files, 115 frozen-primitives/.test(run.out) &&
     /check-spelling-consistency\.js: 282 scanned-files/.test(run.out),
-    tail(run.out, 24));
-  // The other half of the same rule. Not every script in the battery
-  // answers in a unit, and the ones that only round-trip a generated
-  // artifact are compared against the artifact itself rather than over a
-  // set that could come back empty. The battery has to keep running those
-  // rather than demanding a number from anything shaped like a script.
-  count("complete battery: a gate that publishes no count is still tolerated",
-    run.out.indexOf("scripts/generate-changelog-entry.js: gate stand-in") !== -1, tail(run.out, 24));
+    tail(run.out, 30));
+  // The gate the hand-written battery had drifted away from. It is declared in
+  // the chain and named nowhere in release.js, so it runs only because the
+  // battery reads the chain.
+  count("complete battery: a gate the chain declares and release.js never names is run",
+    /check-node-floor\.js: 26 workflow-floor-references/.test(run.out), tail(run.out, 30));
+  // The other half of the same rule, and the half that used to be discarded.
+  // The CHANGELOG round-trip publishes both of its units and the battery ran it
+  // for the exit code alone, which is the same hole as a gate that says nothing
+  // reached from the caller's side.
+  count("complete battery: the CHANGELOG round-trip's published count is read back too",
+    /generate-changelog-entry\.js: 2 rendered-releases, 9 swept-prose-strings, 40 rendered-artifact-lines/
+      .test(run.out), tail(run.out, 30));
+  count("complete battery: the battery says how many gates the chain declared",
+    /declared gate chain: 7 gate\(s\) from package\.json scripts\.gates/.test(run.out),
+    tail(run.out, 30));
+}
+
+// The property the change is for, driven rather than described: a gate added
+// to `scripts.gates` runs in the release cut with no edit to release.js. The
+// link below names a script this test file invented and release.js has never
+// heard of.
+async function aGateAddedToTheChainRunsInTheReleaseBattery() {
+  var added = "scripts/check-something-nobody-named.js";
+  var run = await _runCommit({ extraChainGate: added });
+
+  count("added gate: the battery ran a gate release.js does not name",
+    run.out.indexOf(added + ": gate stand-in") !== -1, tail(run.out, 30));
+  count("added gate: and read the count it published",
+    run.out.indexOf(added + ": 5 fixture-units") !== -1, tail(run.out, 30));
+  count("added gate: and counted it among the gates the chain declared",
+    /declared gate chain: 8 gate\(s\)/.test(run.out), tail(run.out, 30));
+  count("added gate: and the cut still reaches the commit",
+    run.calls.indexOf("git commit") !== -1, run.calls.trim());
+}
+
+// The same gate, made inert. A gate that only runs because the chain names it
+// still has to be refused for examining nothing, or reading the chain would
+// have bought a longer battery and a weaker one.
+async function aGateAddedToTheChainIsHeldToTheCountContract() {
+  var added = "scripts/check-something-nobody-named.js";
+  var publishes = {};
+  publishes[added] = ["EXAMINED 0 fixture-units"];
+  var run = await _runCommit({ extraChainGate: added, publishes: publishes });
+
+  count("added gate examining nothing: the cut stops",
+    run.code !== 0, "exit " + run.code + ": " + tail(run.out, 8));
+  count("added gate examining nothing: it names the gate",
+    run.out.indexOf(added) !== -1, tail(run.out, 10));
+  count("added gate examining nothing: no commit was made",
+    run.calls.indexOf("git commit") === -1, run.calls.trim());
+}
+
+// The read that decides the whole battery, blinded. A manifest with no
+// `scripts.gates` leaves release.js with no list at all, and the outcome that
+// must not happen is the quiet one: a battery of zero gates reported as a
+// battery that passed.
+async function aTreeDeclaringNoGateChainStopsTheCut() {
+  var run = await _runCommit({ omitChain: true });
+
+  count("no declared chain: the cut stops",
+    run.code !== 0, "exit " + run.code + ": " + tail(run.out, 8));
+  count("no declared chain: it says where the list is supposed to come from",
+    /scripts\.gates/.test(run.out), tail(run.out, 10));
+  count("no declared chain: it says an absent chain would score over nothing",
+    /over nothing/i.test(run.out), tail(run.out, 10));
+  count("no declared chain: no gate was reported as passing",
+    run.out.indexOf("gate stand-in") === -1, tail(run.out, 10));
+  count("no declared chain: no commit was made",
+    run.calls.indexOf("git commit") === -1, run.calls.trim());
 }
 
 // The control for the vendor-currency vector, on its own subcommand.
@@ -695,10 +988,17 @@ async function run() {
   await cleanChecksAndCleanThreadsAdvance();
   await aCompleteBatteryRunsToTheCommit();
   await aMeasuredVendoredPinReachesTheEndOfPrepare();
+  await aPublishedReleaseOnBothSidesExitsClean();
 
   await failingChecksAloneRefuseToAdvance();
   await failingChecksAndOpenThreadsBothReport();
   await openThreadsAloneKeepTheirCode();
+
+  await anAbsentContainerRunIsNotAPublishedImage();
+  await aPassingContainerRunStillHasToShowTheImage();
+  await anAnswerThatIsNotADigestIsRefused();
+  await bothSidesAreReportedFromOnePass();
+  await aFailingContainerRunStillStopsTheCut();
 
   await anAbsentGateScriptStopsTheCut();
   await anAbsentDetectorSuiteStopsTheCut();
@@ -707,6 +1007,10 @@ async function run() {
   await anEmptyExaminedCountStopsTheCut();
   await oneEmptyUnitAmongSeveralStopsTheCut();
   await anUnmeasuredVendoredPinStopsTheCut();
+
+  await aGateAddedToTheChainRunsInTheReleaseBattery();
+  await aGateAddedToTheChainIsHeldToTheCountContract();
+  await aTreeDeclaringNoGateChainStopsTheCut();
 
   return helpers.getChecks();
 }

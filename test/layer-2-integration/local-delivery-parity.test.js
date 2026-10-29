@@ -262,6 +262,58 @@ function theSendingSurfacesShareOneOutboundHandle(server) {
     typeof relay.bounce + " / " + String(relay.queue === server.mail.delivery.queue));
 }
 
+// What the handle accepts as a message. Three surfaces compose it and
+// each builds the bytes its own way, so the argument is the seam between
+// them, and it is the last place a message can still be refused for
+// nothing.
+//
+// `rfc822` is the finished message and this server sends what it is
+// given. A caller that omits it, or hands a value that is not bytes, has
+// no message: the send that follows either leaves with a body made out
+// of that value's own text, or leaves empty. Both arrive at the
+// recipient under this server's own signature, so a receiver reads them
+// as mail this domain vouched for.
+//
+// A byte array is the case worth naming, because it is the one a caller
+// reaches without a mistake anywhere: a stream read, a decoder and a
+// structured clone all hand back `Uint8Array`, and it carries the
+// message exactly. Read as text it becomes the decimal spelling of every
+// octet, comma separated, which is a message that leaves, arrives, and
+// is nothing the sender wrote.
+async function theRelayHandleRefusesAnEnvelopeWithNoMessage(server) {
+  var relay = server.mail.listeners.relay;
+  // No recipients, so nothing is delivered whichever way the argument is
+  // read: the case is about which of the two answers the caller gets.
+  var cases = [
+    ["no rfc822 at all", undefined],
+    ["null", null],
+    ["a number", 260],
+    ["an object", { rfc822: "here" }],
+  ];
+  for (var i = 0; i < cases.length; i += 1) {
+    var threw = null;
+    try {
+      await relay.send({ from: "alice@" + DOMAIN, to: [], rfc822: cases[i][1] });
+    } catch (e) { threw = e; }
+    count("relay.send given " + cases[i][0] + " for the message is refused, rather than " +
+      "sending a message built out of that value",
+      threw !== null && threw instanceof TypeError,
+      threw === null ? "accepted it" : threw.name + ": " + threw.message);
+  }
+
+  var rawMessage = Buffer.from(
+    "From: alice@" + DOMAIN + "\r\nTo: nobody@example.net\r\nSubject: bytes\r\n\r\nbody\r\n",
+    "utf8");
+  var arrayThrew = null;
+  try {
+    await relay.send({ from: "alice@" + DOMAIN, to: [], rfc822: new Uint8Array(rawMessage) });
+  } catch (e) { arrayThrew = e; }
+  count("while a caller holding the message as a byte array is accepted and sends those " +
+    "octets, rather than the decimal spelling of each one",
+    arrayThrew === null,
+    arrayThrew === null ? "accepted" : arrayThrew.name + ": " + arrayThrew.message);
+}
+
 async function everySurfaceReachesTheMailbox(ports, caPem, alice, bob, reader, jmapIds) {
   await overSubmission(ports, caPem, alice, bob, MARK_WIRE);
   var wireHit = await found(ports, caPem, bob, BOB_PASSWORD, "INBOX", MARK_WIRE, "imap-wire");
@@ -510,6 +562,7 @@ async function run() {
     }
 
     theSendingSurfacesShareOneOutboundHandle(server);
+    await theRelayHandleRefusesAnEnvelopeWithNoMessage(server);
     var seqs = await everySurfaceReachesTheMailbox(ports, leaf.ca,
       alice.address, bob.address, reader, jmapIds);
     await bothSurfacesFileASignedCopy(ports, leaf.ca, bob.address, seqs);

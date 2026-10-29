@@ -86,6 +86,7 @@ var GENERATED = "blamepost.mail.dkim.keys_generated";
 var ROTATED   = "blamepost.mail.dkim.keys_rotated";
 var RETIRED   = "blamepost.mail.dkim.keys_retired";
 var SWEPT     = "blamepost.mail.dkim.selectors_swept";
+var RESEALED  = "blamepost.mail.dkim.keys_resealed";
 
 // A replacement selector named so it cannot collide with the one this
 // server mints by default, which carries the year and month of the run.
@@ -107,6 +108,21 @@ var LEFTOVER_SELECTOR = "bpleft";
 
 // Markers that would mean private key material had reached a row.
 var KEY_MATERIAL_MARKERS = ["PRIVATE KEY", "BEGIN ", "-----"];
+
+// Characters that change what a line looks like without being characters
+// a reader can see. The override reverses the drawing order of
+// everything after it, so a selector, a domain and a verb arrive in an
+// order nobody wrote; the zero-width space hides the difference between
+// two names that a row exists to tell apart.
+var DISPLAY_OVERRIDES = [
+  { name: "a right-to-left override", point: "‮" },
+  { name: "a zero-width space",       point: "​" },
+];
+
+// A selector name carrying both. It is refused for not being a DNS
+// label, and the refusal quotes it, which is how it reaches a row.
+var HOSTILE_SELECTOR = "bp" + DISPLAY_OVERRIDES[0].point + "evil" +
+  DISPLAY_OVERRIDES[1].point + "x";
 
 function parseJson(text) {
   try { return JSON.parse(text); } catch (_e) { return null; }
@@ -518,6 +534,104 @@ async function aFailedRowDoesNotUndoTheKeyOperation(root) {
   }
 }
 
+// ---- a name that would rewrite the terminal it is read in ---------------------
+
+// A refused verb quotes the selector name it was given, and that name is
+// whatever somebody typed. It reaches two places a person reads: the
+// `requested` entry in the row's metadata, and the `reason` the refusal
+// was worded with. Both are read back in a terminal by `blamepost audit
+// read`, and the chain is append-only, so a value written into it once
+// cannot be taken back out.
+//
+// Control characters were already cut. A right-to-left override is not a
+// control character and does every bit as much: it reverses the order
+// the rest of the line is drawn in, so an operator reading the trail for
+// a refused mint is shown a selector, a domain and a verb in an order
+// nobody wrote. A zero-width joiner hides the difference between two
+// names entirely, which is the difference this row exists to record.
+//
+// Both go through the one screen this server puts between somebody
+// else's text and a reader, rather than a fourth hand-written table of
+// what a terminal acts on.
+async function aNameThatWouldRewriteTheTerminalIsScreenedOutOfTheRow(root) {
+  var dataDir = nodePath.join(root, "screen-data");
+  nodeFs.mkdirSync(dataDir, { recursive: true });
+
+  var identity = null;
+  try {
+    var cfg = config.load({
+      env: {
+        BLAMEPOST_HOSTNAME:         HOSTNAME,
+        BLAMEPOST_DATA_DIR:         dataDir,
+        BLAMEPOST_VAULT_PASSPHRASE: VAULT_PASSPHRASE,
+      },
+      cwd: root,
+    });
+    identity = await store.open(cfg);
+    await identity.domains.add({ domain: DOMAIN });
+
+    var dkim = dkimMod.create({ store: identity, dataDir: cfg.paths.dataDir });
+    var refused = null;
+    try { await dkim.generate({ domain: DOMAIN, selector: HOSTILE_SELECTOR }); }
+    catch (e) { refused = e; }
+    count("a selector carrying a display override is refused, because it is not a DNS label",
+      refused !== null, refused === null ? "minted under it" : String(refused.message).slice(0, 160));
+
+    await b.audit.flush();
+    var domainRow = identity.domains.get(DOMAIN);
+    var rows = await b.audit.query({ action: GENERATED, order: "desc", limit: 20 });
+    rows = (Array.isArray(rows) ? rows : []).filter(function (r) {
+      return domainRow !== null && String(r.resourceId) === String(domainRow.id);
+    });
+    count("the refused mint still left a row, which is what carries the name",
+      rows.length >= 1, String(rows.length));
+
+    var whole = rows.length > 0 ? wholeRow(rows[0]) : "";
+    DISPLAY_OVERRIDES.forEach(function (entry) {
+      count("no key-lifecycle row carries " + entry.name +
+        ", which would redraw the line an operator reads the trail in",
+        whole.length > 0 && whole.indexOf(entry.point) === -1,
+        entry.name + " at offset " + whole.indexOf(entry.point));
+    });
+    count("and the row still says which selector was asked for, screened rather than dropped",
+      whole.indexOf("bp") !== -1, whole.slice(0, 240));
+  } finally {
+    if (identity !== null) {
+      try { identity.close(); }
+      catch (_e) { /* drop-silent by design: the verdict is already decided */ }
+    }
+  }
+}
+
+// Sealing the keys already on a volume to the selectors they belong to
+// rewrites key material at rest, so it leaves a row like the four verbs
+// that change which keys exist. This volume's keys were minted by this
+// build and are already sealed that way, so the run rewrites nothing,
+// which is the run an operator makes when they are not sure whether it
+// has happened. The row still has to name who ran it and what it looked
+// at: a migration that reports nothing and records nothing is
+// indistinguishable from one that never ran.
+function theResealIsAttributed(cli, operator) {
+  var run = cli(["dkim", "reseal", "--domain", DOMAIN]);
+  count("sealing the keys already on the volume succeeds", run.status === 0,
+    "exit " + run.status + " " + run.both.slice(0, 240));
+  count("and says the keys are already sealed to their selectors rather than answering with " +
+    "nothing", run.both.indexOf("already sealed") !== -1, run.both.slice(0, 240));
+
+  var row = newest(cli, RESEALED, null, "sealing the keys to their selectors");
+  if (row === null) return;
+  theRowNamesTheOperator("the reseal", row, operator);
+  count("the reseal records that it succeeded", row.outcome === "success", String(row.outcome));
+
+  var text = wholeRow(row);
+  count("and the row names the domain it ran over",
+    text.indexOf(DOMAIN) !== -1, text.slice(0, 400));
+  count("and names each selector it examined, so a later run can be held against this one",
+    parseJson(cli(["dkim", "list", DOMAIN, "--json"]).stdout || "[]")
+      .every(function (sel) { return text.indexOf(sel.selector) !== -1; }),
+    text.slice(0, 400));
+}
+
 // ---- runner ------------------------------------------------------------------
 
 async function run() {
@@ -551,6 +665,9 @@ async function run() {
     theRefusedMintOverALeftoverKeyIsADenial(cli, operator, nodePath.join(dataDir, "keys"));
     theRotationNamesBothSelectors(cli, operator, first);
     theCaseFoldedRefusalIsAttributed(cli, operator);
+    // Before the retirement below, so the selectors it names are still
+    // on the volume with their keys beside them.
+    theResealIsAttributed(cli, operator);
 
     // Captured while every selector this run created is still on the
     // volume, because a retired one's row is gone by the end and its key
@@ -572,6 +689,7 @@ async function run() {
     // process holds one data directory throughout.
     process.env.BLAMEJS_TMPDIR = workDir;
     await aFailedRowDoesNotUndoTheKeyOperation(root);
+    await aNameThatWouldRewriteTheTerminalIsScreenedOutOfTheRow(root);
 
     return helpers.getChecks();
   } finally {

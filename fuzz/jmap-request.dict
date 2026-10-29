@@ -1,0 +1,41 @@
+# libFuzzer dictionary for the JMAP request reader.
+#
+# The capability URIs are the ones lib/web/index.js advertises. An entry
+# outside that set is refused with unknownCapability, which is a branch
+# worth reaching, so one unadvertised URI is here as well.
+
+using="\"using\""
+method_calls="\"methodCalls\""
+created_ids="\"createdIds\""
+at_type="\"@type\":\"Request\""
+
+cap_core="\"urn:ietf:params:jmap:core\""
+cap_mail="\"urn:ietf:params:jmap:mail\""
+cap_submission="\"urn:ietf:params:jmap:submission\""
+cap_unadvertised="\"urn:ietf:params:jmap:calendars\""
+
+account_id="\"accountId\""
+ids="\"ids\""
+properties="\"properties\""
+filter="\"filter\""
+back_reference="\"#ids\""
+result_of="\"resultOf\""
+path_pointer="\"path\":\"/ids\""
+
+mailbox_get="\"Mailbox/get\""
+email_get="\"Email/get\""
+email_query="\"Email/query\""
+email_set="\"Email/set\""
+email_changes="\"Email/changes\""
+submission_set="\"EmailSubmission/set\""
+core_echo="\"Core/echo\""
+
+destroy="\"destroy\""
+create="\"create\""
+update="\"update\""
+
+deep_open="[[[[[[[[[["
+deep_close="]]]]]]]]]]"
+brace_open="{\"a\":"
+proto="\"__proto__\""
+nul="\x00"

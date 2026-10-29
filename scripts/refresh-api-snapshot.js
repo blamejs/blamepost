@@ -879,17 +879,43 @@ function checkMembership(records, snapshot) {
  *
  * Returns human-readable violation strings (empty = clean).
  */
+// The arrays declaring @membership that the snapshot does not record yet.
+// Read in opposite dispositions by the two callers, which is the same split
+// `checkSinceUntracked` already uses: the GATE reads it as a violation, because
+// an undeclared polarity is frozen by nothing, and the REFRESH reads it as the
+// work it is being run to do.
+//
+// Refusing it in the refresh, as this once did, left no way to record a new
+// array at all. The refresh is the only thing that writes the snapshot, so the
+// guard stood in front of its own remedy and a genuinely new array could only be
+// added by hand-editing the file every other gate compares against.
+function membershipFirstDeclarations(oldMap, newMap) {
+  if (!oldMap || typeof oldMap !== "object") return [];
+  var current = newMap || {};
+  return Object.keys(current).sort().filter(function (p) {
+    return !Object.prototype.hasOwnProperty.call(oldMap, p);
+  });
+}
+
+// The gate's reading of the same set. Mirrors checkSinceUntracked: every
+// DOCUMENTED polarity must be recorded, or a later edit of that one word
+// re-classifies every past and future change to the list with no baseline entry
+// to contradict it. Returns human-readable violation strings (empty = clean).
+function checkMembershipUntracked(oldMap, newMap) {
+  var current = newMap || {};
+  return membershipFirstDeclarations(oldMap, newMap).map(function (p) {
+    return p + ": declared @membership " + current[p] + " but absent from the " +
+      "committed snapshot, so which direction of a change to it takes something " +
+      "away is frozen by nothing";
+  });
+}
+
 function checkMembershipFrozen(oldMap, newMap) {
   if (!oldMap || typeof oldMap !== "object") return [];
   var violations = [];
   var current = newMap || {};
   Object.keys(current).sort().forEach(function (p) {
-    if (!Object.prototype.hasOwnProperty.call(oldMap, p)) {
-      violations.push(p + ": declared @membership " + current[p] + " but absent from the " +
-        "committed snapshot, so which direction of a change to it takes something away is " +
-        "frozen by nothing");
-      return;
-    }
+    if (!Object.prototype.hasOwnProperty.call(oldMap, p)) return;
     if (oldMap[p] !== current[p]) {
       violations.push(p + ": @membership changed " + oldMap[p] + " -> " + current[p] +
         " (a declared polarity is immutable once shipped: it decides whether shrinking this " +
@@ -952,6 +978,7 @@ module.exports = {
   extractMembership: extractMembership,
   checkMembership:   checkMembership,
   checkMembershipFrozen: checkMembershipFrozen,
+  checkMembershipUntracked: checkMembershipUntracked,
   extractRemovals:   extractRemovals,
   checkRemovals:     checkRemovals,
   nextRemovals:      nextRemovals,
@@ -1106,6 +1133,19 @@ if (require.main === module) {
       "is. If this is a genuine correction, it is a surface change: say so in the release " +
       "notes and remove the recorded entry deliberately rather than by editing one word.\n");
     process.exit(2);
+  }
+
+  // Recording a polarity is silent otherwise, and a value that becomes
+  // immutable without anyone reading it is the kind of thing that is discovered
+  // later by the gate that refuses to let it change.
+  var newlyFrozen = membershipFirstDeclarations(
+    prior && prior.membershipByArray, membership);
+  if (newlyFrozen.length > 0) {
+    process.stdout.write("[refresh-api-snapshot] @membership recorded for the first time (" +
+      newlyFrozen.length + "), immutable from this refresh onward:\n");
+    newlyFrozen.forEach(function (p) {
+      process.stdout.write("  + " + p + ": " + membership[p] + "\n");
+    });
   }
   snapshot.membershipByArray = membership;
 

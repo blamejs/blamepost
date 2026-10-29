@@ -220,7 +220,7 @@ function browser(origin) {
     get:  get,
     post: post,
     action: function (wireName, fields) {
-      return post("/mail/" + encodeURIComponent(wireName) + "/actions",
+      return post("/mail/actions?folder=" + encodeURIComponent(wireName),
         "application/x-www-form-urlencoded", fields);
     },
     signIn: async function (address, password) {
@@ -337,7 +337,7 @@ async function theBrowserPurgeTakesTheRowAndTheOctets(ctx, session, planted) {
   count("and its octets are still on the volume for whoever asks for them",
     nodeFs.existsSync(heldBlob), heldBlob);
 
-  var page = await session.get("/mail/" + encodeURIComponent(WEB_FOLDER));
+  var page = await session.get("/mail?folder=" + encodeURIComponent(WEB_FOLDER));
   count("the browser still lists the held message",
     page.body.indexOf(WEB_HELD) !== -1, String(page.status));
   count("and no longer lists the purged one",
@@ -421,7 +421,7 @@ async function theBrowserPurgeSaysSoWhenTheVolumeWillNotFinish(ctx, session, pla
   // browser lists the intersection of the two layers, so a leftover on
   // one of them is invisible rather than wrong, which is precisely why
   // the notice is the only thing that can report this.
-  var page = await session.get("/mail/" + encodeURIComponent(WEB_FOLDER));
+  var page = await session.get("/mail?folder=" + encodeURIComponent(WEB_FOLDER));
   count("the browser no longer lists the message it destroyed",
     page.body.indexOf(WEB_FAULTED) === -1, String(page.status));
 }
@@ -533,7 +533,7 @@ async function theTrashButtonFilesWhereEveryProtocolLooks(ctx, session, trashed)
   client.send("t2 LOGOUT");
   client.close();
 
-  var page = await session.get("/mail/Trash");
+  var page = await session.get("/mail?folder=Trash");
   count("the browser lists it in Trash too, which is the half that never broke",
     page.body.indexOf(trashed.marker) !== -1, String(page.status));
 

@@ -1,0 +1,483 @@
+{% extends "layout" %}
+{% block title %}blamepost admin: DMARC{% endblock %}
+{% block shell %}shell shell-admin{% endblock %}
+{% block content %}
+{{> admin-nav }}
+
+<section class="pane">
+  <header class="pane-head">
+    <div>
+      <h1 class="pane-title">DMARC</h1>
+      <p class="pane-sub">
+        What receivers reported about mail claiming each hosted domain over the last
+        {{ days }} days. A message counts as aligned when it passed SPF or DKIM with the
+        domain in its From header.
+      </p>
+    </div>
+    <form class="findbar" method="get" action="/admin/dmarc">
+      <label class="visually-hidden" for="domain">Domain</label>
+      <select id="domain" name="domain">
+        <option value="">Every domain</option>
+        {% for d in domainChoices %}
+        <option value="{{ d.domain }}"{% if d.current %} selected{% endif %}>{{ d.domain }}</option>
+        {% endfor %}
+      </select>
+      <label class="visually-hidden" for="days">Window</label>
+      <select id="days" name="days">
+        {% for w in dayChoices %}
+        <option value="{{ w.days }}"{% if w.current %} selected{% endif %}>{{ w.days }} days</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-quiet">Show</button>
+    </form>
+  </header>
+
+  {% if hasUncounted %}
+  <div class="notice notice-bad" role="alert">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>
+      Reports arrived for {{ uncountedCount }} of the domains below and none of them counted.
+      Every one was left out because this server did not authenticate the message that carried
+      it. Either inbound authentication is not reaching the reporting address, or somebody is
+      writing reports to it.
+    </p>
+  </div>
+  {% endif %}
+
+  {% if hasQuiet %}
+  <div class="notice notice-warn" role="status">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <p>
+      {{ quietCount }} of the domains below had no reports at all in this window. Nothing
+      arriving is not the same reading as nothing wrong: check that the DMARC record for each
+      one carries an <code>rua</code> address this server accepts mail for.
+    </p>
+  </div>
+  {% endif %}
+
+  {% if empty %}
+  <div class="blank">
+    <p class="blank-head">No domain is hosted yet.</p>
+    <p>Add one on the Domains page and publish its DMARC record. Receivers start reporting within a day of the record resolving.</p>
+  </div>
+  {% else %}
+  <div class="tiles">
+    <span class="tile">
+      <span class="tile-value">{{ counted }}</span>
+      <span class="tile-label">Counted</span>
+    </span>
+    <span class="tile">
+      <span class="tile-value">{{ aligned }}</span>
+      <span class="tile-label">Aligned</span>
+    </span>
+    <span class="tile">
+      <span class="tile-value">{{ unaligned }}</span>
+      <span class="tile-label">Unaligned</span>
+    </span>
+    <span class="tile">
+      <span class="tile-value">{{ rateLabel }}</span>
+      <span class="tile-label">Alignment</span>
+      <span class="meter"><span class="meter-fill w{{ rateBucket }}"></span></span>
+    </span>
+    {% if hasExcluded %}
+    <span class="tile">
+      <span class="tile-value">{{ unauthenticated }}</span>
+      <span class="tile-label">Not counted</span>
+    </span>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% for c in cards %}
+  <article class="keycard">
+    <header class="keycard-head">
+      <h2 class="keycard-title"><code>{{ c.domain }}</code></h2>
+      <span class="row-actions">
+        {% if c.withdrawn %}<span class="pill pill-warn">no longer hosted</span>{% endif %}
+        {% if c.isStale %}<span class="pill pill-warn">{{ c.behindDays }} days behind</span>{% endif %}
+        {% if showLinks %}<a class="btn btn-quiet" href="/{{ c.href }}">Only this domain</a>{% endif %}
+      </span>
+    </header>
+
+    {% if c.hasEvidence %}
+    <div class="tiles">
+      <span class="tile">
+        <span class="tile-value">{{ c.counted }}</span>
+        <span class="tile-label">Counted</span>
+      </span>
+      <span class="tile">
+        <span class="tile-value">{{ c.aligned }}</span>
+        <span class="tile-label">Aligned</span>
+      </span>
+      <span class="tile">
+        <span class="tile-value">{{ c.unaligned }}</span>
+        <span class="tile-label">Unaligned</span>
+      </span>
+      <span class="tile">
+        <span class="tile-value">{{ c.rateLabel }}</span>
+        <span class="tile-label">Alignment</span>
+        <span class="meter"><span class="meter-fill w{{ c.rateBucket }}"></span></span>
+      </span>
+      <span class="tile">
+        <span class="tile-value">{{ c.peakSources }}</span>
+        <span class="tile-label">Most failing sources in a window</span>
+      </span>
+    </div>
+
+    <p class="reclabel">
+      Evidence through {{ c.through }}, over {{ c.windowCount }} reporting windows.
+    </p>
+
+    <div class="tablewrap">
+      <table class="grid grid-dense">
+        <caption class="visually-hidden">Counted reporting windows for {{ c.domain }}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Window</th>
+            <th scope="col">Counted</th>
+            <th scope="col">Aligned</th>
+            <th scope="col">Unaligned</th>
+            <th scope="col">Alignment</th>
+            <th scope="col">Failing sources</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for w in c.windows %}
+          <tr>
+            <th scope="row" class="cell-when">{{ w.began }} to {{ w.ended }}</th>
+            <td>{{ w.counted }}</td>
+            <td>{{ w.aligned }}</td>
+            <td>{{ w.unaligned }}</td>
+            <td>{{ w.rateLabel }}</td>
+            <td>{{ w.sources }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if c.truncated %}
+    <p class="hint">
+      The newest {{ c.shownCount }} of {{ c.windowCount }} reporting windows are listed.
+    </p>
+    {% endif %}
+    {% else %}
+    {% if c.allExcluded %}
+    <div class="blank">
+      <p class="blank-head">Nothing counted.</p>
+      <p>
+        Reports arrived for this domain and every one of them was left out. Nothing above is
+        a reading of this domain's mail. What was left out is listed below.
+      </p>
+    </div>
+    {% else %}
+    <div class="blank">
+      <p class="blank-head">No reports counted.</p>
+      <p>
+        No receiver reported on this domain inside the window above. Check that its DMARC
+        record carries an <code>rua</code> address, that the address is one this server
+        accepts mail for, and that a mailbox or alias exists behind it.
+      </p>
+    </div>
+    {% endif %}
+    {% endif %}
+
+    {% if c.hasExcluded %}
+    <h3 class="section-title">Left out: {{ c.unauthenticated }} messages this server did not authenticate</h3>
+    <p class="hint">
+      None of this is in the counting above. A report is counted only when the message
+      carrying it passed DMARC for the organization the report names as its author.
+    </p>
+    <div class="tablewrap">
+      <table class="grid grid-dense">
+        <caption class="visually-hidden">Excluded reporting windows for {{ c.domain }}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Window</th>
+            <th scope="col">Messages left out</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for x in c.excluded %}
+          <tr>
+            <th scope="row" class="cell-when">{{ x.began }} to {{ x.ended }}</th>
+            <td>{{ x.unauthenticated }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </article>
+  {% endfor %}
+
+  {% if canPublish %}
+  <article class="keycard">
+    <header class="keycard-head">
+      <h2 class="keycard-title">Policy</h2>
+      <span class="row-actions">
+        {% if policy.hasPublished %}<span class="pill">publishing p={{ policy.published }}</span>{% endif %}
+      </span>
+    </header>
+
+    {% if policy.unreadable %}
+    <div class="notice notice-bad" role="alert">
+      <span class="notice-dot" aria-hidden="true"></span>
+      <p>{{ policy.detail }}</p>
+    </div>
+    {% else %}
+    <p class="hint">{{ policy.detail }}</p>
+
+    <div class="tablewrap">
+      <table class="grid">
+        <caption class="visually-hidden">DMARC policy levels for {{ policy.domain }}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Level</th>
+            <th scope="col">Record</th>
+            <th scope="col">Publish</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for l in policy.levels %}
+          <tr>
+            <th scope="row">p={{ l.level }}{% if l.current %} <span class="pill">published</span>{% endif %}{% if l.weaker %} <span class="pill pill-warn">weaker than the one in force</span>{% endif %}</th>
+            <td><code>{{ l.record }}</code></td>
+            <td>
+              {% if l.offered %}
+              <form method="post" action="/admin/dmarc" class="rowform">
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <input type="hidden" name="action" value="zone-prepare">
+                <input type="hidden" name="domain" value="{{ policy.domain }}">
+                <input type="hidden" name="level" value="{{ l.level }}">
+                <label class="visually-hidden" for="reason-{{ l.level }}">Why you are publishing p={{ l.level }}</label>
+                <input id="reason-{{ l.level }}" name="reason" type="text" autocomplete="off"
+                       placeholder="Why you are publishing this" required>
+                <button type="submit" class="btn btn-quiet">Prepare</button>
+              </form>
+              {% else %}
+              <span class="pill pill-warn">not offered</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <p class="fineprint">
+      Preparing a level reads the zone at your DNS provider and shows what would change.
+      Nothing is written until you confirm that change set against the diff it shows.
+      Publishing a policy weaker than the one in force is offered whenever the record is
+      readable; a stronger one is offered when the reporting evidence meets the rules below.
+    </p>
+
+    {% if policy.hasChecks %}
+    <h3 class="section-title">What the step to p={{ policy.next }} asks for</h3>
+    <div class="tablewrap">
+      <table class="grid grid-dense">
+        <caption class="visually-hidden">Rules for the next policy step on {{ policy.domain }}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Rule</th>
+            <th scope="col">Found</th>
+            <th scope="col">Required</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for k in policy.checks %}
+          <tr>
+            <th scope="row">{{ k.name }}{% if k.ok %} <span class="pill">met</span>{% else %} <span class="pill pill-warn">not met</span>{% endif %}</th>
+            <td>{{ k.found }}</td>
+            <td>{{ k.required }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    {% endif %}
+  </article>
+  {% endif %}
+
+  {% if narrowed %}
+  <article class="keycard">
+    <header class="keycard-head">
+      <h2 class="keycard-title">Failing senders</h2>
+      <span class="row-actions">
+        {% if hasSources %}<span class="pill">{{ sourcesListed }} of {{ sourcesTotal }}</span>{% endif %}
+      </span>
+    </header>
+
+    {% if hasSources %}
+    <p class="hint">
+      Every address below failed on both SPF and DKIM for <code>{{ selected }}</code>. Only
+      reports this server authenticated are counted, so no address here comes from a report
+      a stranger wrote. Aligned is what the same address did get through: an address with
+      mail on both sides is usually a relay of yours that is missing from the SPF record or
+      is not signing, and one with nothing aligned is somebody else claiming the domain.
+    </p>
+    <div class="tablewrap">
+      <table class="grid grid-dense">
+        <caption class="visually-hidden">Sending addresses failing alignment for {{ selected }}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Sending address</th>
+            <th scope="col">Failed</th>
+            <th scope="col">Aligned</th>
+            <th scope="col">Windows</th>
+            <th scope="col">Last seen</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in sources %}
+          <tr>
+            <th scope="row">
+              {% if s.readable %}<code>{{ s.sourceIp }}</code>{% else %}<span class="pill pill-warn">address unreadable</span>{% endif %}
+            </th>
+            <td>{{ s.messages }}</td>
+            <td>{{ s.aligned }}{% if s.someAligned %} <span class="pill">also aligning</span>{% endif %}</td>
+            <td>{{ s.windows }}</td>
+            <td class="cell-when">{{ s.lastSeen }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if sourcesTruncated %}
+    <p class="hint">
+      The {{ sourcesListed }} largest of {{ sourcesTotal }} failing senders are listed.
+    </p>
+    {% endif %}
+    {% else %}
+    <div class="blank">
+      <p class="blank-head">No sender is failing both identifiers.</p>
+      <p>
+        Nothing in the counted reports for this window failed on SPF and DKIM together. A
+        window with no counted reports at all reads the same way here, so check the counting
+        above before reading this as a clean domain.
+      </p>
+    </div>
+    {% endif %}
+
+    {% if hasSourcesExcluded %}
+    <h3 class="section-title">Left out: {{ sourcesExcluded }} that failed inside reports this server did not authenticate</h3>
+    <p class="hint">
+      No address above comes from those reports. Anybody who can send mail to a published
+      reporting address can name any sending address and any number, so a sender named only
+      there is a machine somebody else chose. Fix the reporting address so its mail passes
+      DMARC and these become evidence.
+    </p>
+    {% endif %}
+  </article>
+
+  <article class="keycard">
+    <header class="keycard-head">
+      <h2 class="keycard-title">Reporting organizations</h2>
+      <span class="row-actions">
+        {% if hasReporters %}<span class="pill">{{ reportersListed }} of {{ reportersTotal }}</span>{% endif %}
+      </span>
+    </header>
+
+    {% if hasReporters %}
+    <p class="hint">
+      Who sent reports about <code>{{ selected }}</code>, and when the most recent one
+      arrived here. Last heard is the moment the report reached this server, not the window
+      it covered, so a receiver that has stopped sending shows as silent rather than as a
+      domain with nothing wrong.
+    </p>
+    <p class="hint">
+      Each organization is the registered domain its reports passed DMARC for, and it is
+      counted once however many names its reports use. The name in its reports is the
+      reporter's own description of itself, written by whoever sent the report, and this
+      server has not verified it.
+    </p>
+    <div class="tablewrap">
+      <table class="grid grid-dense">
+        <caption class="visually-hidden">Organizations reporting on {{ selected }}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Organization</th>
+            <th scope="col">Name in its reports</th>
+            <th scope="col">Reports</th>
+            <th scope="col">Records</th>
+            <th scope="col">Last heard</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in reporters %}
+          <tr>
+            <th scope="row"><code>{{ r.organization }}</code></th>
+            <td><code>{{ r.orgName }}</code>{% if r.hasOtherNames %} <span class="pill">{{ r.otherNamesLabel }}</span>{% endif %}</td>
+            <td>{{ r.reports }}</td>
+            <td>{{ r.records }}</td>
+            <td class="cell-when">
+              {{ r.newest }}{% if r.silent %} <span class="pill pill-warn">{{ r.silentDays }} days ago</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if reportersTruncated %}
+    <p class="hint">
+      The {{ reportersListed }} most heard from of {{ reportersTotal }} organizations are listed.
+    </p>
+    {% endif %}
+    {% else %}
+    <div class="blank">
+      <p class="blank-head">Nobody has been heard from.</p>
+      <p>
+        No organization sent a report this server authenticated about this domain in this
+        window. Check that the DMARC record carries an <code>rua</code> address, that this
+        server accepts mail for it, and that a mailbox or alias exists behind it.
+      </p>
+    </div>
+    {% endif %}
+
+    {% if hasReportsExcluded %}
+    <h3 class="section-title">Left out: {{ reportsExcluded }} that this server did not authenticate</h3>
+    <p class="hint">
+      No organization above is named on the strength of those. A report is counted only when
+      the message carrying it passed DMARC for the organization the report names as its
+      author, so a name that appears only there is a name whoever sent the report chose.
+    </p>
+    {% endif %}
+
+    {% if hasReportsUnattributed %}
+    <h3 class="section-title">Not attributed: {{ reportsUnattributed }} stored before the authenticated domain was recorded</h3>
+    <p class="hint">
+      Their messages are in the counting above. They count toward no organization in this
+      list, because this server did not record which domain they passed DMARC for.
+    </p>
+    {% endif %}
+  </article>
+  {% endif %}
+
+  <p class="fineprint">
+    Failing sources counts distinct sending addresses that failed on both identifiers, not
+    messages: one misconfigured relay is one source however much it sent. The addresses are
+    sealed on the data volume; picking a single domain above lists them, and reading them is
+    recorded in the audit trail.
+  </p>
+  <p class="fineprint">
+    Aggregate rows are kept for {{ keptDays }} days and destroyed after that, so no window
+    longer than {{ keptDays }} days is offered.
+  </p>
+  {% if zoneOff %}
+  <p class="fineprint">
+    Nothing on this page changes a DMARC record. Publish and edit those with your DNS
+    provider, then run <code>blamepost doctor</code> to see what is actually resolving.
+  </p>
+  {% else %}
+  <p class="fineprint">
+    This server holds a credential for these zones. Pick a single domain above to read where
+    its policy stands and to publish a record from here. A publish edits the DMARC record for
+    that domain and reaches nothing else in the zone. Run <code>blamepost doctor</code> to see
+    what is actually resolving.
+  </p>
+  {% endif %}
+</section>
+{% endblock %}

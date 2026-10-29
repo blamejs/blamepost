@@ -2,8 +2,9 @@
 #
 # The single all-in-one image is the documented default. Running
 # `docker compose up -d` with no profile gives a complete mail server:
-# MX, submission, IMAP, ManageSieve, and the web UI (webmail + admin +
-# JMAP) in one process against one volume.
+# MX, submission, IMAP, ManageSieve, POP3 and the web UI (webmail + admin
+# + JMAP) in one process against one volume. POP3 is the one listener
+# that ships off; BLAMEPOST_POP3_ENABLED below turns it on.
 #
 # Optional add-on services sit behind compose profiles and are off unless
 # asked for:
@@ -14,14 +15,20 @@
 #   docker compose --profile scan up -d
 #
 # Before the first start, put a TLS certificate and key where
-# BLAMEPOST_TLS_CERT and BLAMEPOST_TLS_KEY point. Every listener requires
-# TLS, so a server without them has nothing to start.
+# BLAMEPOST_TLS_CERT and BLAMEPOST_TLS_KEY point. Every mail listener
+# requires TLS, so a server without them has nothing to start.
 #
 # After the first start, create the administrator account. `serve` does
 # not create one, so this is the step that leaves you able to sign in:
 #
 #   docker compose exec blamepost node bin/blamepost.js init \
 #     --admin-email admin@example.com
+#
+# Then sign in on 8443, at a name the certificate covers, for example
+# https://mx.example.com:8443. A request published to the host reaches
+# this server from the bridge gateway rather than over loopback, so the
+# cleartext port on 8080 refuses a password; it is here for the health
+# check and for a terminator in front.
 #
 # Before serving real mail, publish the DNS records in
 # docs/operator-guide.md, set BLAMEPOST_DNS_ACKNOWLEDGED=1, and run
@@ -38,6 +45,18 @@ services:
     container_name: blamepost
     restart: unless-stopped
 
+    # How long the runtime waits after SIGTERM before killing the process.
+    # `bin/blamepost.js` drains for eight seconds and then force-exits four
+    # seconds later, so a stop grace under twelve cuts the drain short and
+    # turns a clean shutdown into a kill: sessions are severed mid-command
+    # and the queue stops between the body it wrote and the descriptor that
+    # names it. The runtime's own default is ten seconds, which is under
+    # that, so leaving this unset ships the case the shutdown code and
+    # SECURITY.md both warn about. Twenty leaves headroom for a volume
+    # under load. A gate holds this against the two constants, so moving
+    # either of them fails rather than silently outrunning this number.
+    stop_grace_period: 20s
+
     # The image runs as UID 65532 and the mail ports are below 1024. This
     # sysctl lowers the unprivileged port floor inside this container's
     # own network namespace, so it changes nothing on the host.
@@ -49,8 +68,9 @@ services:
     # floor, gets a server that binds instead of one that exits naming a
     # port it could not take. The Dockerfile documents the alternative,
     # which is to run high internal ports published to standard host
-    # ports. That approach rewrites the peer address and so degrades RBL
-    # and rate-limit accuracy.
+    # ports. That approach rewrites the peer address, so every per-peer
+    # budget the listeners keep counts the runtime's own address instead
+    # of the sender's.
     sysctls:
       net.ipv4.ip_unprivileged_port_start: "0"
 
@@ -94,8 +114,8 @@ services:
       BLAMEPOST_ADMIN_PASSWORD: ${BLAMEPOST_ADMIN_PASSWORD:-}
 
       # ---- TLS ----------------------------------------------------------
-      # Every listener requires TLS and none has a plaintext mode, so the
-      # server refuses to start without this pair. Put the certificate in
+      # Every mail listener requires TLS and none has a plaintext mode, so
+      # the server refuses to start without this pair. Put the certificate in
       # the data volume's tls/ folder, or bind a host path over it, and
       # renew it with whatever renews your certificates today.
       BLAMEPOST_TLS_CERT: ${BLAMEPOST_TLS_CERT:-/var/lib/blamepost/tls/fullchain.pem}
@@ -120,14 +140,30 @@ services:
       # one. Moving it moves the listener and the published port together.
       BLAMEPOST_HTTPS_PORT: ${BLAMEPOST_HTTPS_PORT:-8443}
 
+      # Address ranges whose X-Forwarded-Proto this server reads. Empty
+      # means nobody, and then the transport is whatever the socket is.
+      # The tls profile below terminates TLS in Caddy and forwards
+      # cleartext, so the browser is on HTTPS while this process sees
+      # HTTP. Until the range Caddy connects from is named here, this
+      # server treats that connection as unencrypted and refuses to accept
+      # a password over it. Set it to the compose network, for example
+      # BLAMEPOST_TRUSTED_PROXIES='["172.16.0.0/12"]', and confirm the
+      # range with `docker network inspect`. It governs the protocol only
+      # and never the client address that rate limits and audit rows use.
+      BLAMEPOST_TRUSTED_PROXIES: ${BLAMEPOST_TRUSTED_PROXIES:-}
+
     ports:
       - "25:25"       # inbound MX
       - "465:465"     # submission, implicit TLS
       - "587:587"     # submission, STARTTLS
       - "143:143"     # IMAP, STARTTLS
       - "4190:4190"   # ManageSieve
+      # The cleartext port carries the health check and a terminator's
+      # upstream. It takes no password: a request published to the host
+      # arrives here from the bridge gateway, which is not loopback to
+      # this server, so signing in happens on the TLS port beside it.
       - "${BLAMEPOST_HTTP_PORT:-8080}:${BLAMEPOST_HTTP_PORT:-8080}"   # webmail, admin, JMAP
-      - "${BLAMEPOST_HTTPS_PORT:-8443}:${BLAMEPOST_HTTPS_PORT:-8443}" # the same over TLS
+      - "${BLAMEPOST_HTTPS_PORT:-8443}:${BLAMEPOST_HTTPS_PORT:-8443}" # the same over TLS, and where you sign in
       # POP3 is opt-in. Publish this only with BLAMEPOST_POP3_ENABLED=true.
       # - "110:110"
       # IMAP and POP3 negotiate TLS in band, so nothing binds 993 or 995,
@@ -138,9 +174,10 @@ services:
       # listener cannot see TLS it was not part of, and treating a
       # plaintext connection from a named source as encrypted would put
       # an address check between a password and the wire. So a client
-      # that can only do implicit TLS has no route here today. Tracked
-      # upstream as blamejs#665, which asks for the implicit-TLS mode the
-      # submission listener already has on 465.
+      # that can only do implicit TLS has no route here today. What it
+      # needs is the implicit-TLS mode the submission listener already
+      # has on 465; the framework offers one on the mailbox listeners now
+      # and this image does not turn it on.
       # The tls profile below is unrelated to any of that. It publishes
       # 80 and 443 and proxies HTTP to the web interface, so it fronts
       # webmail, admin and JMAP and reaches no mail listener.
@@ -160,17 +197,21 @@ services:
     # volume starts in, where no domain is hosted yet and port 25 stays
     # shut until `blamepost init` runs: the endpoint answers degraded and
     # names the listener it is holding back, rather than reporting a
-    # server that is working as one that failed to start. A listener that
-    # was meant to bind and did not fails /readyz instead.
+    # server that is working as one that failed to start.
+    #
+    # A listener that was meant to take a port and could not is not a
+    # reading this probe produces. The start refuses on that listener,
+    # releases every port it had already taken, and the process exits, so
+    # what you get is an exited container and the bind error in
+    # `docker logs`. The check that covers it lives on `/readyz`, where
+    # it refuses with a 503 rather than reducing the verdict.
     #
     # `degraded` is NOT only a startup condition, and this probe cannot
     # tell you which kind you have. The endpoint answers 200 for every
     # degraded reading, so Docker calls the container healthy in all of
-    # them. Five checks can produce one: the message store, a listener
-    # that failed to bind, a listener deliberately held back, the
-    # certificate, and the outbound queue. The last two are the ones that
-    # matter here, because both are slow failures a container runtime
-    # will never surface for you:
+    # them, and the response names every check that produced it. Two of
+    # those checks are the ones that matter here, because both are slow
+    # failures a container runtime will never surface for you:
     #
     #   certificate  inside its expiry window, or already expired. The
     #                server keeps working until the moment it does not,
@@ -181,7 +222,7 @@ services:
     #                sweep is not armed, or this build cannot reach the
     #                wire at all.
     #
-    # Neither is critical on either tier, deliberately: a restart does
+    # Neither is critical on either probe, deliberately: a restart does
     # not drain a queue and does not renew a certificate, so failing the
     # probe would ask a supervisor to do the one thing that cannot help.
     # That is the right call for the probe and it puts the burden on you.
@@ -190,6 +231,10 @@ services:
     # `GET /readyz` returns the reading with each check named; the
     # operator guide's "When the queue stops moving" and "When a renewal
     # stops running" cover what to do about each.
+    #
+    # A 503 from this endpoint means the message store did not answer. It
+    # is the one check that refuses here rather than reducing the
+    # verdict, and it is the one condition a restart can address.
     healthcheck:
       test:
         - CMD

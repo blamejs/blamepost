@@ -250,7 +250,12 @@ function archivingAndPurging(cli, root, passFile, cutIso) {
 // row the chain still holds cannot be purged: the next event would have
 // no row to attach to, and the boot-time rollback check would find a
 // recorded counter the emptied table cannot match.
-function purgingTheWholeChainIsRefused(cli, root, passFile) {
+//
+// The exit code is half the case. The other half is the volume itself,
+// opened afterwards the way the next boot opens it, because a purge that
+// takes the row this volume's record names leaves an open that refuses
+// and stays refused, and an exit code cannot say whether that happened.
+async function purgingTheWholeChainIsRefused(cli, root, passFile, cfg) {
   var out = nodePath.join(root, "whole-chain-archive");
   var future = new Date(Date.now() + 3600000).toISOString();
   var made = cli(["audit", "archive", "--out", out, "--before", future,
@@ -271,6 +276,19 @@ function purgingTheWholeChainIsRefused(cli, root, passFile) {
   count("and the chain is still there afterwards",
     after !== null && after.ok === true && after.chain.rowsVerified > 0,
     JSON.stringify(after && after.chain).slice(0, 200));
+
+  // Opened for writing, which is the open the next boot makes and the
+  // one that holds the rows against the record beside them. A read-only
+  // report can answer over a volume this open refuses.
+  var opened      = null;
+  var openRefusal = null;
+  try { opened = await store.open(cfg); }
+  catch (e) { openRefusal = (e && e.message) || String(e); }
+  var anchorSeen = opened === null ? null : opened.auditAnchor;
+  if (opened !== null) opened.close();
+  count("and the volume still opens, holding its rows against the record beside them",
+    openRefusal === null && anchorSeen !== null && anchorSeen.checked === true,
+    openRefusal || JSON.stringify(anchorSeen));
 }
 
 // The trail is only useful if somebody can read it, and SECURITY.md
@@ -462,7 +480,7 @@ async function run() {
     exportingASliceForAnAuditor(cli, root, passFile, wrongPassFile);
     var archiveDir = archivingAndPurging(cli, root, passFile, cutIso);
     theReasonLandsInItsOwnColumn(cli);
-    purgingTheWholeChainIsRefused(cli, root, passFile);
+    await purgingTheWholeChainIsRefused(cli, root, passFile, cfg);
 
     await breakTheChain(cfg);
     theBreakIsNamed(cli);

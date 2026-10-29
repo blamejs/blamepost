@@ -89,6 +89,11 @@ var { spawnSync } = require("node:child_process");
 // its first step.
 var b = require("../lib/vendor/blamejs");
 
+// The one reader and writer of the published-count contract. Composed rather
+// than written by hand here, so the definition of a refusable zero is the same
+// one every caller of this gate applies to what it publishes.
+var examinedCounts = require("./examined-counts.js");
+
 var ROOT_DEFAULT = path.resolve(__dirname, "..");
 
 var LABEL = "[node-floor] ";
@@ -183,7 +188,8 @@ var FLOOR_DOCUMENTS = ["README.md", "CONTRIBUTING.md", "LTS-CALENDAR.md"];
 
 // Where the floor-statement sweep looks. The repository root is included as
 // files only; these are the directories walked below it.
-var SWEEP_DIRS = [".github", "bin", "docker", "docs", "lib", "release-notes", "scripts", "test"];
+var SWEEP_DIRS = [".clusterfuzzlite", ".github", "bin", "docker", "docs", "fuzz",
+  "lib", "release-notes", "scripts", "test"];
 var SWEEP_EXT_RE   = /\.(?:js|mjs|cjs|md|ya?ml|json|toml|sh|html|css|txt)$/;
 var SWEEP_NAME_RE  = /^(?:Dockerfile|NOTICE|LICENSE|\.nvmrc)$/;
 
@@ -196,8 +202,16 @@ var SWEEP_EXCLUSIONS = [
     reason: "the vendored framework declares its own engine floor and is replaced wholesale by the vendor refresh",
   },
   {
-    match:  /^package-lock\.json$/,
-    reason: "generated, and it records the engine ranges of development packages rather than this project's floor",
+    match:  /(?:^|\/)package-lock\.json$/,
+    reason: "generated, and it records the engine ranges of development packages rather than this project's floor. Matched at every depth, because the fuzz harness toolchain has a lockfile of its own and it records jazzer.js's floor rather than this repository's",
+  },
+  {
+    match:  /^fuzz\/[^/]+_seed_corpus\//,
+    reason: "fuzz seeds are wire bytes rather than prose, and libFuzzer writes its own entries into these directories during a run, so what is under them is not a fixed set anyone authored",
+  },
+  {
+    match:  /(?:^|\/)node_modules\//,
+    reason: "third-party packages state their own engine floors, and this gate answers for the floor this repository declares. Matched at every depth, because the fuzz harness installs its toolchain under a directory of its own. Only the filesystem fallback ever reaches this: the tracked-file discovery asks git, which never lists an ignored path, and without the exclusion the fallback reported a dozen findings out of third-party readme files that the tracked walk cannot see. The two discoveries still do not answer about the same tree, because the fallback walks every ignored directory as well and this removes only the largest of them, so treat a fallback verdict as advisory. The tracked walk is the gate",
   },
 ];
 
@@ -857,27 +871,58 @@ function formatFinding(f) {
 // WHAT THE RUN EXAMINED, published as the last lines of stdout on every path
 // that reaches a verdict:
 //
-//   EXAMINED <n> floor-references
+//   EXAMINED <n> workflow-floor-references
+//   EXAMINED <n> container-floor-references
+//   EXAMINED <n> document-floor-references
 //   EXAMINED <n> floor-documents
 //
-// Both, because they fail independently. `floor-references` is every place
-// the sweep actually compared a stated version against the declared floor:
-// workflow pins, named versions, base-image platform records, badges, prose
-// statements. A matcher that stopped matching, or a workflow directory that
-// moved, takes it to zero while the gate still prints OK over nothing.
-// `floor-documents` is the required documents the floor was found stated in,
-// and it moves on its own: the workflows can all be read correctly while the
-// document set the gate is pointed at has gone.
+// FOUR, one per discovery, because a discovery is what stops matching and a
+// sum hides the one that did. These numbers used to be added together into a
+// single `floor-references`, and that unit could not refuse the fault it
+// existed to catch: the workflow sweep going to zero, which is a moved
+// `.github/workflows` or a `node-version:` matcher that stopped matching, left
+// the total at twenty-five out of thirty-eight and the gate printed OK. A unit
+// that can be carried by the ones beside it answers for none of them.
+//
+// The split follows the three parts of the tree the sweep reads, since those
+// are the three ways a walk can be pointed somewhere the references no longer
+// are. `workflow-floor-references` is the workflow directory: version pins and
+// named versions. `container-floor-references` is the container surface: the
+// platform records the base images carry. `document-floor-references` is the
+// prose: badges and floor statements. `floor-documents` is the required
+// documents the floor was found stated in, and it moves on its own again: the
+// three sweeps above can all read correctly while the document set the gate is
+// pointed at has gone.
+//
+// Badges and statements share a unit rather than splitting further, because a
+// repository can legitimately carry no badge and the number that would then go
+// to zero is not a fault. Every other unit here is a set this repository cannot
+// empty without that being the finding, so no unit below can be carried by
+// another one.
 //
 // In --json mode the same numbers already ride inside the document as
 // `counts`, so the lines are not appended there: that stdout carries the
 // document alone for a caller that parses it.
-function _publishExamined(counts) {
+function _examinedUnits(counts) {
   var c = counts || {};
-  var references = (c.workflowPins || 0) + (c.workflowMentions || 0) +
-    (c.baseRecords || 0) + (c.badges || 0) + (c.statements || 0);
-  process.stdout.write("EXAMINED " + references + " floor-references\n");
-  process.stdout.write("EXAMINED " + (c.floorDocuments || 0) + " floor-documents\n");
+  return [
+    { unit: "workflow-floor-references",
+      n: (c.workflowPins || 0) + (c.workflowMentions || 0) },
+    { unit: "container-floor-references", n: c.baseRecords || 0 },
+    { unit: "document-floor-references",
+      n: (c.badges || 0) + (c.statements || 0) },
+    { unit: "floor-documents", n: c.floorDocuments || 0 },
+  ];
+}
+
+// Published through the shared publisher rather than written by hand, so an
+// empty unit is refused by the one definition of a refusable zero instead of
+// being emitted as a line every caller is right to reject. The return is the
+// publisher's verdict, which a caller folds into its own: a run that found
+// findings keeps its exit 1, and a run that found none but examined nothing
+// takes one.
+function _publishExamined(counts) {
+  return examinedCounts.publish(_examinedUnits(counts), { tag: LABEL.trim() });
 }
 
 function main(argv) {
@@ -929,8 +974,10 @@ function main(argv) {
     " workflow(s), " + c.baseArgs + " base image(s) carrying " + c.baseRecords + " platform record(s), " +
     c.badges + " badge(s), " + c.statements + " floor statement(s) including " +
     c.floorDocuments + " of " + FLOOR_DOCUMENTS.length + " required document(s).\n");
-  _publishExamined(c);
-  return 0;
+  // The publisher's verdict IS the verdict when nothing else objected: a sweep
+  // that compared no reference has a clean answer covering no part of the tree,
+  // and that is the fault this gate is most likely to develop quietly.
+  return _publishExamined(c);
 }
 
 module.exports = {
@@ -938,6 +985,11 @@ module.exports = {
   cmpVersion:          cmpVersion,
   FLOOR_DOCUMENTS:     FLOOR_DOCUMENTS,
   SWEEP_EXCLUSIONS:    SWEEP_EXCLUSIONS,
+  // Exported so the split can be asserted directly. Which references land in
+  // which unit is the whole of what the change to this gate was, and reading
+  // it back off a run's stdout would only ever confirm the numbers this tree
+  // happens to hold today rather than the rule that put them there.
+  _examinedUnits:      _examinedUnits,
 };
 
 if (require.main === module) process.exit(main(process.argv.slice(2)));

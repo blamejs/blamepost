@@ -334,10 +334,32 @@ function _standInStore(deliverable) {
       }
       return { deliverable: false, local: true, reason: "no-such-mailbox", targets: [] };
     },
-    accounts: { authenticate: async function () { return { ok: false, reason: "credentials-rejected" }; } },
-    domains:  { list: async function () {
-      return [{ domain: DOMAIN, status: "active", dnsAcknowledged: true }];
-    } },
+    accounts: {
+      authenticate: async function () { return { ok: false, reason: "credentials-rejected" }; },
+      // Read for every command a signed-in session sends, which this
+      // file's MX listener never has: inbound mail carries no credential.
+      // It answers for the one mailbox `resolve` above calls deliverable
+      // and for nothing else, so the two verbs cannot disagree about
+      // which addresses exist here.
+      get: function (idOrAddress) {
+        var asked = String(idOrAddress).toLowerCase();
+        if (!deliverable || (asked !== "acct" && asked !== deliverable)) return null;
+        return {
+          id: "acct", address: deliverable, domain: DOMAIN,
+          status: "active", isAdmin: false,
+        };
+      },
+    },
+    domains:  {
+      list: async function () {
+        return [{ domain: DOMAIN, status: "active", dnsAcknowledged: true }];
+      },
+      get: function (domain) {
+        return String(domain).toLowerCase() === DOMAIN
+          ? { domain: DOMAIN, status: "active", dnsAcknowledged: true }
+          : null;
+      },
+    },
     aliases:  { list: function () { return []; } },
   };
 }

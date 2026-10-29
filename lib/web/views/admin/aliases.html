@@ -45,6 +45,12 @@
           <td class="row-actions">
             <form method="post" action="/admin/aliases" class="inline-form">
               <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+              <input type="hidden" name="action" value="{% if a.isActive %}disable{% else %}enable{% endif %}">
+              <input type="hidden" name="id" value="{{ a.id }}">
+              <button type="submit" class="btn">{% if a.isActive %}Stop{% else %}Start{% endif %}</button>
+            </form>
+            <form method="post" action="/admin/aliases" class="inline-form">
+              <input type="hidden" name="_csrf" value="{{ csrfToken }}">
               <input type="hidden" name="action" value="remove">
               <input type="hidden" name="id" value="{{ a.id }}">
               <button type="submit" class="btn btn-danger">Remove</button>
@@ -94,9 +100,12 @@
     still sees an SPF result that matches the host handing the message over.
   </p>
   <p class="fineprint">
-    Removing deletes the row rather than disabling it, so putting one back means writing it
-    again from what you remember of it. It asks you to type the address first, and it takes one
-    leg of a fan-out at a time: an address forwarding to four people has four rows.
+    Stopping an alias keeps the row and refuses the mail. Mail to a stopped alias does not fall
+    through to the domain's catch-all, and Start puts it back in service. Removing deletes the
+    row, so putting one back means writing it again from what you remember of it, and it asks
+    you to type the address first, or the destination when the address has more than one row.
+    Both take one leg of a fan-out at a time: an address forwarding to four people has four
+    rows.
   </p>
 </section>
 {% endblock %}

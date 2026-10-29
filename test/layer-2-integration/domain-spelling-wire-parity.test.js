@@ -428,13 +428,20 @@ async function aFromHeaderSpelledAbsolutelyIsTheSameAuthor(ctx) {
   session.close();
 }
 
-// A refused submission is answered by the framework listener, which
-// writes one reply for every reason an agent handoff can fail.
-// `test/layer-2-integration/mail-submission.test.js` pins this code for
-// the author binding; it is restated here rather than re-derived so a
-// refusal that file calls the author binding and one this file calls the
-// author binding are the same reply.
-var HANDOFF_REFUSAL = /^451 4\.3\.0 /m;
+// The reply an author the account may not write draws. The refusal names
+// the code it wants rather than inheriting the listener's transient
+// default, so it is permanent: a conforming sender bounces the message to
+// whoever wrote it instead of retrying one that will be refused
+// identically. `5.7.1` is the authorization half of the pair, for a
+// header that is well formed and names an address this account does not
+// hold; a header block that cannot be read as a single author draws
+// `550 5.6.0` instead.
+//
+// `test/layer-2-integration/mail-submission.test.js` pins this for the
+// author binding. It is restated here rather than re-derived so a refusal
+// that file calls the author binding and one this file calls the author
+// binding are the same reply.
+var HANDOFF_REFUSAL = /^550 5\.7\.1 /m;
 
 // The refusal direction on the same port. A From header at a domain this
 // server hosts and this account does not hold stays refused, so the case

@@ -163,7 +163,7 @@ async function rowsFor(identity, action, domain) {
 // expects one.
 //
 // Nothing has been written when this refuses, and that is the half of
-// the claim worth asserting: the plan settles both names before the
+// the claim worth asserting: the mint settles both names before the
 // first key file is sealed, so the domain is exactly as it was.
 async function aMintNamingOneSelectorTwiceIsRefusedWithNothingWritten(identity, cfg, keyDir) {
   var domain = "one-name.example.com";
@@ -196,7 +196,7 @@ async function aMintNamingOneSelectorTwiceIsRefusedWithNothingWritten(identity, 
     keysFor(keyDir, domain).join(", ") || "(none)");
 }
 
-// The same plan on the other verb that mints. `generate` and `rotate`
+// The same refusal on the other verb that mints. `generate` and `rotate`
 // settle their names through one path, so a refusal proved on one of
 // them says nothing about the other unless the other is driven too: a
 // rotation is the mint that runs against a domain already signing, and

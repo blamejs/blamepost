@@ -1,0 +1,143 @@
+# What a fuzzing build uploads to the daemon, which is a different set from
+# what the shipped image's build uploads.
+#
+# BuildKit reads this file instead of the one in the context root whenever a
+# build names the Dockerfile beside it. It REPLACES that file rather than
+# adding to it: with this file present, not one line of `.dockerignore` at
+# the context root applies. So every exclusion that file carries is restated
+# below, and the only difference between the two is the two lines named
+# under "What the fuzzing build needs back".
+#
+# That is not a style choice about duplication.
+# test/layer-2-integration/fuzz-build-context.test.js derives the set from
+# the context root's file, subtracts those two lines, and plants a probe for
+# every pattern that remains at the context root and one directory in, then
+# renders both contexts with docker. A line dropped from here reappears as a
+# planted credential arriving at the daemon.
+#
+# Pattern syntax is Go's filepath.Match against the whole relative path, so
+# `*` never crosses a separator and a bare name reaches the context root
+# alone. Every exclusion therefore carries the `**/` prefix, which covers
+# the context root and every directory under it.
+#
+# The last line that matches a path decides it, which is what the re-include
+# at the end depends on.
+
+# What the fuzzing build needs back.
+#
+# The context root's file excludes `**/fuzz` and `**/.clusterfuzzlite`,
+# because nothing in the shipped image reads either one and a seed corpus
+# grows without bound during a local run. This build is the one that does
+# read them: `.clusterfuzzlite/Dockerfile` copies the tree and then
+# `.clusterfuzzlite/build.sh`, and that script builds every `fuzz/*.fuzz.js`
+# harness with the seed corpus and dictionary beside it. Neither line
+# appears below, which is the whole difference.
+
+# Version control and CI definitions.
+**/.git
+**/.github
+**/.gitignore
+**/.gitattributes
+
+# Editor, OS and assistant scratch.
+**/.vscode
+**/.idea
+**/.claude
+**/.playwright-mcp
+**/.DS_Store
+**/Thumbs.db
+**/desktop.ini
+
+# Maintainer-local notes and internal specs. Nothing in the build reads
+# them and they are not written for anyone running this server.
+**/CLAUDE.md
+**/AGENTS.md
+**/memory
+
+# Dependency and build output. `build.sh` runs `npm ci` inside the image
+# from `fuzz/package-lock.json`, so a developer's local install under
+# `fuzz/node_modules` is the jazzer toolchain sent through the context for
+# nothing.
+**/node_modules
+**/dist
+**/build
+**/coverage
+**/public/dist
+
+# Registry configuration. The build resolves the harness toolchain from the
+# public registry, and this file is where a registry credential lives when
+# one exists.
+**/.npmrc
+
+# Runtime state. A data directory holds live mail, account credentials and
+# sealed DKIM private keys, whether it sits at the container path or at a
+# developer's local override.
+**/data
+**/data-e2e
+**/blobs
+**/queue
+**/tlsrpt
+**/tls
+**/acme
+**/var
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite-wal
+**/*.sqlite-shm
+
+# Test fixtures, and the diagnostics the gates persist. A gate log carries
+# captured source and whole failure transcripts. The harnesses require
+# `lib/`, never `test/`.
+**/test
+**/.test-output
+**/*.log
+**/*.pid
+**/*.pid.lock
+
+# The reproducer a fuzz run writes when it finds something. libFuzzer puts
+# it in the directory the run started from, and for the documented local
+# command that is the context root.
+**/crash-*
+**/leak-*
+**/timeout-*
+**/oom-*
+**/slow-unit-*
+
+# Credential and secret material, excluded at every depth rather than in
+# the context root alone.
+#
+# .env is named because the compose stack reads the vault passphrase from
+# the environment and documents a local build from this same directory in
+# the same file. An operator who follows both halves has the passphrase
+# that seals every key on their data volume sitting in the context root.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.crt
+**/*.cert
+**/*.p12
+**/*.pfx
+**/secrets.json
+**/credentials.json
+**/id_rsa*
+**/id_ed25519*
+
+# Backup and patch artifacts.
+**/*.bak
+**/*.orig
+**/*.rej
+
+# The vendored framework is what every harness requires, and one rule above
+# reaches into it: it carries a trust anchor whose extension is on the
+# credential list. This must stay last, because the last matching line wins.
+#
+# It names the certificate shape rather than the subtree, and the difference
+# is the whole point of the line. A re-include written as `lib/vendor/**`
+# would not restore one anchor: it would cancel every exclusion above it for
+# everything under that prefix, and the environment file, private key,
+# registry configuration and database withheld everywhere else would be
+# uploaded from there.
+!lib/vendor/**/*.pem
