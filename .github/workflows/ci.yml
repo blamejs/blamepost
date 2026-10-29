@@ -120,12 +120,13 @@ jobs:
           # job ceiling. c8 makes each file run 3 to 5 times as long as
           # it does uninstrumented, because every process the file
           # starts writes a coverage report when it exits. The heaviest,
-          # cli-surface.test.js, runs for about 250 seconds
-          # uninstrumented. A file that drives the shipped image gets
-          # this budget plus the harness's image-build and health-wait
+          # cli-surface.test.js, starts a process for every documented
+          # command, and on the runner it has taken from 900 to 1200
+          # seconds. A file that drives the shipped image gets this
+          # budget plus the harness's image-build and health-wait
           # ceilings, because a cold build runs for minutes before the
           # test body starts.
-          SMOKE_FILE_TIMEOUT_MS: "1500000"
+          SMOKE_FILE_TIMEOUT_MS: "2400000"
           # The runner holds only the files that drive the shipped image
           # behind a container engine, and this makes an absent engine
           # refuse the run rather than report those files as skipped.

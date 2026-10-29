@@ -10,6 +10,16 @@ you are moving to. This project follows
 
 ## v0.1.x
 
+### v0.1.2 — 2026-10-29
+
+The npm package carries the server released as 0.1.1
+
+0.1.1 was published as the container image `ghcr.io/blamejs/blamepost:0.1.1` and not to npm. This release publishes the same server to npm and as a container image, with no change to how it behaves. The upgrade notes for 0.1.1 apply, including the Node 24.22.1 minimum.
+
+#### Changed
+
+- **`@blamejs/blamepost` is published to npm again** — The npm registry had no package for 0.1.1. `npm install @blamejs/blamepost@0.1.2` installs the server described under 0.1.1 below. An operator running the 0.1.1 container image can move to the 0.1.2 image or stay where they are; the two run the same code.
+
 ### v0.1.1 — 2026-10-27
 
 The minimum runtime moves to Node 24.22.1, which fixes the Brotli decoder flaw CVE-2026-111497

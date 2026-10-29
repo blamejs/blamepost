@@ -205,7 +205,10 @@ async function testEmptyAnswerIsRefusedRatherThanChallengedAgain(port, caPem) {
   wire.send("x1 AUTHENTICATE PLAIN");
   await wire.read(/^\+ ?\r\n/, "the challenge");
   wire.send("");
-  var after = await wire.readQuietly("everything said after the empty answer");
+  // Read until the tagged answer rather than for a fixed window, so a
+  // slow verdict is not read as no verdict. A second challenge in its
+  // place never ends the read, and the read's own deadline fails it.
+  var after = await wire.read(/^x1 [^\r\n]*\r\n/m, "the tagged answer to the empty response");
   count("an empty answer is refused", /^x1 (NO|BAD)/m.test(after), visible(after));
   count("and it draws no second challenge", after.indexOf("+ ") === -1, visible(after));
   wire.close();
@@ -259,7 +262,10 @@ async function testSieveLiteralExchangeAuthenticates(port, caPem, address) {
   var response = plainResponse(address, ALICE_PASSWORD);
   wire.send('AUTHENTICATE "PLAIN" {' + Buffer.byteLength(response, "utf8") + "+}");
   wire.sendRaw(response + "\r\n", "<base64 response>");
-  var said = await wire.readQuietly("everything said about the exchange");
+  // Read until the verdict arrives rather than for a fixed window: the
+  // password check is an Argon2id derivation, and how long it takes
+  // depends on the host.
+  var said = await wire.read(/^(OK|NO|BYE)[^\r\n]*\r\n/m, "the verdict on the exchange");
   count("a ManageSieve client that sends its credentials as a literal is authenticated",
     said.indexOf('OK "Authenticated"') !== -1, visible(said));
   wire.close();
