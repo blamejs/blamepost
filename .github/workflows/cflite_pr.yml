@@ -157,7 +157,10 @@ jobs:
           # here. Every guard's bare-CR and bare-LF refusal and the
           # DATA-body smuggling detector are defined on those bytes, so
           # without the dictionary that whole family is unreachable.
-          libfuzzer_args=(-max_total_time="$FUZZ_TIME" -error_exitcode=1 -timeout=30)
+          # jazzer instruments every loaded module, vendored framework
+          # included, so a harness starts near 2.5 GB resident. 4096 MB
+          # sits above that baseline; libFuzzer's default is 2048.
+          libfuzzer_args=(-max_total_time="$FUZZ_TIME" -error_exitcode=1 -timeout=30 -rss_limit_mb=4096)
           if [ -f "$dict" ]; then libfuzzer_args+=(-dict="$dict"); fi
           mode="$(node fuzz/run-once.js --mode "$TARGET")"
           case "$mode" in
@@ -182,4 +185,5 @@ jobs:
             crash-*
             leak-*
             timeout-*
+            oom-*
           if-no-files-found: ignore
