@@ -48,6 +48,9 @@
  *   floor prose    Every sentence anywhere in the tree that states a Node
  *                  floor, recognized by its shape rather than by which file it
  *                  is in, so a new document cannot introduce a stale one.
+ *                  In CHANGELOG.md and release-notes/, a statement inside
+ *                  the entry for an earlier version records that release's
+ *                  floor and is not held to the current one.
  *
  * ABSENCE FAILS. Every rule above has a second half that fires when the
  * reference is gone rather than wrong: a missing .nvmrc, a workflow that sets
@@ -185,6 +188,16 @@ var FLOOR_STATEMENT_RES = [
 // is as much a defect as getting it wrong: a contributor guide that no longer
 // says which runtime to install sends someone to whatever their machine had.
 var FLOOR_DOCUMENTS = ["README.md", "CONTRIBUTING.md", "LTS-CALENDAR.md"];
+
+// Release-history files. A floor statement inside the entry for a version
+// other than the one package.json declares records the floor that release
+// shipped with, and is counted but not held to the current floor. A
+// statement inside the current version's entry, or above every entry, is
+// held to it like any other.
+var RELEASE_HISTORY_FILES = [
+  { match: /^CHANGELOG\.md$/,               entry: /^#{2,4}[ \t]+v?(\d+\.\d+\.\d+)\b/gm },
+  { match: /^release-notes\/[^/]+\.json$/,  entry: /"version"\s*:\s*"(\d+\.\d+\.\d+)"/g },
+];
 
 // Where the floor-statement sweep looks. The repository root is included as
 // files only; these are the directories walked below it.
@@ -487,7 +500,8 @@ function readFloor(root, findings) {
     });
     return { floor: null };
   }
-  return { floor: m[1], declared: declared.trim() };
+  var version = pkg && typeof pkg.version === "string" ? pkg.version.trim() : null;
+  return { floor: m[1], declared: declared.trim(), version: version };
 }
 
 function checkNvmrc(root, floor, findings, counts) {
@@ -774,17 +788,45 @@ function checkBadge(root, floor, findings, counts) {
   }
 }
 
-function checkFloorStatements(root, floor, findings, counts) {
+// The version entry a statement sits under in a release-history file, or
+// null when the file is not one or the statement precedes every entry.
+function historyEntryAt(markers, index) {
+  var at = null;
+  for (var i = 0; i < markers.length && markers[i].index <= index; i += 1) at = markers[i].version;
+  return at;
+}
+
+function historyMarkers(rel, text) {
+  var re = null;
+  for (var i = 0; i < RELEASE_HISTORY_FILES.length; i += 1) {
+    if (RELEASE_HISTORY_FILES[i].match.test(rel)) { re = RELEASE_HISTORY_FILES[i].entry; break; }
+  }
+  if (!re) return null;
+  var out = [];
+  re.lastIndex = 0;
+  var m;
+  while ((m = re.exec(text)) !== null) out.push({ index: m.index, version: m[1] });
+  return out;
+}
+
+function checkFloorStatements(root, floor, findings, counts, currentVersion) {
   var carriers = Object.create(null);
+  counts.historyStatements = 0;
   sweepCandidates(root).forEach(function (f) {
     var text = readTextIfPresent(f.abs);
     if (text === null) return;
+    var markers = historyMarkers(f.rel, text);
     FLOOR_STATEMENT_RES.forEach(function (re) {
       re.lastIndex = 0;
       var hit;
       while ((hit = re.exec(text)) !== null) {
         counts.statements += 1;
         carriers[f.rel] = (carriers[f.rel] || 0) + 1;
+        var entry = markers ? historyEntryAt(markers, hit.index) : null;
+        if (entry !== null && entry !== currentVersion) {
+          counts.historyStatements += 1;
+          continue;
+        }
         if (hit[1] !== floor) {
           findings.push({
             file: f.rel,
@@ -828,7 +870,7 @@ function evaluate(root) {
   checkWorkflows(root, floor, findings, counts);
   checkDockerfile(root, floor, findings, counts);
   checkBadge(root, floor, findings, counts);
-  checkFloorStatements(root, floor, findings, counts);
+  checkFloorStatements(root, floor, findings, counts, floorRead.version);
 
   findings.sort(function (x, y) {
     if (x.file !== y.file) return x.file < y.file ? -1 : 1;

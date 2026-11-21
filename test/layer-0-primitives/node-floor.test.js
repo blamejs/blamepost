@@ -156,6 +156,24 @@ function coherentTree() {
   };
 }
 
+function setPackageVersion(tree, version) {
+  var pkg = JSON.parse(tree["package.json"]);
+  pkg.version = version;
+  tree["package.json"] = JSON.stringify(pkg, null, 2) + "\n";
+}
+
+// A consolidated release-notes file with a 0.2.0 entry and a 0.1.0 entry,
+// each stating a floor in its summary.
+function releaseNotes(currentFloor, pastFloor) {
+  return JSON.stringify({
+    minor: "0.x",
+    releases: [
+      { version: "0.2.0", summary: "This release requires Node.js " + currentFloor + " or newer." },
+      { version: "0.1.0", summary: "This release requires Node.js " + pastFloor + " or newer." },
+    ],
+  }, null, 2) + "\n";
+}
+
 function materialize(root, tree) {
   Object.keys(tree).forEach(function (rel) {
     var abs = path.join(root, rel.split("/").join(path.sep));
@@ -451,6 +469,61 @@ var CASES = [
     mutate: function (t) {
       t["scripts/helper.js"] = "// The release signature needs the engine floor (Node >=" +
         OTHER_SHORT + ", OpenSSL 3.5).\n";
+    },
+  },
+  // ---- Release history ----
+  //
+  // A changelog entry and a release-notes entry for a version already
+  // published state the floor that release shipped with. Raising the floor
+  // does not make those sentences wrong, and rewriting them would falsify the
+  // record. The entry for the version package.json declares is the one that
+  // has to agree with engines.node.
+  {
+    label:  "a past release's changelog entry stating its own floor passes",
+    expect: "pass",
+    mutate: function (t) {
+      setPackageVersion(t, "0.2.0");
+      t["CHANGELOG.md"] = "# Changelog\n\n## v0.x\n\n" +
+        "### v0.2.0 — 2026-01-02\n\nThis release requires Node.js " + FLOOR + " or newer.\n\n" +
+        "### v0.1.0 — 2026-01-01\n\nThis release requires Node.js " + OTHER + " or newer.\n";
+    },
+  },
+  {
+    label:  "the current release's changelog entry stating a different floor is refused",
+    expect: "fail",
+    names:  "CHANGELOG.md",
+    mutate: function (t) {
+      setPackageVersion(t, "0.2.0");
+      t["CHANGELOG.md"] = "# Changelog\n\n## v0.x\n\n" +
+        "### v0.2.0 — 2026-01-02\n\nThis release requires Node.js " + OTHER + " or newer.\n\n" +
+        "### v0.1.0 — 2026-01-01\n\nThis release requires Node.js " + OTHER + " or newer.\n";
+    },
+  },
+  {
+    label:  "a past release's notes entry stating its own floor passes",
+    expect: "pass",
+    mutate: function (t) {
+      setPackageVersion(t, "0.2.0");
+      t["release-notes/v0.x.json"] = releaseNotes(FLOOR, OTHER);
+    },
+  },
+  {
+    label:  "the current release's notes entry stating a different floor is refused",
+    expect: "fail",
+    names:  "v0.x.json",
+    mutate: function (t) {
+      setPackageVersion(t, "0.2.0");
+      t["release-notes/v0.x.json"] = releaseNotes(OTHER, OTHER);
+    },
+  },
+  {
+    label:  "a drifted floor before any version heading in a changelog is refused",
+    expect: "fail",
+    names:  "CHANGELOG.md",
+    mutate: function (t) {
+      setPackageVersion(t, "0.2.0");
+      t["CHANGELOG.md"] = "# Changelog\n\nEvery release needs Node.js " + OTHER + " or newer.\n\n" +
+        "### v0.1.0 — 2026-01-01\n\nNothing else.\n";
     },
   },
   {

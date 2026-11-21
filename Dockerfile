@@ -77,12 +77,12 @@
 #
 #   docker run --rm --entrypoint /usr/bin/node <image>@<digest> -p process.version
 #
-# node: 26.12.1 on linux/amd64 in sha256:1ac2b87f6683faf0b4df19431bf73d0a40c5bcaa0da2073cad9f815571f593e4
-# node: 26.12.1 on linux/arm64 in sha256:1ac2b87f6683faf0b4df19431bf73d0a40c5bcaa0da2073cad9f815571f593e4
-ARG BASE_SRC=cgr.dev/chainguard/node:latest-dev@sha256:1ac2b87f6683faf0b4df19431bf73d0a40c5bcaa0da2073cad9f815571f593e4
-# node: 26.12.1 on linux/amd64 in sha256:efa14a42578e5931c351eb562ee2bed3e9c55e9abbfd683e218c88ab3889bcba
-# node: 26.12.1 on linux/arm64 in sha256:efa14a42578e5931c351eb562ee2bed3e9c55e9abbfd683e218c88ab3889bcba
-ARG BASE_RUNTIME=cgr.dev/chainguard/node:latest@sha256:efa14a42578e5931c351eb562ee2bed3e9c55e9abbfd683e218c88ab3889bcba
+# node: 26.13.1 on linux/amd64 in sha256:cd993dc8ec644f8f35e8356f6b442e807cdc5e42f303da5ce19a55d7cf660b51
+# node: 26.13.1 on linux/arm64 in sha256:cd993dc8ec644f8f35e8356f6b442e807cdc5e42f303da5ce19a55d7cf660b51
+ARG BASE_SRC=cgr.dev/chainguard/node:latest-dev@sha256:cd993dc8ec644f8f35e8356f6b442e807cdc5e42f303da5ce19a55d7cf660b51
+# node: 26.13.1 on linux/amd64 in sha256:3fb5318a58807dec0f2ece547efbe8d62c67b7b2fd91a16795b98651d6385dbe
+# node: 26.13.1 on linux/arm64 in sha256:3fb5318a58807dec0f2ece547efbe8d62c67b7b2fd91a16795b98651d6385dbe
+ARG BASE_RUNTIME=cgr.dev/chainguard/node:latest@sha256:3fb5318a58807dec0f2ece547efbe8d62c67b7b2fd91a16795b98651d6385dbe
 
 FROM ${BASE_SRC} AS src
 WORKDIR /home/node
