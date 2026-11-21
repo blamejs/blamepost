@@ -10,6 +10,16 @@ you are moving to. This project follows
 
 ## v0.1.x
 
+### v0.1.4 — 2026-11-21
+
+The vendored blamejs framework moves to 0.21.9
+
+This release carries blamejs 0.21.9 in `lib/vendor/blamejs/`. The framework's own Node floor is now 26.13.1, matching the floor 0.1.3 set, so nothing changes for an operator already running 0.1.3.
+
+#### Changed
+
+- **Vendored blamejs 0.21.9** — An HTTP/2 request whose stream closes before the response headers arrive now fails at once instead of waiting for its timeout, and a stream whose session closes mid-body fails as a truncated body. Changing the trusted keep-alive origins no longer drops pooled connections that are in use. The framework's vendored `@blamejs/pki` is 0.9.13 and its Public Suffix List is refreshed.
+
 ### v0.1.3 — 2026-11-20
 
 The minimum runtime moves to Node 26.13.1
