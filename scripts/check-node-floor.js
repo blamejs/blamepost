@@ -196,7 +196,7 @@ var FLOOR_DOCUMENTS = ["README.md", "CONTRIBUTING.md", "LTS-CALENDAR.md"];
 // held to it like any other.
 var RELEASE_HISTORY_FILES = [
   { match: /^CHANGELOG\.md$/,               entry: /^#{2,4}[ \t]+v?(\d+\.\d+\.\d+)\b/gm },
-  { match: /^release-notes\/[^/]+\.json$/,  entry: /"version"\s*:\s*"(\d+\.\d+\.\d+)"/g },
+  { match: /^release-notes\/[^/]+\.json$/,  json: true },
 ];
 
 // Where the floor-statement sweep looks. The repository root is included as
@@ -791,22 +791,73 @@ function checkBadge(root, floor, findings, counts) {
 // The version entry a statement sits under in a release-history file, or
 // null when the file is not one or the statement precedes every entry.
 function historyEntryAt(markers, index) {
+  if (markers.spans) {
+    var best = null;
+    markers.spans.forEach(function (sp) {
+      if (sp.start <= index && index <= sp.end && (!best || sp.start > best.start)) best = sp;
+    });
+    return best ? best.version : null;
+  }
   var at = null;
   for (var i = 0; i < markers.length && markers[i].index <= index; i += 1) at = markers[i].version;
   return at;
 }
 
 function historyMarkers(rel, text) {
-  var re = null;
+  var kind = null;
   for (var i = 0; i < RELEASE_HISTORY_FILES.length; i += 1) {
-    if (RELEASE_HISTORY_FILES[i].match.test(rel)) { re = RELEASE_HISTORY_FILES[i].entry; break; }
+    if (RELEASE_HISTORY_FILES[i].match.test(rel)) { kind = RELEASE_HISTORY_FILES[i]; break; }
   }
-  if (!re) return null;
+  if (!kind) return null;
+  if (kind.json) return jsonVersionSpans(text);
   var out = [];
+  var re = kind.entry;
   re.lastIndex = 0;
   var m;
   while ((m = re.exec(text)) !== null) out.push({ index: m.index, version: m[1] });
   return out;
+}
+
+// Every JSON object that carries a string "version" member, as the offsets
+// it spans. Key order inside an object does not matter: a statement belongs
+// to the innermost such object that contains it.
+function jsonVersionSpans(text) {
+  var spans = [];
+  var stack = [];
+  var lastKey = null;
+  var i = 0;
+  while (i < text.length) {
+    var c = text[i];
+    if (c === "\"") {
+      var j = i + 1;
+      var s = "";
+      while (j < text.length && text[j] !== "\"") {
+        if (text[j] === "\\") { s += text[j + 1] || ""; j += 2; continue; }
+        s += text[j];
+        j += 1;
+      }
+      var k = j + 1;
+      while (k < text.length && /\s/.test(text[k])) k += 1;
+      if (text[k] === ":") {
+        lastKey = s;
+      } else if (lastKey === "version" && stack.length > 0 && FULL_VERSION_RE.test(s)) {
+        stack[stack.length - 1].version = s;
+        lastKey = null;
+      } else {
+        lastKey = null;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (c === "{") stack.push({ start: i, version: null });
+    else if (c === "}") {
+      var o = stack.pop();
+      if (o && o.version) spans.push({ start: o.start, end: i, version: o.version });
+    }
+    if (c !== ":" && !/\s/.test(c)) lastKey = c === "{" || c === "[" || c === "," ? null : lastKey;
+    i += 1;
+  }
+  return { spans: spans };
 }
 
 function checkFloorStatements(root, floor, findings, counts, currentVersion) {

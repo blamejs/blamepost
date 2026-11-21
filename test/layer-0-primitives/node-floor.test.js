@@ -517,6 +517,35 @@ var CASES = [
     },
   },
   {
+    label:  "a past release's notes entry is recognized whatever order its keys are written in",
+    expect: "pass",
+    mutate: function (t) {
+      setPackageVersion(t, "0.2.0");
+      t["release-notes/v0.x.json"] = JSON.stringify({
+        minor: "0.x",
+        releases: [
+          { summary: "This release requires Node.js " + FLOOR + " or newer.", version: "0.2.0" },
+          { summary: "This release requires Node.js " + OTHER + " or newer.", version: "0.1.0" },
+        ],
+      }, null, 2) + "\n";
+    },
+  },
+  {
+    label:  "the current release's notes entry is held to the floor whatever order its keys are written in",
+    expect: "fail",
+    names:  "v0.x.json",
+    mutate: function (t) {
+      setPackageVersion(t, "0.2.0");
+      t["release-notes/v0.x.json"] = JSON.stringify({
+        minor: "0.x",
+        releases: [
+          { version: "0.1.0", summary: "This release requires Node.js " + FLOOR + " or newer." },
+          { summary: "This release requires Node.js " + OTHER + " or newer.", version: "0.2.0" },
+        ],
+      }, null, 2) + "\n";
+    },
+  },
+  {
     label:  "a drifted floor before any version heading in a changelog is refused",
     expect: "fail",
     names:  "CHANGELOG.md",
