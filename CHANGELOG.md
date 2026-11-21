@@ -10,6 +10,21 @@ you are moving to. This project follows
 
 ## v0.1.x
 
+### v0.1.3 — 2026-11-20
+
+The minimum runtime moves to Node 26.13.1
+
+This release requires Node 26.13.1 or newer, the current Node 26 LTS release. A host running Node 24 needs its runtime upgraded before installing or starting this version. The published container image runs Node 26.13.1 on both linux/amd64 and linux/arm64, so an operator running the image has nothing to change.
+
+#### Changed
+
+- **`engines.node` is `>=26.13.1`** — npm refuses to install the package on an older runtime when `engine-strict` is set, and warns otherwise. Upgrade Node to 26.13.1 or newer before running `npm install @blamejs/blamepost@0.1.3`. `.nvmrc` names the same version, so `nvm use` in a checkout selects it.
+- **The container image is rebuilt on Node 26.13.1** — Both Chainguard base images are pinned to new digests carrying Node 26.13.1, up from 26.12.1, on linux/amd64 and linux/arm64.
+
+#### Migration
+
+- **Upgrade the host runtime before upgrading the package** — Run `node --version` on the host. If it prints anything below `v26.13.1`, install Node 26.13.1 or a later 26.x release, then upgrade the package. An operator running `ghcr.io/blamejs/blamepost` pulls the 0.1.3 image and does nothing else.
+
 ### v0.1.2 — 2026-10-29
 
 The npm package carries the server released as 0.1.1

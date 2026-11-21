@@ -6,7 +6,7 @@
 
 <a href="https://github.com/blamejs/blamepost/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/blamejs/blamepost/ci.yml?branch=main&label=CI" alt="CI status"></a>
 <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
-<a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D24.22.1-2ea043" alt="Node.js 24.22.1 or newer"></a>
+<a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D26.13.1-2ea043" alt="Node.js 26.13.1 or newer"></a>
 <a href="https://slsa.dev"><img src="https://slsa.dev/images/gh-badge-level3.svg" alt="SLSA Level 3"></a>
 <a href="#vendoring"><img src="https://img.shields.io/badge/runtime%20deps-0-2ea043" alt="Zero runtime dependencies"></a>
 <a href="#security"><img src="https://img.shields.io/badge/crypto-PQC--first-d946ef" alt="PQC-first cryptography"></a>
@@ -200,7 +200,7 @@ server reads its own socket as cleartext, and the sign-in post is refused.
 ### Without a container
 
 The server is a plain Node process and runs directly on a host with Node.js
-24.22.1 or newer:
+26.13.1 or newer:
 
 ```bash
 git clone https://github.com/blamejs/blamepost.git
@@ -458,7 +458,7 @@ found by your monitoring rather than by the person whose message never arrived.
 
 ## Requirements
 
-- **Node.js 24.22.1 or newer**, or Docker. Nothing is transpiled; the source in
+- **Node.js 26.13.1 or newer**, or Docker. Nothing is transpiled; the source in
   the repository is the code the runtime executes. The server does not start
   on an OpenSSL older than 3.4.8, 3.5.9, 3.6.5 or 4.0.3 on its release line.
   The Node.js release binaries bundle a newer one; a Node built against a
