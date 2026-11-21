@@ -71,7 +71,7 @@ node scripts/check-operator-prose.js
 SMOKE_REQUIRE_CONTAINER=1 node test/smoke.js
 ```
 
-**Requirements:** Node.js 24.22.1 or newer, which is the version `engines.node`,
+**Requirements:** Node.js 26.13.1 or newer, which is the version `engines.node`,
 `.nvmrc` and every workflow pin state. Nothing is transpiled, so the source
 in the repository is the code the runtime executes. Binding ports below 1024
 locally needs root or `CAP_NET_BIND_SERVICE`; the test suite uses ephemeral

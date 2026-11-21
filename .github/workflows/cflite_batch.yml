@@ -101,10 +101,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Node 24.22.1 LTS
+      - name: Set up Node 26.13.1 LTS
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: '24.22.1'
+          node-version: '26.13.1'
 
       - name: Install jazzer.js
         run: npm ci --prefix fuzz
@@ -120,7 +120,10 @@ jobs:
           dict="fuzz/${TARGET}.dict"
           corpus_args=()
           if [ -d "$corpus" ]; then corpus_args+=("$corpus"); fi
-          libfuzzer_args=(-max_total_time="$FUZZ_TIME" -error_exitcode=1 -timeout=30)
+          # jazzer instruments every loaded module, vendored framework
+          # included, so a harness starts near 2.5 GB resident. 4096 MB
+          # sits above that baseline; libFuzzer's default is 2048.
+          libfuzzer_args=(-max_total_time="$FUZZ_TIME" -error_exitcode=1 -timeout=30 -rss_limit_mb=4096)
           if [ -f "$dict" ]; then libfuzzer_args+=(-dict="$dict"); fi
           # cflite_pr.yml says what the mode is and why it is asked per
           # harness.
@@ -147,4 +150,5 @@ jobs:
             crash-*
             leak-*
             timeout-*
+            oom-*
           if-no-files-found: ignore
