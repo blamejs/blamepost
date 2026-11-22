@@ -775,6 +775,23 @@ async function testAddress() {
     leadingPlus.ok && leadingPlus.address === "+tagonly@example.com" && leadingPlus.tag === null,
     leadingPlus.address);
 
+  // A local part that is valid with its tag and is not valid without it.
+  // The mailbox left after the tag comes off is an address of its own, so
+  // it is checked as one: a canonical address parse would itself refuse
+  // can never be typed back in to reach the mailbox it names.
+  ["alice.+news@example.com", "alice.+@example.com", "a.+.b@example.com"].forEach(function (x) {
+    var verdict = addresses.parse(x);
+    count("blamepost.store.address.parse refuses " + x + ", whose mailbox part ends in a dot",
+      verdict.ok === false && verdict.reason === "address-refused", JSON.stringify(verdict));
+  });
+  var stillTagged = ["alice+news@example.com", "a+.b@example.com", "a++b@example.com"];
+  stillTagged.forEach(function (x) {
+    var verdict = addresses.parse(x);
+    count("blamepost.store.address.parse still reads " + x + " and its canonical form reads back",
+      verdict.ok === true && addresses.parse(verdict.address).address === verdict.address,
+      JSON.stringify(verdict));
+  });
+
   count("blamepost.store.address.parse refuses an IP literal",
     addresses.parse("user@[10.0.0.1]").ok === false);
   count("blamepost.store.address.parse refuses two at signs",
@@ -1202,6 +1219,11 @@ async function testAliases(handle) {
     sales.destination === "alice+sales@example.com");
   count("blamepost.store.aliases.add remembers the untagged mailbox",
     sales.destinationMailbox === "alice@example.com");
+
+  await refuses("blamepost.store.aliases.add refuses a destination whose mailbox part ends in a dot",
+    "store/bad-address", function () {
+      return handle.aliases.add({ address: "orders@example.com", destination: "alice.+x@example.com" });
+    });
 
   await refuses("blamepost.store.aliases.add refuses the same pair twice", "store/alias-exists",
     function () {

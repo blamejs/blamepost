@@ -144,6 +144,44 @@ async function aGroupDoesNotPutItsSyntaxInsideAHostField(session) {
     envelope.indexOf("\"Team: a\"") === -1, visible(envelope));
 }
 
+// An angle address written inside a comment after the real one. RFC
+// 5322 section 3.2.2 makes a comment text, and the submission reader
+// takes the address before it; an ENVELOPE cut at the last `<` anywhere
+// names the address in the comment instead, and a client replies to it.
+async function anAddressInsideACommentIsNotTheAuthor(session) {
+  var message = [
+    "From: Alice <" + AUTHOR + "> (<ceo@bank.example>)",
+    "To: alice@" + DOMAIN,
+    "Subject: comment after the address",
+    "Date: Sat, 23 Aug 2026 12:00:00 +0000",
+    "Message-ID: <comment-angle@example.net>",
+    "",
+    "body",
+    "",
+  ].join("\r\n");
+  var reader = compose.normalizeAddress("Alice <" + AUTHOR + "> (<ceo@bank.example>)", "from");
+  count("the designated reader takes the address before the comment",
+    reader.address === AUTHOR, JSON.stringify(reader));
+
+  var appendTag = session.tag();
+  await session.sendLiteral(appendTag + " APPEND INBOX", message, "<the comment message>");
+  await session.read(new RegExp("^" + appendTag + " (OK|NO|BAD)", "m"), "APPEND answered");
+
+  var selectTag = session.tag();
+  session.send(selectTag + " SELECT INBOX");
+  await session.read(new RegExp("^" + selectTag + " (OK|NO|BAD)", "m"), "re-SELECT answered");
+
+  var fetchTag = session.tag();
+  session.send(fetchTag + " FETCH 3 (ENVELOPE)");
+  var envelope = await session.read(new RegExp("^" + fetchTag + " (OK|NO|BAD)", "m"),
+    "FETCH ENVELOPE for the comment message answered");
+
+  count("the address inside the comment is not reported as the author",
+    envelope.indexOf("\"bank.example\"") === -1, visible(envelope));
+  count("and the ENVELOPE names the address the submission reader takes",
+    envelope.indexOf("\"real\" \"" + DOMAIN + "\"") !== -1, visible(envelope));
+}
+
 async function run() {
   var root    = helpers.tempDir("imap-envelope-address-reader");
   var dataDir = nodePath.join(root, "data");
@@ -215,6 +253,7 @@ async function run() {
 
     await theEnvelopeCountsTheAuthorTheWayTheSubmissionReaderDoes(session);
     await aGroupDoesNotPutItsSyntaxInsideAHostField(session);
+    await anAddressInsideACommentIsNotTheAuthor(session);
 
     session.close();
     return helpers.getChecks();

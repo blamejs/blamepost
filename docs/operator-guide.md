@@ -1035,7 +1035,13 @@ for.
 **Sending.** `EmailSubmission/set` sends the draft `emailId` names, written as
 the identity `identityId` names. With no `envelope`, the envelope sender is the
 account's own address and the recipients are the draft's `To`, `Cc` and `Bcc`
-addresses. A submission that carries an `envelope` is sent as follows:
+addresses. If one of those fields carries a bare address before a named
+mailbox, such as `bob@example.org, Alice <alice@example.org>`, the submission is
+refused with `invalidEmail` naming the field, with or without an `envelope`:
+once encoded words are decoded, that value cannot be told apart from one
+recipient whose display name holds an address. Write each address in angle
+brackets, as in `<bob@example.org>, Alice <alice@example.org>`, and the draft is
+sent. A submission that carries an `envelope` is sent as follows:
 
 - `envelope.mailFrom` must be an address `Identity/get` lists for the account.
   Any other address is refused `forbiddenMailFrom` and recorded under

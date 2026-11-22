@@ -287,6 +287,27 @@ async function aRecipientGroupWithNoActionIsRefused(ctx) {
     JSON.stringify(after));
 }
 
+// A Final-Recipient made of zero-width spaces. It carries no control
+// byte, so the MX listener takes the message, and the display screen
+// empties it. Written as an escape so this file's own bytes stay ASCII.
+async function aRecipientThatScreensToNothingIsRefused(ctx) {
+  var before = reportsOf(ctx.server);
+  await deliver(ctx.ports.mx, ctx.caPem, POSTMASTER, report({
+    to: POSTMASTER,
+    messageId: "dsn-zero-width-recipient",
+    recipients: [{ address: "​​", action: "failed", status: "5.1.1" }],
+  }), "report-zero-width-recipient");
+  var after = await untilExamined(ctx.server, before.examined + 1,
+    "the report with a zero-width recipient is examined");
+
+  count("a recipient that screens to nothing leaves the report unread",
+    after.read === before.read, JSON.stringify(after));
+  count("and it is recorded as unreadable, with no failure counted",
+    after.byAction.failed === before.byAction.failed &&
+    after.unreadable === before.unreadable + 1,
+    JSON.stringify(after));
+}
+
 // Ordinary mail to the operator. Most of what arrives at this address is
 // this, and a reader that recorded every one of them would bury the
 // reports it exists to surface.
@@ -450,6 +471,7 @@ async function run() {
     await anUnknownActionOnTheFirstRecipientIsRefused(ctx);
     await anUnknownActionOnALaterRecipientIsRefused(ctx);
     await aRecipientGroupWithNoActionIsRefused(ctx);
+    await aRecipientThatScreensToNothingIsRefused(ctx);
     await ordinaryMailToTheReportingIdentityIsNotAReport(ctx);
     await aReportForAnAccountIsLeftAlone(ctx);
     await theReportIsStillInTheMailbox(ctx);
