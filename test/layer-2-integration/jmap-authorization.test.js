@@ -59,6 +59,8 @@ var BOB_BODY    = "zebra7741 belongs to bob and to nobody else";
 // derivation that reads only the To field drops.
 var DRAFT_TO = "buyer@peer.example";
 var DRAFT_CC = "copy@peer.example";
+var PLANTED_RECIPIENT = "planted@attacker.example";
+var BARE_RECIPIENT    = "bare@peer.example";
 var BLIND    = "hidden@peer.example";
 
 // An objectid of the store's shape that no append issued, and an
@@ -581,6 +583,48 @@ async function theSubmissionEnvelopeIsBoundToTheAccount(reader, alice, fixture, 
   count("and the message it sends carries the draft's Cc field",
     out !== null && headerOf(out.rfc822, "cc").indexOf(DRAFT_CC) !== -1, out && headerOf(out.rfc822, "cc"));
 
+  // Two drafts whose decoded To reads the same way: an address, a comma,
+  // and a named mailbox. One header lists two recipients and the other
+  // carries an address inside an encoded display name. With no envelope
+  // the server cannot tell them apart, so it derives neither: it refuses
+  // and sends nothing, rather than dropping a recipient or inventing one.
+  var ambiguous = [
+    { label: "a To display name that decodes to an address", draft: fixture.encodedDraft },
+    { label: "a bare To address before a named one", draft: fixture.bareFirstDraft },
+  ];
+  for (var a = 0; a < ambiguous.length; a += 1) {
+    var beforeAmbiguous = log.count();
+    var refusedDraft = await submit(reader, alice, { draft: ambiguous[a].draft }, undefined);
+    count("a draft with " + ambiguous[a].label + " is refused invalidEmail without an envelope",
+      refusedDraft.created === null && refusedDraft.refused !== null &&
+      refusedDraft.refused.type === "invalidEmail", JSON.stringify(refusedDraft.first[1]));
+    count("and nothing reached the outbound path for " + ambiguous[a].label,
+      log.count() === beforeAmbiguous, log.count() + " after " + beforeAmbiguous);
+  }
+  // An envelope does not settle it. The message that leaves carries To
+  // and Cc headers rebuilt from the draft's fields, so reading the field
+  // either way would still rewrite it: a listed recipient becomes a
+  // blind copy, or an address from a display name becomes a visible one.
+  var beforeNamed = log.count();
+  var named = await submit(reader, alice, { draft: fixture.bareFirstDraft }, {
+    mailFrom: address(ALICE), rcptTo: [address(BARE_RECIPIENT), address(DRAFT_TO)],
+  });
+  count("the same draft with an envelope naming both recipients is refused invalidEmail",
+    named.created === null && named.refused !== null && named.refused.type === "invalidEmail",
+    JSON.stringify(named.first[1]));
+  count("and nothing reached the outbound path for it",
+    log.count() === beforeNamed, log.count() + " after " + beforeNamed);
+
+  // Written with the bare address in angle brackets, the field reads one
+  // way only, and the draft is sent to both.
+  var bracketed = await submit(reader, alice, { draft: fixture.bracketedDraft }, undefined);
+  count("the draft with both recipients in angle brackets is created",
+    bracketed.created !== null, JSON.stringify(bracketed.first[1]));
+  out = log.last();
+  count("and it goes to both of them",
+    out !== null && out.to.slice().sort().join(",") === [BARE_RECIPIENT, DRAFT_TO].sort().join(","),
+    out && JSON.stringify(out.to));
+
   var explicit = await submit(reader, alice, fixture, {
     mailFrom: address(ALICE_ALIAS),
     rcptTo:   [address(DRAFT_TO), address(DRAFT_CC), address(BLIND)],
@@ -725,6 +769,25 @@ async function run() {
       "To: <" + DRAFT_TO + ">", "Cc: <" + DRAFT_CC + ">", "Subject: envelope draft",
       "Date: Sat, 22 Aug 2026 10:30:00 +0000", "", "draft body"]),
       { actor: { id: alice.id }, flags: ["\\Draft"] });
+    // A display name that decodes to an address and a comma. The header
+    // names one recipient, and the decoded text reads like two.
+    var plantedName = "=?UTF-8?B?" +
+      Buffer.from(PLANTED_RECIPIENT + ", Buyer", "utf8").toString("base64") + "?=";
+    var encodedDraft = identity.mailbox.appendMessage("Drafts", message([
+      "Message-ID: <alice-encoded-draft@" + DOMAIN + ">", "From: <" + ALICE + ">",
+      "To: " + plantedName + " <" + DRAFT_TO + ">", "Subject: encoded name draft",
+      "Date: Sat, 22 Aug 2026 10:31:00 +0000", "", "draft body"]),
+      { actor: { id: alice.id }, flags: ["\\Draft"] });
+    var bareFirstDraft = identity.mailbox.appendMessage("Drafts", message([
+      "Message-ID: <alice-bare-first-draft@" + DOMAIN + ">", "From: <" + ALICE + ">",
+      "To: " + BARE_RECIPIENT + ", Buyer <" + DRAFT_TO + ">", "Subject: bare first draft",
+      "Date: Sat, 22 Aug 2026 10:32:00 +0000", "", "draft body"]),
+      { actor: { id: alice.id }, flags: ["\\Draft"] });
+    var bracketedDraft = identity.mailbox.appendMessage("Drafts", message([
+      "Message-ID: <alice-bracketed-draft@" + DOMAIN + ">", "From: <" + ALICE + ">",
+      "To: <" + BARE_RECIPIENT + ">, Buyer <" + DRAFT_TO + ">", "Subject: bracketed draft",
+      "Date: Sat, 22 Aug 2026 10:33:00 +0000", "", "draft body"]),
+      { actor: { id: alice.id }, flags: ["\\Draft"] });
     var bobInbox = identity.mailbox.accountFolders({ id: bob.id })
       .filter(function (folder) { return folder.name === "INBOX"; })[0].storeName;
 
@@ -734,6 +797,9 @@ async function run() {
       bobInbox:     bobInbox,
       aliceMessage: aliceMessage.objectid,
       draft:        draft.objectid,
+      encodedDraft: encodedDraft.objectid,
+      bareFirstDraft: bareFirstDraft.objectid,
+      bracketedDraft: bracketedDraft.objectid,
     };
     count("the fixture's messages were all stored",
       [fixture.bobMessage, fixture.bobHeld, fixture.aliceMessage, fixture.draft].every(function (id) {

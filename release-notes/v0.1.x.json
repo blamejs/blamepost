@@ -5,9 +5,39 @@
     {
       "version": "0.1.4",
       "date": "2026-11-21",
-      "headline": "The vendored blamejs framework moves to 0.21.9",
-      "summary": "This release carries blamejs 0.21.9 in `lib/vendor/blamejs/`. The framework's own Node floor is now 26.13.1, matching the floor 0.1.3 set, so nothing changes for an operator already running 0.1.3.",
+      "headline": "Webmail, JMAP and IMAP show the sender the submission check reads, and blamejs moves to 0.21.9",
+      "summary": "Webmail, JMAP and the IMAP ENVELOPE now read a From header with the same reader the submission listener checks authors with, so an address written inside a comment is no longer shown as the sender. The delivery report reader refuses a report whose recipient is made of control or invisible characters, and an address whose mailbox part ends in a dot once its tag is removed is refused. The vendored framework is blamejs 0.21.9, whose Node floor is 26.13.1, the floor 0.1.3 set.",
       "sections": [
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "The sender shown is the sender the submission check reads",
+              "body": "The IMAP ENVELOPE, the webmail folder list and conversation page, and JMAP `Email/get` cut each address at the last `<` they found, including one inside a comment. `From: Alice <alice@example.net> (<ceo@bank.example>)` was shown as `ceo@bank.example`, while the submission listener's author check reads `alice@example.net`. All three now read the header with `compose.splitAddressHeader` and `compose.normalizeAddress`. Mail that reaches a mailbox without passing the MX checks, through IMAP `APPEND`, JMAP import or a domain in DMARC monitor mode, could carry this shape."
+            },
+            {
+              "title": "A JMAP submission no longer sends to an address inside a display name",
+              "body": "`EmailSubmission/set` without an `envelope` derives the recipients from the draft's `To`, `Cc` and `Bcc`. Those values arrive with encoded words decoded, and the splitter cut at every comma, so a display name such as `=?UTF-8?B?...?= <buyer@example.org>` that decoded to `planted@example.net, Buyer` added `planted@example.net` as a recipient. A field that carries an address before a named mailbox reads the same whether it lists two recipients or hides an address in an encoded name, so the submission is now refused with `invalidEmail` naming the field, with or without an `envelope`. A draft that writes each address in angle brackets, as in `<bob@example.org>, Alice <alice@example.org>`, is sent."
+            }
+          ]
+        },
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Delivery reports with an unusable recipient are refused",
+              "body": "A delivery status report sent to the reporting address whose `Final-Recipient` was made of NUL, C1, zero-width or bidirectional characters was counted as read, with a blank or altered address in `describe().reports.recent`. The reader now takes the per-recipient groups from `b.guardDsn.parse` and records such a report as unreadable. A message carrying two `message/delivery-status` parts is refused as well."
+            },
+            {
+              "title": "A tag no longer leaves an address that cannot be typed back",
+              "body": "`alice.+news@example.com` was accepted and stored under `alice.@example.com`, which is not a valid address. An address whose mailbox part is invalid once the `+` tag is removed is now refused wherever the server parses an address, including an alias destination."
+            },
+            {
+              "title": "A queued message whose recipient is not usable text is kept",
+              "body": "A queue descriptor whose recipient is whitespace-padded or made of invisible characters is no longer attempted. The message stays in the queue and `blamepost queue show <id>` prints it."
+            }
+          ]
+        },
         {
           "heading": "Changed",
           "items": [

@@ -197,9 +197,9 @@ function _angleCount(text) {
   return n;
 }
 
-function _entries(text) {
+function _entries(text, reading) {
   var entries = neverThrows("blamepost.mail.compose.splitAddressHeader", function () {
-    return compose.splitAddressHeader(text);
+    return compose.splitAddressHeader(text, reading);
   });
   holds("splitAddressHeader returns an array", Array.isArray(entries), entries);
   entries.forEach(function (entry) {
@@ -282,7 +282,7 @@ function _addressOfEntry(entry) {
 // it refuses the header before measuring anything. The order and the
 // three refusals follow `lib/mail/listeners.js`.
 function _measuredAuthors(value) {
-  var entries = _entries(value);
+  var entries = _entries(value, listeners.AUTHOR_READING);
   if (entries.length === 0) return null;
   for (var i = 0; i < entries.length; i += 1) {
     if (_angleCount(entries[i]) > 1) return null;

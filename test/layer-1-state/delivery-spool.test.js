@@ -205,6 +205,37 @@ async function aDescriptorWithNoBodyIsClearedRatherThanRetried(dataDir) {
 }
 
 // ---------------------------------------------------------------------------
+// A descriptor whose recipient is not usable text
+// ---------------------------------------------------------------------------
+
+// A recipient made of a zero-width space, or padded with whitespace,
+// is non-empty and still names no address. It is kept for the operator
+// rather than handed to the composer, which would answer it as a
+// recipient that does not exist and bounce the message to its sender.
+async function aDescriptorWhoseRecipientIsNotAnAddressIsKept(dataDir) {
+  var unusable = ["​", " bob@example.net "];
+  for (var i = 0; i < unusable.length; i += 1) {
+    var delivery = handleOn(dataDir, UNREACHABLE_MX);
+    await spoolOne(delivery);
+    var id = onlyId(dataDir);
+    var descriptor = readDescriptor(dataDir, id);
+    descriptor.recipient = unusable[i];
+    fs.writeFileSync(path.join(dataDir, "queue", id + ".json"),
+      JSON.stringify(descriptor, null, 2), "utf8");
+
+    var run = await delivery.queue.runDue({ force: true });
+    helpers.count("a descriptor naming " + JSON.stringify(unusable[i]) + " is not attempted",
+      run.results.length === 1 && run.results[0].outcome === "error" &&
+      /no usable recipient/.test(String(run.results[0].error || "")),
+      JSON.stringify(run.results));
+    check("and the message stays in the queue for the operator",
+      spoolFiles(dataDir).length === 2);
+    await delivery.queue.remove(id,
+      { reason: "clearing the fixture", notice: { withheld: "fixture-removal" } });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // A removal that lands while an attempt is running
 // ---------------------------------------------------------------------------
 
@@ -566,6 +597,10 @@ async function run() {
       function () { return anEntryIdThatDidNotComeFromHereIsRefused(freshDir("dlv-spool-id")); });
     await helpers.withTestTimeout("delivery spool: a descriptor with no body is cleared",
       function () { return aDescriptorWithNoBodyIsClearedRatherThanRetried(freshDir("dlv-spool-orphan")); });
+    await helpers.withTestTimeout("delivery spool: a recipient that is not an address is kept",
+      function () {
+        return aDescriptorWhoseRecipientIsNotAnAddressIsKept(freshDir("dlv-spool-recipient"));
+      });
     await helpers.withTestTimeout("delivery spool: a removal during an attempt stays removed",
       function () { return aRemovalDuringAnAttemptStaysRemoved(freshDir("dlv-spool-race")); });
     await helpers.withTestTimeout("delivery spool: a body with no descriptor is found",

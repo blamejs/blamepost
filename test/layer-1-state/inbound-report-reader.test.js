@@ -178,6 +178,88 @@ function aReportThatNamesNoAddressAtAllIsRefused(dataDir) {
     JSON.stringify(reportsOf(delivery)));
 }
 
+// A Final-Recipient whose value is made only of characters the display
+// screen removes, or carries one that changes what it reads as. Each is
+// written as an escape so this file's own bytes stay ASCII.
+var UNADDRESSABLE_RECIPIENTS = [
+  { label: "NUL bytes",                       value: "\u0000\u0000" },
+  { label: "C1 controls",                     value: "\u0085\u009b" },
+  { label: "zero-width spaces",               value: "​​" },
+  { label: "bidirectional controls",          value: "‮⁦" },
+  { label: "an override inside an address",   value: "bob‮@example.net" },
+];
+
+function aRecipientThatScreensToSomethingElseIsRefused(dataDir) {
+  var delivery = deliveryOn(dataDir, POSTMASTER);
+  UNADDRESSABLE_RECIPIENTS.forEach(function (c) {
+    var verdict = delivery.reports.receive(dsn.report({
+      to: POSTMASTER,
+      recipients: [{ address: c.value, action: "failed", status: "5.1.1" }],
+    }), { arrivedFor: POSTMASTER });
+    count("a Final-Recipient carrying " + c.label + " is refused",
+      verdict.read === false && verdict.reason === "unreadable", JSON.stringify(verdict));
+  });
+  count("none of them is counted as a failure, and each is counted unreadable",
+    reportsOf(delivery).byAction.failed === 0 &&
+    reportsOf(delivery).unreadable === UNADDRESSABLE_RECIPIENTS.length,
+    JSON.stringify(reportsOf(delivery)));
+}
+
+// A quoted local part may hold a semicolon (RFC 5321 section 4.1.2). The
+// type tag comes off once, so the address is recorded whole rather than
+// cut a second time at the semicolon inside the quotes.
+function aQuotedSemicolonInTheRecipientIsKept(dataDir) {
+  var delivery = deliveryOn(dataDir, POSTMASTER);
+  var quoted = "\"a;b\"@example.com";
+  var verdict = delivery.reports.receive(dsn.report({
+    to: POSTMASTER,
+    recipients: [{ address: quoted, action: "failed", status: "5.1.1" }],
+  }), { arrivedFor: POSTMASTER });
+  count("a report naming a quoted local part with a semicolon is read",
+    verdict.read === true, JSON.stringify(verdict));
+  var rows = delivery.reports.recent();
+  var row = rows.length ? rows[rows.length - 1] : null;
+  count("and the recipient is recorded as the report named it",
+    row !== null && row.recipients && row.recipients[0] &&
+    row.recipients[0].recipient === quoted, JSON.stringify(row));
+}
+
+// A delivery status part over 256 KiB and inside the 1 MiB a report is
+// read up to. The size limit is the reader's, so a part this large is
+// read rather than recorded as unreadable.
+function aLargeDeliveryStatusPartInsideTheLimitIsRead(dataDir) {
+  var delivery = deliveryOn(dataDir, POSTMASTER);
+  var padding = [];
+  var filler = new Array(901).join("a");
+  for (var i = 0; i < 320; i += 1) padding.push("X-Padding-" + i + ": " + filler);
+  var text = oneFailedReport(POSTMASTER).replace("Reporting-MTA: dns; relay.example.net\r\n",
+    "Reporting-MTA: dns; relay.example.net\r\n" + padding.join("\r\n") + "\r\n");
+  count("the padded report is over 256 KiB and under 1 MiB",
+    text.length > 256 * 1024 && text.length < 1024 * 1024, String(text.length));
+  var verdict = delivery.reports.receive(text, { arrivedFor: POSTMASTER });
+  count("a delivery status part over 256 KiB and inside the limit is read",
+    verdict.read === true, JSON.stringify(verdict));
+}
+
+// RFC 3462 gives a report one delivery status part. A message carrying two
+// is refused rather than read from whichever part one parser happens to
+// keep.
+function aReportWithTwoDeliveryStatusPartsIsRefused(dataDir) {
+  var delivery = deliveryOn(dataDir, POSTMASTER);
+  var one = dsn.report({
+    to: POSTMASTER,
+    recipients: [{ address: "first@example.net", action: "failed", status: "5.1.1" }],
+  });
+  var statusPart = "--rpt-boundary-1\r\nContent-Type: message/delivery-status\r\n\r\n" +
+    "Reporting-MTA: dns; relay.example.net\r\n\r\n" +
+    "Final-Recipient: rfc822; second@example.net\r\nAction: failed\r\nStatus: 5.1.1\r\n\r\n";
+  var two = one.replace("--rpt-boundary-1\r\nContent-Type: message/rfc822", statusPart +
+    "--rpt-boundary-1\r\nContent-Type: message/rfc822");
+  var verdict = delivery.reports.receive(two, { arrivedFor: POSTMASTER });
+  count("a report carrying two delivery status parts is refused",
+    verdict.read === false && verdict.reason === "unreadable", JSON.stringify(verdict));
+}
+
 // A message carrying a delivery status part under a top level type that
 // does not declare it a report. It is claiming to be a report by
 // carrying the part, so it is read as one and refused, rather than
@@ -465,6 +547,10 @@ async function readerCases() {
     aMessageTooBigToBeAReportIsRecordedRatherThanParsed(freshDir("rpt-oversize"));
     aReportNamingMoreAddressesThanAnybodyHasIsRefused(freshDir("rpt-many"));
     aReportThatNamesNoAddressAtAllIsRefused(freshDir("rpt-none"));
+    aRecipientThatScreensToSomethingElseIsRefused(freshDir("rpt-screened"));
+    aReportWithTwoDeliveryStatusPartsIsRefused(freshDir("rpt-two-parts"));
+    aLargeDeliveryStatusPartInsideTheLimitIsRead(freshDir("rpt-large-status"));
+    aQuotedSemicolonInTheRecipientIsKept(freshDir("rpt-quoted-semicolon"));
     aDeliveryStatusPartUnderTheWrongTopLevelTypeIsRefused(freshDir("rpt-wrong-type"));
     aReportCarryingOctetsThatAreNotUtf8IsRefused(freshDir("rpt-not-utf8"));
     aRefusalQuotingAControlTheTerminalActsOnIsScreened(freshDir("rpt-c1-reason"));

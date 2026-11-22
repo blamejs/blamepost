@@ -3107,6 +3107,11 @@ var SITE_EXCEPTIONS = [{
   reason:   "the reconciler removes a body only after re-reading the rows immediately before " +
             "the unlink and only once the body has been unreferenced longer than an append " +
             "can take, which is the pair of checks a third site would not carry",
+}, {
+  detector: "address-angle-cut-outside-the-composer",
+  site:     "lib/mail/compose.js",
+  reason:   "the composer owns the one RFC 5322 address reader, which tracks quoted strings, " +
+            "comments and angle pairs together; every other reader composes it",
 }];
 
 // Directory-level exceptions, printed in the summary so an exclusion is
@@ -4467,6 +4472,49 @@ var DETECTORS = [
     ],
     green: [
       "function notifyOperator(env) {\n  return outbound.deliver(env);\n}\n",
+    ],
+  },
+
+  {
+    name: "address-angle-cut-outside-the-composer",
+    description:
+      "An address header or mailbox entry cut at an angle bracket by hand. RFC 5322 lets a " +
+      "comment and a quoted display name carry brackets of their own, so a reader that finds " +
+      "`<` without tracking both names a different address from the one the submission " +
+      "binding measured: `Alice <alice@example.net> (<ceo@bank.example>)` is shown as " +
+      "ceo@bank.example. Compose compose.splitAddressHeader and compose.normalizeAddress.",
+    dirs: ["lib", "bin"],
+    scan: (function () {
+      var match = _lineMatcher(/(?:lastIndexOf|indexOf)\(\s*"<"\s*\)|===\s*"<"/, "code");
+      return function (file) {
+        if (file.rel === "lib/mail/compose.js") return [];
+        return match(file);
+      };
+    })(),
+    red: [
+      "function hostOf(entry) {\n  var open = entry.lastIndexOf(\"<\");\n  return entry.slice(open + 1);\n}\n",
+      "function scan(c) {\n  if (c === \"<\") { inAngle = true; }\n}\n",
+    ],
+    green: [
+      "function hostOf(entry) {\n  return compose.normalizeAddress(entry, \"from\").address;\n}\n",
+    ],
+  },
+
+  {
+    name: "dsn-groups-read-past-the-wire-guard",
+    description:
+      "RFC 3464 per-recipient groups read from the raw group list the bounce parser returns. " +
+      "That list keeps NUL, C0 and C1 bytes inside field values, accepts a field line with " +
+      "no colon, and does not require Status or Reporting-MTA, so a report whose recipient " +
+      "is made of control bytes reads as a report about an empty address. Read the groups " +
+      "from the per-recipient list b.guardDsn.parse returns, which refuses all of those.",
+    dirs: ["lib"],
+    scan: _lineMatcher(/\ballRecipients\b/, "code"),
+    red: [
+      "function groupsOf(parsed) {\n  return parsed.raw.allRecipients;\n}\n",
+    ],
+    green: [
+      "function groupsOf(guarded) {\n  return guarded.perRecipients;\n}\n",
     ],
   },
 

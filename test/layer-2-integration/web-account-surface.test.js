@@ -264,6 +264,52 @@ async function testAFailureBeforeAnyRouteTellsAStrangerNothing(label, reader) {
 // zero-width joiner out of an emoji sequence and the separator out of a
 // Devanagari conjunct, so a reader would be shown a message that differs
 // from the one that was sent.
+// An angle address written inside a comment after the real one. The
+// comment is text (RFC 5322 section 3.2.2); the submission binding and
+// the IMAP ENVELOPE take the address before it, and the conversation
+// page and the folder list name the same one.
+var COMMENT_ANGLE_FROM = "Alice <alice@sender.example> (<ceo@bank.example>)";
+
+async function testTheSenderShownIsTheOneTheBindingReads(reader, messageId) {
+  var page = await reader.get("/mail/" + encodeURIComponent(messageId) + "?folder=INBOX");
+  count("the conversation page for the comment message renders", page.status === 200,
+    describe(page));
+  var addr = firstGroup(page.body, LETTER_ADDR_RE);
+  count("the page names the address before the comment as the sender",
+    addr === "alice@sender.example", JSON.stringify(addr));
+
+  var listed = await reader.get("/mail?folder=INBOX");
+  var titles = allGroups(listed.body, MSG_FROM_RE);
+  count("no row in the folder list names the address inside the comment",
+    titles.filter(function (t) { return t.indexOf("bank.example") !== -1; }).length === 0,
+    JSON.stringify(titles));
+}
+
+// A display name that decodes to an address and a comma. Decoded, it
+// reads the same as a header listing a bare mailbox before a named one,
+// and the page reads both the way the IMAP ENVELOPE does: the address in
+// angle brackets is the sender, and the rest is name text, still shown.
+var DECODED_NAME_FROM = "=?UTF-8?B?" +
+  Buffer.from("Bank <ceo@bank.example>, Alice", "utf8").toString("base64") +
+  "?= <alice@sender.example>";
+
+async function testAnAddressInADecodedNameIsNotTheSender(reader, messageId) {
+  var page = await reader.get("/mail/" + encodeURIComponent(messageId) + "?folder=INBOX");
+  count("the conversation page for the decoded-name message renders", page.status === 200,
+    describe(page));
+  var addr = firstGroup(page.body, LETTER_ADDR_RE);
+  count("the page names the address in angle brackets as the sender, and only that one",
+    addr === "alice@sender.example", JSON.stringify(addr));
+  count("the decoded name text is still on the page for the reader to see",
+    page.body.indexOf("ceo@bank.example") !== -1, "absent");
+
+  var listed = await reader.get("/mail?folder=INBOX");
+  var titles = allGroups(listed.body, MSG_FROM_RE);
+  count("no row title names the address from the decoded name as a sender",
+    titles.filter(function (t) { return t.indexOf("bank.example") !== -1; }).length === 0,
+    JSON.stringify(titles));
+}
+
 async function testStrangerChosenHeaderTextIsScreened(reader, hostileId) {
   var page = await reader.get("/mail/" + encodeURIComponent(hostileId) + "?folder=INBOX");
   count("the conversation page for the hostile message renders", page.status === 200,
@@ -695,6 +741,16 @@ async function run() {
     identity.mailbox.appendMessage("INBOX",
       attachmentMessage("attached", READER), { actor: { id: reader.id } });
 
+    identity.mailbox.appendMessage("INBOX", plainMessage("decodedName",
+      DECODED_NAME_FROM, "<" + READER + ">",
+      "a display name that decodes to an address", "one author wrote it"),
+    { actor: { id: reader.id } });
+
+    identity.mailbox.appendMessage("INBOX", plainMessage("commentAngle",
+      COMMENT_ANGLE_FROM, "<" + READER + ">",
+      "an address written inside a comment", "the sender is the one before the comment"),
+    { actor: { id: reader.id } });
+
     identity.mailbox.appendMessage("INBOX", plainMessage("theirs",
       "Sender <sender@example.net>", "<" + OTHER + ">", OTHERS_SUBJECT, OTHERS_BODY),
     { actor: { id: other.id } });
@@ -723,6 +779,7 @@ async function run() {
 
     var ids = landedIds(identity, reader.id, [
       "ordinary", "hostile", "remote", "everythingElse", "commented", "attached",
+      "decodedName", "commentAngle",
     ]);
     var theirInbox = inboxOf(identity, other.id);
     var theirs = {
@@ -730,7 +787,7 @@ async function run() {
       storeFolder: theirInbox.storeFolder,
     };
     count("the fixture landed every message this file drives",
-      Object.keys(ids).length === 7 && theirs.objectId.length > 0, JSON.stringify(ids));
+      Object.keys(ids).length === 9 && theirs.objectId.length > 0, JSON.stringify(ids));
     count("the two accounts hold their inboxes in different store folders",
       theirs.storeFolder !== ids.storeFolder, theirs.storeFolder + " / " + ids.storeFolder);
 
@@ -750,6 +807,8 @@ async function run() {
     await testNoRouteSaysWhetherAnotherAccountsObjectExists(session, theirs);
     await testNoComposeFieldReachesAHeaderUnread(session);
     await testAMessageWithAFileOnItNamesTheFile(session, ids.attached);
+    await testTheSenderShownIsTheOneTheBindingReads(session, ids.commentAngle);
+    await testAnAddressInADecodedNameIsNotTheSender(session, ids.decodedName);
     await testEveryAccountWriteNeedsTheToken(origin, ca, ids.ordinary);
 
     pagesDriven = Object.keys(ids).length - 1;

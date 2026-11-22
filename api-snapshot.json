@@ -418,6 +418,14 @@
         "listeners": {
           "kind": "object",
           "members": {
+            "AUTHOR_READING": {
+              "kind": "object",
+              "members": {
+                "bareAddressIsAMailbox": {
+                  "kind": "boolean"
+                }
+              }
+            },
             "AUTH_SURFACES": {
               "kind": "object",
               "members": {
